@@ -1,0 +1,1004 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# teams - Set up, manage, and tear down team structures from templates
+#
+# Usage:
+#   teams setup <TEMPLATE> '<task>' [--name <prefix>] [--project <id>]
+#   teams setup-permanent <TEMPLATE> --project <id> [--name <prefix>] [--dry-run]
+#   teams teardown <prefix>         - Kill all workers in a team
+#   teams status <prefix>           - Show team members' terminal output
+#   teams list                      - List active teams
+#   teams templates                 - List available team templates
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+TEAMS_FILE="${SOREN_HOME}/.soren/teams.json"
+TEMPLATES_DIR="${SOREN_HOME}/docs/templates/teams"
+ROLES_DIR="${SOREN_HOME}/docs/templates/roles"
+WORKERS_TOOL="${SOREN_HOME}/tools/workers"
+
+# Source shared scanning library (used by setup-permanent)
+source "${SOREN_HOME}/tools/lib/scan-project.sh"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+#───────────────────────────────────────────────────────────────────────────────
+# Helpers
+#───────────────────────────────────────────────────────────────────────────────
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+ensure_teams_file() {
+    if [[ ! -f "$TEAMS_FILE" ]]; then
+        mkdir -p "$(dirname "$TEAMS_FILE")"
+        echo '{"teams":[]}' > "$TEAMS_FILE"
+    fi
+}
+
+team_exists() {
+    local prefix="$1"
+    jq -e --arg p "$prefix" '.teams[] | select(.prefix == $p)' "$TEAMS_FILE" > /dev/null 2>&1
+}
+
+window_exists() {
+    tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$1"
+}
+
+# Generate a short prefix from a task description
+auto_prefix() {
+    local task="$1"
+    # Take first 2-3 meaningful words, lowercase, join with dash
+    echo "$task" | tr '[:upper:]' '[:lower:]' | \
+        sed 's/[^a-z0-9 ]//g' | \
+        awk '{for(i=1;i<=NF && i<=2;i++) printf "%s-", $i}' | \
+        sed 's/-$//' | head -c 20
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Template definitions — which roles to spawn for each template
+#───────────────────────────────────────────────────────────────────────────────
+
+# Returns role definitions as lines: <suffix> <role_template_path> <role_label>
+get_template_roles() {
+    local template="$1"
+    case "$template" in
+        SOLO_WORKER)
+            echo "worker docs/WORKER_ROLE.md Worker"
+            ;;
+        SQUAD_MODEL)
+            echo "squad-lead docs/templates/roles/SQUAD_LEAD.md Squad_Lead"
+            echo "backend docs/templates/roles/FEATURE_BACKEND.md Backend"
+            echo "frontend docs/templates/roles/FEATURE_FRONTEND.md Frontend"
+            echo "tester docs/templates/roles/TESTER.md Tester"
+            echo "researcher docs/templates/roles/RESEARCHER.md Researcher"
+            ;;
+        FEATURE_TEAM)
+            echo "tech-lead docs/templates/roles/TECH_LEAD.md Tech_Lead"
+            echo "backend docs/templates/roles/FEATURE_BACKEND.md Backend"
+            echo "frontend docs/templates/roles/FEATURE_FRONTEND.md Frontend"
+            ;;
+        PLATFORM_TEAM)
+            echo "platform-lead docs/templates/roles/PLATFORM_LEAD.md Platform_Lead"
+            echo "infra docs/templates/roles/INFRA_WORKER.md Infra"
+            echo "devops docs/templates/roles/DEVOPS_WORKER.md DevOps"
+            ;;
+        TIGER_TEAM)
+            echo "tiger-a TIGER_TEAM Tiger_A"
+            echo "tiger-b TIGER_TEAM Tiger_B"
+            echo "tiger-c TIGER_TEAM Tiger_C"
+            ;;
+        DEBATE_PAIR)
+            echo "defender docs/templates/roles/DEBATE_DEFENDER.md Defender"
+            echo "critic docs/templates/roles/DEBATE_CRITIC.md Critic"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Returns the lead/coordinator role suffix for a template (empty if flat)
+get_lead_suffix() {
+    local template="$1"
+    case "$template" in
+        SQUAD_MODEL)    echo "squad-lead" ;;
+        FEATURE_TEAM)   echo "tech-lead" ;;
+        PLATFORM_TEAM)  echo "platform-lead" ;;
+        *)              echo "" ;;
+    esac
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Task construction — build the task string for each worker
+#───────────────────────────────────────────────────────────────────────────────
+
+build_worker_task() {
+    local template="$1"
+    local suffix="$2"
+    local role_template="$3"
+    local task="$4"
+    local prefix="$5"
+    local all_members="$6"  # comma-separated list of all member names
+
+    local worker_name="${prefix}-${suffix}"
+    local role_label="${suffix//-/ }"
+
+    case "$template" in
+        SOLO_WORKER)
+            echo "Read ${SOREN_HOME}/docs/WORKER_ROLE.md for your role instructions. Your task: ${task}"
+            ;;
+        SQUAD_MODEL)
+            local lead="${prefix}-squad-lead"
+            case "$suffix" in
+                squad-lead)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You lead team '${prefix}'. Team members: ${all_members}. Your task: ${task}"
+                    ;;
+                *)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are on team '${prefix}'. Report to ${lead}. Team members: ${all_members}. Your task (${role_label}): ${task}"
+                    ;;
+            esac
+            ;;
+        FEATURE_TEAM)
+            local lead="${prefix}-tech-lead"
+            case "$suffix" in
+                tech-lead)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You lead team '${prefix}'. Team members: ${all_members}. Your task: ${task}"
+                    ;;
+                *)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are on team '${prefix}'. Report to ${lead}. Team members: ${all_members}. Your task (${role_label}): ${task}"
+                    ;;
+            esac
+            ;;
+        PLATFORM_TEAM)
+            local lead="${prefix}-platform-lead"
+            case "$suffix" in
+                platform-lead)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You lead team '${prefix}'. Team members: ${all_members}. Your task: ${task}"
+                    ;;
+                *)
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are on team '${prefix}'. Report to ${lead}. Team members: ${all_members}. Your task (${role_label}): ${task}"
+                    ;;
+            esac
+            ;;
+        TIGER_TEAM)
+            # Flat team — no lead. All members know each other. Reference the team template.
+            local others
+            others=$(echo "$all_members" | tr ',' '\n' | grep -v "^${worker_name}$" | tr '\n' ',' | sed 's/,$//')
+            echo "URGENT: ${task}. You are Tiger Team member '${worker_name}'. Read ${SOREN_HOME}/docs/templates/teams/TIGER_TEAM.md. NO LEAD — coordinate directly with: ${others}. Fix fast."
+            ;;
+        DEBATE_PAIR)
+            local other_name
+            case "$suffix" in
+                defender)
+                    other_name="${prefix}-critic"
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Defender in debate team '${prefix}'. Your opponent: ${other_name}. Write proposals to .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: ${task}"
+                    ;;
+                critic)
+                    other_name="${prefix}-defender"
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Critic in debate team '${prefix}'. Your opponent: ${other_name}. Read proposals from .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: Critique the Defender's proposal for: ${task}"
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Commands
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_setup() {
+    local template=""
+    local task=""
+    local prefix=""
+    local project_id=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                [[ -z "${2:-}" ]] && die "--name requires a prefix argument"
+                prefix="$2"
+                shift 2
+                ;;
+            --project)
+                [[ -z "${2:-}" ]] && die "--project requires an ID argument"
+                project_id="$2"
+                shift 2
+                ;;
+            *)
+                if [[ -z "$template" ]]; then
+                    template="$1"
+                elif [[ -z "$task" ]]; then
+                    task="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$template" ]] && die "usage: teams setup <TEMPLATE> '<task>' [--name <prefix>] [--project <id>]"
+    [[ -z "$task" ]] && die "usage: teams setup <TEMPLATE> '<task>' [--name <prefix>] [--project <id>]"
+
+    # Normalize template name to uppercase
+    template=$(echo "$template" | tr '[:lower:]' '[:upper:]')
+
+    # Validate template
+    local roles
+    roles=$(get_template_roles "$template") || die "unknown template: $template (try 'teams templates')"
+
+    # Auto-generate prefix if not provided
+    if [[ -z "$prefix" ]]; then
+        prefix=$(auto_prefix "$task")
+        [[ -z "$prefix" ]] && prefix="team-$(date +%s | tail -c 5)"
+    fi
+
+    # Sanitize prefix
+    prefix=$(echo "$prefix" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
+
+    ensure_teams_file
+
+    # Check for existing team with this prefix
+    if team_exists "$prefix"; then
+        die "team with prefix '$prefix' already exists (use 'teams teardown $prefix' first)"
+    fi
+
+    echo ""
+    info "Setting up ${BOLD}${template}${NC} team '${prefix}'"
+    echo ""
+
+    # Build member list
+    local members=()
+    while IFS=' ' read -r suffix role_path role_label; do
+        members+=("${prefix}-${suffix}")
+    done <<< "$roles"
+
+    local all_members
+    all_members=$(IFS=','; echo "${members[*]}")
+
+    # Build project flags for workers spawn
+    local project_flags=""
+    if [[ -n "$project_id" ]]; then
+        project_flags="--project $project_id"
+    fi
+
+    # Create debate artifacts directory if needed
+    if [[ "$template" == "DEBATE_PAIR" ]]; then
+        mkdir -p "${SOREN_HOME}/.soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate"
+    fi
+
+    # All agents run on opus (Opus 4.6 only constraint)
+    local template_model="opus"
+
+    # Spawn each worker
+    local spawned=()
+    while IFS=' ' read -r suffix role_path role_label; do
+        local worker_name="${prefix}-${suffix}"
+        local worker_task
+        worker_task=$(build_worker_task "$template" "$suffix" "$role_path" "$task" "$prefix" "$all_members")
+
+        info "Spawning ${worker_name} (${role_label//_/ })..."
+
+        local spawn_flags="$project_flags"
+        [[ -n "$template_model" ]] && spawn_flags="$spawn_flags --model $template_model"
+
+        if "$WORKERS_TOOL" spawn "$worker_name" "$worker_task" $spawn_flags; then
+            ok "Spawned ${worker_name}"
+            spawned+=("$worker_name")
+        else
+            warn "Failed to spawn ${worker_name}"
+        fi
+
+        echo ""
+    done <<< "$roles"
+
+    # Record team in teams.json
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local members_json
+    members_json=$(printf '%s\n' "${spawned[@]}" | jq -R . | jq -s .)
+
+    local tmp
+    tmp=$(mktemp)
+    jq --arg prefix "$prefix" \
+       --arg template "$template" \
+       --arg task "$task" \
+       --arg now "$now" \
+       --arg project "$project_id" \
+       --argjson members "$members_json" \
+       '.teams += [{
+           prefix: $prefix,
+           template: $template,
+           task: $task,
+           members: $members,
+           project_id: $project,
+           created_at: $now
+       }]' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+
+    # Summary
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ok "Team '${prefix}' ready (${#spawned[@]} workers)"
+    echo ""
+    echo "  Template: $template"
+    echo "  Task:     $task"
+    [[ -n "$project_id" ]] && echo "  Project:  $project_id"
+    echo ""
+    echo "  Workers:"
+    while IFS=' ' read -r suffix role_path role_label; do
+        local wname="${prefix}-${suffix}"
+        if printf '%s\n' "${spawned[@]}" | grep -qx "$wname"; then
+            echo -e "    ${GREEN}●${NC} ${wname}  (${role_label//_/ })"
+        else
+            echo -e "    ${RED}●${NC} ${wname}  (${role_label//_/ }) — FAILED"
+        fi
+    done <<< "$roles"
+    echo ""
+
+    local lead
+    lead=$(get_lead_suffix "$template")
+    if [[ -n "$lead" ]]; then
+        echo "  Lead: ${prefix}-${lead}"
+        echo "  Send tasks via: ./tools/workers send \"${prefix}-${lead}\" \"[TASK] ...\""
+    elif [[ "$template" == "TIGER_TEAM" ]]; then
+        echo "  Flat team — no lead. Workers coordinate directly."
+    elif [[ "$template" == "DEBATE_PAIR" ]]; then
+        echo "  Defender starts. Artifacts: .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/"
+    fi
+    echo ""
+}
+
+cmd_teardown() {
+    local prefix="${1:-}"
+    [[ -z "$prefix" ]] && die "usage: teams teardown <prefix>"
+
+    ensure_teams_file
+
+    if ! team_exists "$prefix"; then
+        warn "No team '$prefix' in registry — will still try to kill matching workers"
+    fi
+
+    info "Tearing down team: $prefix"
+
+    # Get all tmux windows and kill those matching the prefix
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    local killed=0
+    while IFS= read -r window; do
+        if [[ "$window" == ${prefix}-* ]]; then
+            info "Killing $window..."
+            "$WORKERS_TOOL" kill "$window" 2>/dev/null && ((killed++)) || warn "Failed to kill $window"
+        fi
+    done <<< "$windows"
+
+    # Remove from teams.json
+    if team_exists "$prefix"; then
+        local tmp
+        tmp=$(mktemp)
+        jq --arg p "$prefix" '.teams |= map(select(.prefix != $p))' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+    fi
+
+    ok "Team '$prefix' torn down ($killed workers killed)"
+}
+
+cmd_status() {
+    local prefix="${1:-}"
+    local lines="${2:-15}"
+
+    [[ -z "$prefix" ]] && die "usage: teams status <prefix> [lines]"
+
+    ensure_teams_file
+
+    # Get team info from registry if available
+    local template=""
+    if team_exists "$prefix"; then
+        template=$(jq -r --arg p "$prefix" '.teams[] | select(.prefix == $p) | .template' "$TEAMS_FILE")
+        local task
+        task=$(jq -r --arg p "$prefix" '.teams[] | select(.prefix == $p) | .task' "$TEAMS_FILE")
+        echo -e "${BOLD}Team: ${prefix}${NC} (${template})"
+        echo -e "${DIM}Task: ${task}${NC}"
+        echo ""
+    fi
+
+    # Find all windows matching prefix
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    local found=0
+    while IFS= read -r window; do
+        if [[ "$window" == ${prefix}-* ]]; then
+            ((found++))
+            echo "━━━ ${window} ━━━"
+            tmux capture-pane -t "${SOREN_SESSION}:${window}" -p -S "-${lines}" 2>/dev/null || echo "(could not capture)"
+            echo ""
+        fi
+    done <<< "$windows"
+
+    if [[ $found -eq 0 ]]; then
+        warn "No workers found with prefix '$prefix'"
+    else
+        echo "Total: $found workers"
+    fi
+}
+
+cmd_list() {
+    ensure_teams_file
+
+    local count
+    count=$(jq '.teams | length' "$TEAMS_FILE")
+
+    if [[ "$count" -eq 0 ]]; then
+        echo -e "${DIM}No active teams${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Active Teams${NC}"
+    echo ""
+
+    # Get active tmux windows for checking liveness
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    jq -c '.teams[]' "$TEAMS_FILE" | while IFS= read -r team; do
+        local prefix template task members created_at
+        prefix=$(echo "$team" | jq -r '.prefix')
+        template=$(echo "$team" | jq -r '.template')
+        task=$(echo "$team" | jq -r '.task')
+        created_at=$(echo "$team" | jq -r '.created_at')
+
+        echo -e "  ${BOLD}${prefix}${NC} (${template})"
+        echo -e "  ${DIM}Task: ${task}${NC}"
+        echo -e "  ${DIM}Created: ${created_at}${NC}"
+
+        # Show members with liveness
+        echo "$team" | jq -r '.members[]' | while IFS= read -r member; do
+            if echo "$windows" | grep -qx "$member"; then
+                echo -e "    ${GREEN}●${NC} ${member}"
+            else
+                echo -e "    ${RED}●${NC} ${member} (dead)"
+            fi
+        done
+
+        echo ""
+    done
+
+    echo "Total: $count team(s)"
+}
+
+cmd_templates() {
+    echo -e "${BOLD}Available Team Templates${NC}"
+    echo ""
+    echo -e "  ${CYAN}SOLO_WORKER${NC}     1 worker       Simple, focused tasks and bug fixes"
+    echo -e "  ${CYAN}SQUAD_MODEL${NC}     5 workers      Cross-functional: lead + backend + frontend + tester + researcher"
+    echo -e "  ${CYAN}FEATURE_TEAM${NC}    3 workers      Hierarchical: tech lead + backend + frontend"
+    echo -e "  ${CYAN}PLATFORM_TEAM${NC}   3 workers      Infrastructure: platform lead + infra + devops"
+    echo -e "  ${CYAN}TIGER_TEAM${NC}      3 workers      Flat peers for urgent fixes (no lead)"
+    echo -e "  ${CYAN}DEBATE_PAIR${NC}     2 workers      Structured argument: defender + critic"
+    echo ""
+    echo -e "${DIM}Usage: teams setup <TEMPLATE> '<task description>' [--name <prefix>]${NC}"
+    echo ""
+    echo "See docs/templates/teams/ for detailed template documentation."
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# setup-permanent — Generate role files + spawn permanent team in one shot
+#───────────────────────────────────────────────────────────────────────────────
+
+# Template → list of: <suffix> <role-type> <role-label> <personality> <comm-style>
+# Fields are pipe-delimited within each line to allow spaces in personality text.
+get_permanent_roles() {
+    local template="$1"
+    case "$template" in
+        SOLO_WORKER)
+            echo "worker|fullstack|Full-Stack Engineer|Versatile and self-reliant. You switch between frontend and backend fluidly, always keeping the user experience in mind. You ship complete features, not half-solutions.|Concise progress updates. You describe what changed from the user's perspective."
+            ;;
+        SQUAD_MODEL)
+            echo "squad-lead|fullstack|Squad Lead|Decisive coordinator who keeps the team focused and unblocked. You break features into clear tasks, track progress, and make fast calls when the team is stuck. You trust your workers but stay informed.|Direct and structured. Task assignments are specific, status checks are brief, escalations include context."
+            echo "backend|backend|Backend Specialist|Methodical and data-driven. You think in API contracts, data flows, and edge cases. You write endpoints that are easy for the frontend to consume and hard to misuse. You test before you commit.|Terse and technical. You share API contracts, error codes, and test results. No fluff."
+            echo "frontend|frontend|Frontend Specialist|Detail-oriented and user-focused. You care about pixel-perfect layouts, smooth interactions, and consistent styling. You spot visual inconsistencies others miss.|Concise but precise. You describe changes in terms of what the user sees and feels."
+            echo "tester|qa|QA Engineer|Thorough and skeptical. You assume code is broken until proven working. You find the edge cases nobody thought of: empty inputs, concurrent requests, boundary conditions.|Structured test reports. Pass/fail counts, reproduction steps, confidence assessments."
+            echo "researcher|research|Researcher|Relentlessly curious and thorough. You follow threads to their end, read primary sources, and connect dots others miss. You ask the questions nobody thought to ask and dig until you find real answers. You save everything worth keeping as artifacts.|Structured research reports. You lead with the conclusion, then provide evidence. You cite sources and distinguish between confirmed facts, likely inferences, and open questions."
+            ;;
+        FEATURE_TEAM)
+            echo "tech-lead|fullstack|Tech Lead|Architecturally sharp. You own the technical design and review all implementations. You guide workers toward clean solutions and catch design flaws early.|Technical and specific. You describe patterns, trade-offs, and review feedback with precision."
+            echo "backend|backend|Backend Specialist|Reliable and API-first. You think about what the frontend needs, build endpoints that are well-documented and easy to consume, and always include tests.|Terse. API contracts, test results, blockers. Straight to the point."
+            echo "frontend|frontend|Frontend Specialist|Expressive and UX-aware. You build interfaces that feel right, not just look right. You care about responsive behavior, accessibility, and smooth state transitions.|Visual-first. You describe what changed on screen, not just what code changed."
+            ;;
+        PLATFORM_TEAM)
+            echo "platform-lead|fullstack|Platform Lead|Service-oriented and reliability-focused. You triage platform requests by impact, coordinate infra and devops workers, and keep the platform stable.|Clear and expectation-setting. You communicate timelines, risks, and dependencies."
+            echo "infra|devops|Infra Specialist|Security-conscious and reliability-obsessed. Infrastructure must be stable, secure, and documented. You prefer automation over manual steps and scripts over one-offs.|Documented. You explain what was provisioned, how to access it, and what breaks if it goes down."
+            echo "devops|devops|DevOps Engineer|Fast and automated. If something is done twice, it should be scripted. You think in pipelines, hooks, and automation chains. You pick the simplest tool that works.|Action-oriented. What was automated, what triggers it, what happens on failure."
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Get the lead suffix for permanent team (matches get_lead_suffix)
+get_permanent_lead_suffix() {
+    local template="$1"
+    case "$template" in
+        SQUAD_MODEL)    echo "squad-lead" ;;
+        FEATURE_TEAM)   echo "tech-lead" ;;
+        PLATFORM_TEAM)  echo "platform-lead" ;;
+        *)              echo "" ;;
+    esac
+}
+
+# Map role-type to specialization text
+_perm_specialization() {
+    local rt="$1"
+    case "$rt" in
+        frontend)
+            echo "You own the frontend codebase:"
+            echo "- UI components, pages, layouts, styling"
+            echo "- State management and data fetching"
+            echo "- TypeScript type safety"
+            echo "- Responsive design and dark mode theming"
+            echo "- Build tooling and frontend bundler config"
+            ;;
+        backend)
+            echo "You own the backend codebase:"
+            echo "- API endpoints, routes, middleware"
+            echo "- Database models, migrations, queries"
+            echo "- Authentication and authorization"
+            echo "- Background jobs and async processing"
+            echo "- Server configuration and deployment"
+            ;;
+        fullstack)
+            echo "You own both frontend and backend:"
+            echo "- API endpoints + UI components that consume them"
+            echo "- End-to-end feature implementation"
+            echo "- Data flow from database through API to UI"
+            echo "- TypeScript types shared across the stack"
+            echo "- Integration between frontend and backend systems"
+            ;;
+        qa)
+            echo "You own testing and quality assurance:"
+            echo "- Unit tests, integration tests, end-to-end tests"
+            echo "- Browser testing via Chrome MCP for UI verification"
+            echo "- API endpoint testing with curl or test scripts"
+            echo "- Edge case discovery and regression testing"
+            echo "- Test coverage analysis and gap identification"
+            ;;
+        devops)
+            echo "You own CI/CD, automation, and deployment:"
+            echo "- GitHub Actions workflows and CI/CD pipelines"
+            echo "- Git hooks and build automation"
+            echo "- Deployment scripts and release processes"
+            echo "- Dependency management and environment setup"
+            echo "- Monitoring, alerting, and script orchestration"
+            ;;
+        research)
+            echo "You own research, information gathering, and analysis:"
+            echo "- Web research via WebSearch and WebFetch tools"
+            echo "- Documentation reading and API reference analysis"
+            echo "- Codebase exploration and architectural review"
+            echo "- Competitive/landscape research"
+            echo "- Saving research artifacts for team reference"
+            ;;
+    esac
+}
+
+# Map role-type to standards text
+_perm_standards() {
+    local rt="$1"
+    case "$rt" in
+        frontend)
+            echo "- Always run typecheck and build before reporting done"
+            echo "- Follow existing patterns: match the project's component/styling conventions"
+            echo "- Never introduce new dependencies without supervisor approval"
+            echo "- Match existing code style — no reformatting files you didn't change"
+            echo "- Test in browser via Chrome MCP when visual changes are involved"
+            ;;
+        backend)
+            echo "- Always run tests before reporting done"
+            echo "- Follow existing patterns: match the project's routing/model conventions"
+            echo "- Never introduce new dependencies without supervisor approval"
+            echo "- Write tests for new endpoints and business logic"
+            echo "- Match existing code style — no reformatting unrelated files"
+            ;;
+        fullstack)
+            echo "- Run both backend tests and frontend build/typecheck before reporting done"
+            echo "- Follow existing patterns on both sides of the stack"
+            echo "- Never introduce new dependencies without supervisor approval"
+            echo "- Test API endpoints AND verify UI works via browser"
+            echo "- Match existing code style across both codebases"
+            ;;
+        qa)
+            echo "- ALWAYS use Chrome MCP for frontend changes — never skip browser testing"
+            echo "- Save screenshot evidence for visual changes"
+            echo "- When tests fail, provide exact error and reproduction steps"
+            echo "- If you find a bug, report [BLOCKED] with details — don't fix it yourself"
+            echo "- Run the FULL test suite, not just tests you think are relevant"
+            ;;
+        devops)
+            echo "- Every automation must have a failure mode — what happens when it breaks?"
+            echo "- Scripts must be idempotent — running them twice should be safe"
+            echo "- Always test automation locally before committing"
+            echo "- Document trigger conditions and expected behavior in comments"
+            echo "- Prefer shell scripts for system-level automation, Python for complex logic"
+            ;;
+        research)
+            echo "- Always save research output as an artifact file, not just journal entries"
+            echo "- Cite sources with URLs when available"
+            echo "- Distinguish between facts and inferences in reports"
+            echo "- When given a link, actually read it — don't just summarize the URL"
+            echo "- Structure reports: Summary > Key Findings > Details > Sources > Open Questions"
+            ;;
+    esac
+}
+
+# Generate a single permanent role file.
+# Args: worker_name role_type role_label personality comm_style project_id all_members lead_name
+_generate_perm_role_file() {
+    local wname="$1"
+    local rtype="$2"
+    local rlabel="$3"
+    local personality="$4"
+    local comm_style="$5"
+    local pid="$6"
+    local all_members="$7"
+    local lead_name="$8"
+
+    local rlabel_lower
+    rlabel_lower=$(echo "$rlabel" | tr '[:upper:]' '[:lower:]')
+
+    local output_dir="${SOREN_HOME}/.soren/worker-contexts"
+    mkdir -p "$output_dir"
+    local outfile="${output_dir}/${wname}-role.md"
+
+    {
+        echo "# Permanent Role: ${wname} — ${rlabel}"
+        echo ""
+        echo "You are **${wname}**, a permanent ${rlabel_lower} for the ${pid} project."
+        echo ""
+        echo "## Identity"
+        echo ""
+        echo "- **Name**: ${wname}"
+        echo "- **Role**: ${rlabel} (permanent)"
+        echo "- **Project**: ${pid}"
+        echo "- **Personality**: ${personality}"
+        echo "- **Communication style**: ${comm_style}"
+        echo ""
+
+        echo "## Specialization"
+        echo ""
+        _perm_specialization "$rtype"
+        echo ""
+
+        # Project context from scan (SCAN_* vars must be set)
+        write_project_context
+        echo ""
+
+        echo "## Standards"
+        echo ""
+        _perm_standards "$rtype"
+        echo ""
+
+        # Team coordination
+        echo "## Team Coordination"
+        echo ""
+        echo "You are part of a permanent team for the **${pid}** project."
+        echo ""
+        echo "### Teammates"
+        echo ""
+        # List teammates (exclude self)
+        local IFS_SAVE="$IFS"
+        IFS=','
+        for m in $all_members; do
+            if [[ "$m" != "$wname" ]]; then
+                echo "- ${m}"
+            fi
+        done
+        IFS="$IFS_SAVE"
+        echo ""
+        if [[ -n "$lead_name" ]]; then
+            if [[ "$wname" == "$lead_name" ]]; then
+                echo "You are the **team lead**. Workers report to you. You report to the supervisor."
+            else
+                echo "Your team lead is **${lead_name}**. Report progress and blockers to them."
+            fi
+        else
+            echo "This is a flat team — coordinate directly with teammates via mailbox."
+        fi
+        echo ""
+
+        # Permanent worker protocol
+        write_permanent_worker_section
+    } > "$outfile"
+
+    echo "$outfile"
+}
+
+cmd_setup_permanent() {
+    local template=""
+    local prefix=""
+    local project_id=""
+    local dry_run=false
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                [[ -z "${2:-}" ]] && die "--name requires a prefix"
+                prefix="$2"; shift 2 ;;
+            --project)
+                [[ -z "${2:-}" ]] && die "--project requires an ID"
+                project_id="$2"; shift 2 ;;
+            --dry-run)
+                dry_run=true; shift ;;
+            *)
+                if [[ -z "$template" ]]; then
+                    template="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift ;;
+        esac
+    done
+
+    [[ -z "$template" ]] && die "usage: teams setup-permanent <TEMPLATE> --project <id> [--name <prefix>] [--dry-run]"
+    [[ -z "$project_id" ]] && die "--project is required for setup-permanent"
+
+    # Normalize template
+    template=$(echo "$template" | tr '[:lower:]' '[:upper:]')
+
+    # Validate template (only permanent-compatible ones)
+    case "$template" in
+        SOLO_WORKER|SQUAD_MODEL|FEATURE_TEAM|PLATFORM_TEAM) ;;
+        TIGER_TEAM|DEBATE_PAIR) die "'$template' is ephemeral — not supported for permanent teams" ;;
+        *) die "unknown template: $template" ;;
+    esac
+
+    # Resolve project path
+    local scan_dir
+    scan_dir=$(resolve_project_path "$project_id" "$SOREN_HOME") || \
+        die "project '$project_id' not found in projects registry"
+
+    # Default prefix to project_id
+    if [[ -z "$prefix" ]]; then
+        prefix="$project_id"
+    fi
+    prefix=$(echo "$prefix" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
+
+    ensure_teams_file
+
+    # Check for existing team
+    if team_exists "$prefix"; then
+        die "team with prefix '$prefix' already exists (use 'teams teardown $prefix' first)"
+    fi
+
+    echo ""
+    info "Setting up permanent ${BOLD}${template}${NC} team for project '${project_id}'"
+    [[ "$dry_run" == true ]] && warn "DRY RUN — will generate role files but NOT spawn workers"
+    echo ""
+
+    # --- Step 1: Scan the project ---
+    info "Scanning project at: $scan_dir"
+    scan_project "$scan_dir"
+    ok "Project scanned"
+    echo ""
+
+    # --- Step 2: Get roles and build member list ---
+    local roles
+    roles=$(get_permanent_roles "$template") || die "no permanent roles defined for $template"
+
+    local members=()
+    while IFS='|' read -r suffix rtype rlabel personality comm_style; do
+        members+=("${prefix}-${suffix}")
+    done <<< "$roles"
+
+    local all_members
+    all_members=$(IFS=','; echo "${members[*]}")
+
+    local lead_suffix
+    lead_suffix=$(get_permanent_lead_suffix "$template")
+    local lead_name=""
+    [[ -n "$lead_suffix" ]] && lead_name="${prefix}-${lead_suffix}"
+
+    # --- Step 3: Generate role files ---
+    info "Generating role files..."
+    local role_files=()
+    while IFS='|' read -r suffix rtype rlabel personality comm_style; do
+        local wname="${prefix}-${suffix}"
+        local outfile
+        outfile=$(_generate_perm_role_file "$wname" "$rtype" "$rlabel" "$personality" "$comm_style" "$project_id" "$all_members" "$lead_name")
+        role_files+=("$outfile")
+        ok "  ${wname}-role.md (${rlabel})"
+    done <<< "$roles"
+    echo ""
+
+    # --- Step 4: Spawn workers (unless dry run) ---
+    if [[ "$dry_run" == true ]]; then
+        info "DRY RUN — would spawn these workers:"
+        echo ""
+        local idx=0
+        while IFS='|' read -r suffix rtype rlabel personality comm_style; do
+            local wname="${prefix}-${suffix}"
+            echo -e "  ${CYAN}●${NC} ${wname}  (${rlabel})"
+            echo -e "    ${DIM}Role file: ${role_files[$idx]}${NC}"
+            echo -e "    ${DIM}Command: workers spawn ${wname} <task> --permanent ${role_files[$idx]} --project ${project_id}${NC}"
+            ((idx++))
+        done <<< "$roles"
+        echo ""
+
+        # Summary
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        ok "DRY RUN complete — ${#role_files[@]} role files generated"
+        echo ""
+        echo "  Role files are ready at: ${SOREN_HOME}/.soren/worker-contexts/"
+        echo "  To actually spawn, run without --dry-run"
+        echo ""
+        return 0
+    fi
+
+    info "Spawning ${#members[@]} permanent workers..."
+    echo ""
+
+    local spawned=()
+    local idx=0
+    while IFS='|' read -r suffix rtype rlabel personality comm_style; do
+        local wname="${prefix}-${suffix}"
+        local rolefile="${role_files[$idx]}"
+
+        info "Spawning ${wname} (${rlabel})..."
+
+        if "$WORKERS_TOOL" spawn "$wname" "permanent-init" \
+                --permanent "$rolefile" \
+                --project "$project_id"; then
+            ok "Spawned ${wname}"
+            spawned+=("$wname")
+
+            # Set display name in registry
+            local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+            if [[ -f "$reg_file" ]]; then
+                local tmp
+                tmp=$(mktemp)
+                jq --arg k "$wname" --arg d "$rlabel" \
+                    '.[$k].display_name = $d' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+            fi
+        else
+            warn "Failed to spawn ${wname}"
+        fi
+
+        echo ""
+        ((idx++))
+    done <<< "$roles"
+
+    # --- Step 5: Record team in teams.json ---
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local members_json
+    members_json=$(printf '%s\n' "${spawned[@]}" | jq -R . | jq -s .)
+
+    local tmp
+    tmp=$(mktemp)
+    jq --arg prefix "$prefix" \
+       --arg template "$template" \
+       --arg now "$now" \
+       --arg project "$project_id" \
+       --argjson members "$members_json" \
+       '.teams += [{
+           prefix: $prefix,
+           template: $template,
+           task: "permanent team",
+           members: $members,
+           project_id: $project,
+           permanent: true,
+           created_at: $now
+       }]' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+
+    # --- Summary ---
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    ok "Permanent team '${prefix}' ready (${#spawned[@]} workers)"
+    echo ""
+    echo "  Template: $template"
+    echo "  Project:  $project_id"
+    echo "  Path:     $scan_dir"
+    echo ""
+    echo "  Workers:"
+
+    while IFS='|' read -r suffix rtype rlabel personality comm_style; do
+        local wname="${prefix}-${suffix}"
+        if printf '%s\n' "${spawned[@]}" | grep -qx "$wname"; then
+            echo -e "    ${GREEN}●${NC} ${wname}  (${rlabel})"
+        else
+            echo -e "    ${RED}●${NC} ${wname}  (${rlabel}) — FAILED"
+        fi
+    done <<< "$roles"
+    echo ""
+
+    if [[ -n "$lead_name" ]]; then
+        echo "  Lead: ${lead_name}"
+        echo "  Assign tasks via: ./tools/workers send \"${lead_name}\" \"[TASK] ...\""
+    fi
+    echo ""
+}
+
+cmd_help() {
+    cat << 'EOF'
+teams - Set up and manage team structures from templates
+
+USAGE:
+    teams <command> [arguments]
+
+COMMANDS:
+    setup <TEMPLATE> '<task>' [options]        Spawn a team from a template
+    setup-permanent <TEMPLATE> [options]       Scan project + generate roles + spawn permanent team
+    teardown <prefix>                          Kill all workers in a team
+    status <prefix> [lines]                    Show team members' terminal output
+    list                                       List active teams
+    templates                                  List available team templates
+    help                                       Show this help message
+
+SETUP OPTIONS:
+    --name <prefix>    Team prefix for worker names (default: auto-generated from task)
+    --project <id>     Associate all workers with a project (passed to workers spawn)
+
+SETUP-PERMANENT OPTIONS:
+    --project <id>     REQUIRED. Project to scan and associate workers with.
+    --name <prefix>    Team prefix (default: project id)
+    --dry-run          Generate role files only, don't spawn workers
+
+TEMPLATES:
+    SOLO_WORKER      1 worker — simple tasks
+    SQUAD_MODEL      5 workers — lead + backend + frontend + tester + researcher
+    FEATURE_TEAM     3 workers — tech lead + backend + frontend
+    PLATFORM_TEAM    3 workers — platform lead + infra + devops
+    TIGER_TEAM       3 workers — flat peers, no lead (ephemeral only)
+    DEBATE_PAIR      2 workers — defender + critic (ephemeral only)
+
+EXAMPLES:
+    teams setup SQUAD_MODEL "Implement user auth with JWT" --name auth
+    teams setup TIGER_TEAM "Fix production 500 errors" --name hotfix
+    teams setup DEBATE_PAIR "Design caching strategy" --name cache
+    teams setup-permanent SQUAD_MODEL --project hero --name hero
+    teams setup-permanent FEATURE_TEAM --project heroweb --dry-run
+    teams status auth
+    teams teardown auth
+    teams list
+    teams templates
+
+ENVIRONMENT:
+    SOREN_HOME        SOREN installation root (default: git root or pwd)
+    SOREN_SESSION     tmux session name (default: soren)
+EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        setup)              cmd_setup "$@" ;;
+        setup-permanent)    cmd_setup_permanent "$@" ;;
+        teardown)           cmd_teardown "$@" ;;
+        status)             cmd_status "$@" ;;
+        list)               cmd_list "$@" ;;
+        templates)          cmd_templates "$@" ;;
+        help|--help|-h)     cmd_help ;;
+        *)                  die "unknown command: $cmd (try 'teams help')" ;;
+    esac
+}
+
+main "$@"

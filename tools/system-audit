@@ -1,0 +1,504 @@
+#!/usr/bin/env bash
+# tools/system-audit — Automated SOREN system health audit
+# Usage: ./tools/system-audit [--quick] [--json] [--save] [--full]
+#
+# Flags:
+#   --quick   Core checks only (health, daemons, budget, server)
+#   --json    Machine-readable JSON output
+#   --save    Write results to .soren/journal/YYYY-MM-DD/artifacts/system-audit.json
+#   --full    Include expensive checks (test suite, frontend typecheck)
+#
+# Exit codes: 0 = all healthy, 1 = any broken, 2 = only degraded
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+# --- Defaults ---
+SOREN_PORT="${SOREN_PORT:-8000}"
+BASE_URL="http://localhost:${SOREN_PORT}"
+QUICK=false
+JSON_OUT=false
+SAVE=false
+FULL=false
+BRIEF=false
+
+# --- Argument parsing ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --quick) QUICK=true; shift ;;
+        --json)  JSON_OUT=true; shift ;;
+        --save)  SAVE=true; JSON_OUT=true; shift ;;
+        --full)  FULL=true; shift ;;
+        --brief) BRIEF=true; shift ;;
+        -h|--help)
+            echo "Usage: tools/system-audit [--quick] [--json] [--save] [--full] [--brief]"
+            echo ""
+            echo "  --quick   Core checks only (health, daemons, budget, server)"
+            echo "  --json    Machine-readable JSON output"
+            echo "  --save    Save JSON results to journal artifacts"
+            echo "  --full    Include expensive checks (pytest, typecheck)"
+            echo "  --brief   One-line summary output"
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+# --- Terminal colours ---
+if [[ -t 1 && "$JSON_OUT" == "false" ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; BOLD='\033[1m'; NC='\033[0m'
+else
+    RED=''; GREEN=''; YELLOW=''; DIM=''; BOLD=''; NC=''
+fi
+
+# --- Results storage ---
+RESULTS_JSON="[]"
+healthy=0; degraded=0; broken=0
+
+# --- Helper: add a check result ---
+add_result() {
+    local name="$1" status="$2" detail="$3"
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg n "$name" --arg s "$status" --arg d "$detail" \
+        '. + [{"name": $n, "status": $s, "detail": $d}]')
+
+    case "$status" in
+        HEALTHY)  (( healthy++ )) || true ;;
+        DEGRADED) (( degraded++ )) || true ;;
+        BROKEN)   (( broken++ )) || true ;;
+    esac
+
+    if [[ "$JSON_OUT" == "false" && "$BRIEF" == "false" ]]; then
+        local icon
+        case "$status" in
+            HEALTHY)  icon="${GREEN}[OK]${NC}" ;;
+            DEGRADED) icon="${YELLOW}[--]${NC}" ;;
+            BROKEN)   icon="${RED}[!!]${NC}" ;;
+        esac
+        printf "  ${icon}  %s\n" "$detail"
+    fi
+}
+
+# --- Helper: safe curl with timeout ---
+api_get() {
+    curl -sf --max-time 5 "${BASE_URL}$1" 2>/dev/null || echo ""
+}
+
+# =====================================================================
+# CORE CHECKS (always run)
+# =====================================================================
+
+check_health_endpoint() {
+    local resp
+    resp=$(api_get "/api/webhooks/health")
+    if [[ -z "$resp" ]]; then
+        add_result "health_endpoint" "BROKEN" "API health endpoint unreachable"
+        return
+    fi
+    local api_status frontend_status
+    api_status=$(echo "$resp" | jq -r '.api // "unknown"')
+    frontend_status=$(echo "$resp" | jq -r '.frontend.status // .frontend // "unknown"')
+    if [[ "$api_status" == "healthy" ]]; then
+        add_result "health_endpoint" "HEALTHY" "API health: api=${api_status}, frontend=${frontend_status}"
+    else
+        add_result "health_endpoint" "BROKEN" "API health: api=${api_status}, frontend=${frontend_status}"
+    fi
+}
+
+check_daemon_processes() {
+    local monitor_count router_count compact_count
+    monitor_count=$(pgrep -fc "monitor\.sh" 2>/dev/null || echo "0")
+    router_count=$(pgrep -fc "router\.sh" 2>/dev/null || echo "0")
+    compact_count=$(pgrep -fc "compact\.sh" 2>/dev/null || echo "0")
+
+    local total=$(( monitor_count + router_count + compact_count ))
+    local detail="monitor=${monitor_count}, router=${router_count}, compact=${compact_count}"
+
+    # Check for PID files
+    local pid_files=""
+    for f in .soren/run/*.pid; do
+        [[ -f "$f" ]] && pid_files="${pid_files} $(basename "$f")"
+    done
+    [[ -n "$pid_files" ]] && detail="${detail}, pid_files:${pid_files}"
+
+    # Check for duplicates
+    local dups=""
+    (( monitor_count > 1 )) && dups="${dups} monitor(${monitor_count})"
+    (( router_count > 1 )) && dups="${dups} router(${router_count})"
+    (( compact_count > 1 )) && dups="${dups} compact(${compact_count})"
+
+    if [[ -n "$dups" ]]; then
+        add_result "daemon_processes" "DEGRADED" "Daemon duplicates:${dups} — ${detail}"
+    elif (( total == 3 )); then
+        add_result "daemon_processes" "HEALTHY" "All daemons running (${detail})"
+    elif (( total == 0 )); then
+        add_result "daemon_processes" "BROKEN" "No daemons running (${detail})"
+    else
+        add_result "daemon_processes" "DEGRADED" "Partial daemons (${total}/3): ${detail}"
+    fi
+}
+
+check_budget_status() {
+    local resp
+    resp=$(api_get "/api/budget/status")
+    if [[ -z "$resp" ]]; then
+        add_result "budget_status" "BROKEN" "Budget endpoint unreachable"
+        return
+    fi
+    local spend limit pct throttled
+    spend=$(echo "$resp" | jq -r '.daily_spend_usd // 0')
+    limit=$(echo "$resp" | jq -r '.budget_limit_usd // 600')
+    pct=$(echo "$resp" | jq -r '.percentage_used // 0')
+    throttled=$(echo "$resp" | jq -r '.throttled // false')
+    local pct_display
+    pct_display=$(echo "$pct" | awk '{printf "%.1f", $1 * 100}')
+
+    if [[ "$throttled" == "true" ]]; then
+        add_result "budget_status" "BROKEN" "Budget THROTTLED: \$${spend} / \$${limit} (${pct_display}%)"
+    else
+        add_result "budget_status" "HEALTHY" "Budget: \$${spend} / \$${limit} (${pct_display}%)"
+    fi
+}
+
+check_server_running() {
+    local uvicorn_pid
+    uvicorn_pid=$(pgrep -f "uvicorn.*main:app" 2>/dev/null | head -1 || echo "")
+    local port_listening
+    port_listening=$(ss -tlnp 2>/dev/null | grep ":${SOREN_PORT}" | head -1 || echo "")
+
+    if [[ -n "$uvicorn_pid" && -n "$port_listening" ]]; then
+        add_result "server_running" "HEALTHY" "Server running (PID ${uvicorn_pid}, port ${SOREN_PORT} listening)"
+    elif [[ -n "$uvicorn_pid" ]]; then
+        add_result "server_running" "DEGRADED" "Server process found (PID ${uvicorn_pid}) but port ${SOREN_PORT} not detected"
+    else
+        add_result "server_running" "BROKEN" "No uvicorn process found"
+    fi
+}
+
+# =====================================================================
+# STANDARD CHECKS (skip with --quick)
+# =====================================================================
+
+check_quality_metrics() {
+    local resp
+    resp=$(api_get "/api/metrics/quality")
+    if [[ -z "$resp" ]]; then
+        add_result "quality_metrics" "DEGRADED" "Quality metrics endpoint unreachable"
+        return
+    fi
+    local total with_completions
+    total=$(echo "$resp" | jq '.agents | length')
+    with_completions=$(echo "$resp" | jq '[.agents[] | select(.completions > 0)] | length')
+    local untracked=$(( total - with_completions ))
+    add_result "quality_metrics" "HEALTHY" "Quality metrics: ${with_completions}/${total} agents have completions (${untracked} untracked)"
+}
+
+check_duration_metrics() {
+    local resp
+    resp=$(api_get "/api/metrics/quality/duration")
+    if [[ -z "$resp" ]]; then
+        add_result "duration_metrics" "DEGRADED" "Duration metrics endpoint unreachable"
+        return
+    fi
+    local overall_avg agent_count
+    overall_avg=$(echo "$resp" | jq -r '.overall_avg // "N/A"')
+    agent_count=$(echo "$resp" | jq '.agents | length')
+    if [[ "$overall_avg" != "N/A" && "$overall_avg" != "null" ]]; then
+        local mins
+        mins=$(echo "$overall_avg" | awk '{printf "%.1f", $1 / 60}')
+        add_result "duration_metrics" "HEALTHY" "Avg task duration: ${mins}min (${agent_count} agents tracked)"
+    else
+        add_result "duration_metrics" "DEGRADED" "No duration data available"
+    fi
+}
+
+check_journal_endpoints() {
+    local issues_resp summary_resp
+    issues_resp=$(api_get "/api/journal/recurring-issues")
+    summary_resp=$(api_get "/api/journal/weekly-summary")
+
+    local issues_ok=true summary_ok=true
+    local detail=""
+
+    if [[ -z "$issues_resp" ]]; then
+        issues_ok=false
+    else
+        local issue_count
+        issue_count=$(echo "$issues_resp" | jq '.recurring_issues | length' 2>/dev/null || echo "0")
+        detail="recurring_issues=${issue_count}"
+    fi
+
+    if [[ -z "$summary_resp" ]]; then
+        summary_ok=false
+    else
+        local total_entries
+        total_entries=$(echo "$summary_resp" | jq -r '.total_entries // 0')
+        detail="${detail}, weekly_entries=${total_entries}"
+    fi
+
+    if [[ "$issues_ok" == "true" && "$summary_ok" == "true" ]]; then
+        add_result "journal_endpoints" "HEALTHY" "Journal endpoints OK (${detail})"
+    elif [[ "$issues_ok" == "false" && "$summary_ok" == "false" ]]; then
+        add_result "journal_endpoints" "BROKEN" "Both journal endpoints unreachable"
+    else
+        add_result "journal_endpoints" "DEGRADED" "Partial journal endpoints (${detail})"
+    fi
+}
+
+check_scorecard() {
+    local resp
+    resp=$(api_get "/api/webhooks/scorecard")
+    if [[ -z "$resp" ]]; then
+        add_result "scorecard" "DEGRADED" "Scorecard endpoint unreachable"
+        return
+    fi
+    local uptime tasks active sleeping
+    uptime=$(echo "$resp" | jq -r '.uptime_seconds // 0')
+    tasks=$(echo "$resp" | jq -r '.tasks_completed_today // 0')
+    active=$(echo "$resp" | jq -r '.agents_active // 0')
+    sleeping=$(echo "$resp" | jq -r '.agents_sleeping // 0')
+    local uptime_hrs
+    uptime_hrs=$(echo "$uptime" | awk '{printf "%.1f", $1 / 3600}')
+    add_result "scorecard" "HEALTHY" "Scorecard: uptime=${uptime_hrs}h, tasks_today=${tasks}, active=${active}, sleeping=${sleeping}"
+}
+
+check_correction_compliance() {
+    local resp
+    resp=$(api_get "/api/journal/correction-compliance")
+    if [[ -z "$resp" ]]; then
+        add_result "correction_compliance" "DEGRADED" "Correction compliance endpoint unreachable"
+        return
+    fi
+    local total_rules overall
+    total_rules=$(echo "$resp" | jq '.corrections | length')
+    overall=$(echo "$resp" | jq -r '.overall_compliance // "N/A"')
+
+    if [[ "$total_rules" == "0" ]]; then
+        add_result "correction_compliance" "DEGRADED" "No correction rules found (vacuous)"
+    elif [[ "$overall" != "N/A" && "$overall" != "null" ]]; then
+        local pct
+        pct=$(echo "$overall" | awk '{printf "%.0f", $1 * 100}')
+        if (( pct >= 80 )); then
+            add_result "correction_compliance" "HEALTHY" "Correction compliance: ${pct}% across ${total_rules} rules"
+        else
+            add_result "correction_compliance" "DEGRADED" "Low correction compliance: ${pct}% across ${total_rules} rules"
+        fi
+    else
+        add_result "correction_compliance" "DEGRADED" "Correction compliance: unable to parse (${total_rules} rules)"
+    fi
+}
+
+check_git_status() {
+    local branch uncommitted untracked
+    branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    uncommitted=$(git diff --stat 2>/dev/null | tail -1 || echo "")
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l || echo "0")
+
+    local detail="branch=${branch}"
+    [[ -n "$uncommitted" ]] && detail="${detail}, changes: ${uncommitted}"
+    (( untracked > 0 )) && detail="${detail}, untracked=${untracked}"
+
+    if [[ -z "$uncommitted" && "$untracked" == "0" ]]; then
+        add_result "git_status" "HEALTHY" "Git clean (${detail})"
+    else
+        add_result "git_status" "DEGRADED" "Git dirty (${detail})"
+    fi
+}
+
+check_memory_store() {
+    if [[ ! -f ".soren/memories.db" ]]; then
+        add_result "memory_store" "BROKEN" "Memory store .soren/memories.db not found"
+        return
+    fi
+    local size entries
+    size=$(du -h .soren/memories.db 2>/dev/null | awk '{print $1}')
+    entries=$(sqlite3 .soren/memories.db "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "unknown")
+    if [[ "$entries" == "unknown" || "$entries" == "0" ]]; then
+        add_result "memory_store" "DEGRADED" "Memory store exists (${size}) but ${entries} entries"
+    else
+        add_result "memory_store" "HEALTHY" "Memory store: ${entries} entries (${size})"
+    fi
+}
+
+check_tunnel() {
+    local url_file=".soren/.tunnel.url"
+    local pid_file=".soren/.tunnel.pid"
+
+    if [[ ! -f "$url_file" ]]; then
+        add_result "tunnel" "DEGRADED" "No tunnel URL file"
+        return
+    fi
+    local url pid
+    url=$(cat "$url_file" 2>/dev/null || echo "")
+    pid=$(cat "$pid_file" 2>/dev/null || echo "")
+
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        add_result "tunnel" "HEALTHY" "Tunnel active (PID ${pid}, URL: ${url})"
+    elif [[ -n "$url" ]]; then
+        add_result "tunnel" "DEGRADED" "Tunnel URL exists but process not running (PID ${pid})"
+    else
+        add_result "tunnel" "DEGRADED" "Tunnel not configured"
+    fi
+}
+
+# =====================================================================
+# STALENESS CHECK
+# =====================================================================
+
+check_memory_injection_staleness() {
+    local context_log=".soren/run/memory-context.log"
+    if [[ ! -f "$context_log" ]]; then
+        add_result "memory_injection" "DEGRADED" "memory-context.log not found (injection not yet active)"
+        return
+    fi
+    local log_lines dispatch_count
+    log_lines=$(wc -l < "$context_log" 2>/dev/null | tr -d '[:space:]')
+    log_lines=${log_lines:-0}
+    # Count dispatches from router log (each "DELIVERED" line is a dispatch)
+    dispatch_count=$(grep -c "DELIVERED" .soren/router.log 2>/dev/null | tr -d '[:space:]')
+    dispatch_count=${dispatch_count:-0}
+
+    if (( dispatch_count == 0 )); then
+        add_result "memory_injection" "DEGRADED" "No dispatches found to compare (log_lines=${log_lines})"
+        return
+    fi
+
+    # Ratio: injections per dispatch (ideal ~1.0)
+    local ratio
+    ratio=$(awk "BEGIN {printf \"%.2f\", ${log_lines} / ${dispatch_count}}")
+
+    if (( log_lines == 0 )); then
+        add_result "memory_injection" "BROKEN" "memory-context.log empty despite ${dispatch_count} dispatches (ratio=0)"
+    elif [[ $(awk "BEGIN {print (${ratio} < 0.5) ? 1 : 0}") == "1" ]]; then
+        add_result "memory_injection" "DEGRADED" "Low injection ratio: ${log_lines}/${dispatch_count} dispatches (ratio=${ratio})"
+    else
+        add_result "memory_injection" "HEALTHY" "Memory injection: ${log_lines}/${dispatch_count} dispatches (ratio=${ratio})"
+    fi
+}
+
+# =====================================================================
+# SENSITIVE CHECKS (only with --full)
+# =====================================================================
+
+check_test_suite() {
+    local output exit_code
+    output=$(uv run pytest --tb=line -q 2>&1) && exit_code=0 || exit_code=$?
+    local summary
+    summary=$(echo "$output" | tail -1)
+    if (( exit_code == 0 )); then
+        add_result "test_suite" "HEALTHY" "Tests: ${summary}"
+    else
+        add_result "test_suite" "BROKEN" "Tests FAILED: ${summary}"
+    fi
+}
+
+check_frontend_typecheck() {
+    local output exit_code
+    output=$(cd src/frontend && npm run typecheck 2>&1) && exit_code=0 || exit_code=$?
+    if (( exit_code == 0 )); then
+        add_result "frontend_typecheck" "HEALTHY" "Frontend typecheck: clean"
+    else
+        local errors
+        errors=$(echo "$output" | grep -c "error TS" 2>/dev/null || echo "?")
+        add_result "frontend_typecheck" "BROKEN" "Frontend typecheck: ${errors} errors"
+    fi
+}
+
+# =====================================================================
+# EXECUTION
+# =====================================================================
+
+TIMESTAMP=$(date -Iseconds)
+
+# Detect current AMBITION sprint version
+AMBITION_VERSION="unknown"
+if [[ -f ".soren/AMBITION.md" ]]; then
+    AMBITION_VERSION=$(grep -oP 'AMBITION v\K\d+' .soren/AMBITION.md | sort -n | tail -1)
+    [[ -z "$AMBITION_VERSION" ]] && AMBITION_VERSION="unknown"
+fi
+
+if [[ "$JSON_OUT" == "false" && "$BRIEF" == "false" ]]; then
+    echo ""
+    printf "  ${BOLD}SOREN System Audit${NC} — $(date '+%Y-%m-%d %H:%M %Z')  ${DIM}(AMBITION v${AMBITION_VERSION})${NC}\n"
+    echo "  =========================================="
+    echo ""
+fi
+
+# Core checks (always)
+check_health_endpoint
+check_daemon_processes
+check_budget_status
+check_server_running
+
+# Standard checks (unless --quick)
+if [[ "$QUICK" == "false" ]]; then
+    check_quality_metrics
+    check_duration_metrics
+    check_journal_endpoints
+    check_scorecard
+    check_correction_compliance
+    check_git_status
+    check_memory_store
+    check_tunnel
+    check_memory_injection_staleness
+fi
+
+# Sensitive checks (only with --full)
+if [[ "$FULL" == "true" ]]; then
+    check_test_suite
+    check_frontend_typecheck
+fi
+
+# =====================================================================
+# OUTPUT
+# =====================================================================
+
+FINAL_JSON=$(jq -n \
+    --arg ts "$TIMESTAMP" \
+    --arg av "v${AMBITION_VERSION}" \
+    --argjson checks "$RESULTS_JSON" \
+    --argjson h "$healthy" \
+    --argjson d "$degraded" \
+    --argjson b "$broken" \
+    '{timestamp: $ts, ambition_version: $av, checks: $checks, summary: {healthy: $h, degraded: $d, broken: $b}}')
+
+if [[ "$JSON_OUT" == "true" ]]; then
+    echo "$FINAL_JSON"
+fi
+
+# Brief one-line summary
+if [[ "$BRIEF" == "true" ]]; then
+    local_status="OK"
+    (( broken > 0 )) && local_status="BROKEN"
+    (( broken == 0 && degraded > 0 )) && local_status="DEGRADED"
+    echo "SOREN v${AMBITION_VERSION}: ${healthy} ok, ${degraded} warn, ${broken} broken — ${local_status}"
+fi
+
+# Save to journal artifacts
+if [[ "$SAVE" == "true" ]]; then
+    local_date=$(date +%Y-%m-%d)
+    artifact_dir=".soren/journal/${local_date}/artifacts"
+    mkdir -p "$artifact_dir"
+    echo "$FINAL_JSON" > "${artifact_dir}/system-audit.json"
+    echo "(saved to ${artifact_dir}/system-audit.json)" >&2
+fi
+
+# Human summary footer
+if [[ "$JSON_OUT" == "false" && "$BRIEF" == "false" ]]; then
+    echo ""
+    echo "  ──────────────────────────────────────────"
+    printf "  %b%d OK%b  %b%d WARN%b  %b%d BROKEN%b\n" \
+        "$GREEN" "$healthy" "$NC" \
+        "$YELLOW" "$degraded" "$NC" \
+        "$RED" "$broken" "$NC"
+    echo ""
+fi
+
+# Exit code
+if (( broken > 0 )); then
+    exit 1
+elif (( degraded > 0 )); then
+    exit 2
+else
+    exit 0
+fi

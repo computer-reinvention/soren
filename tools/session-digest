@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Session-start digest — prints a concise briefing for supervisor boot
+set -euo pipefail
+
+SOREN_PORT="${SOREN_PORT:-8000}"
+BASE="http://localhost:${SOREN_PORT}"
+
+echo "=== SOREN Session Digest ==="
+echo ""
+
+# Health scorecard
+echo "--- Health ---"
+curl -sf "${BASE}/api/webhooks/scorecard" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(f'Uptime: {d.get(\"uptime_seconds\",0)//3600}h | Tasks today: {d.get(\"tasks_completed_today\",0)} | Budget: {d.get(\"budget_usage_pct\",0):.1f}% | Active: {d.get(\"agents_active\",0)} | Sleeping: {d.get(\"agents_sleeping\",0)}')
+" 2>/dev/null || echo "(scorecard unavailable)"
+
+# System audit
+echo ""
+echo "--- Audit ---"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+audit_output=$("${SCRIPT_DIR}/system-audit" --quick --json 2>/dev/null || true)
+if [[ -n "$audit_output" ]]; then
+  echo "$audit_output" | python3 -c "
+import sys, json
+checks = json.load(sys.stdin)
+ok = sum(1 for c in checks if c['status']=='OK')
+warn = sum(1 for c in checks if c['status']=='WARN')
+fail = sum(1 for c in checks if c['status']=='FAIL')
+print(f'{ok} OK, {warn} WARN, {fail} FAIL')
+for c in checks:
+    if c['status'] != 'OK':
+        print(f'  {c[\"status\"]}: {c[\"name\"]}')
+" 2>/dev/null || echo "(audit parse error)"
+else
+  echo "(audit unavailable)"
+fi
+
+# Budget
+echo ""
+echo "--- Budget ---"
+curl -sf "${BASE}/api/budget/status" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(f'Today: \${d.get(\"total_cost_usd\",0):.2f} / \${d.get(\"daily_limit\",600):.0f} ({d.get(\"usage_pct\",0):.1f}%)')
+if d.get('throttled'): print('⚠ THROTTLED')
+" 2>/dev/null || echo "(budget unavailable)"
+
+# Recurring issues (top 3)
+echo ""
+echo "--- Top Issues ---"
+curl -sf "${BASE}/api/journal/recurring-issues" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for issue in d.get('recurring_issues', [])[:3]:
+    print(f'  [{issue[\"occurrences\"]}x] {issue[\"canonical_title\"][:60]}')
+if not d.get('recurring_issues'): print('  (none)')
+" 2>/dev/null || echo "(issues unavailable)"
+
+# Correction compliance
+echo ""
+echo "--- Corrections ---"
+curl -sf "${BASE}/api/journal/correction-compliance" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(f'Overall compliance: {d.get(\"overall_compliance\",0):.0%} ({d.get(\"total_rules\",0)} rules)')
+violations = [c for c in d.get('corrections',[]) if c['violations'] > 0]
+for v in violations[:3]:
+    print(f'  ⚠ {v[\"id\"]}: {v[\"violations\"]} violations ({v[\"compliance_rate\"]:.0%})')
+" 2>/dev/null || echo "(compliance unavailable)"
+
+# Yesterday's journal summary
+echo ""
+echo "--- Yesterday ---"
+YESTERDAY=$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d 2>/dev/null || echo "")
+if [[ -n "$YESTERDAY" ]]; then
+    curl -sf "${BASE}/api/journal?date=${YESTERDAY}" 2>/dev/null | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+content = d.get('content', '')
+lines = [l for l in content.split('\n') if l.startswith('## ')]
+print(f'{len(lines)} entries yesterday')
+for l in lines[:5]:
+    print(f'  {l[:70]}')
+" 2>/dev/null || echo "(journal unavailable)"
+fi
+
+echo ""
+echo "==========================="

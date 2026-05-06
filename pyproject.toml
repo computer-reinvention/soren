@@ -1,0 +1,43 @@
+[project]
+name = "soren"
+version = "0.1.0"
+description = "Self-improving multi-agent AI orchestration"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "websockets>=12.0",
+    "aiofiles>=23.0.0",
+    "python-multipart>=0.0.22",
+    "fastembed>=0.7.4",
+    "sqlite-vec>=0.1.6",
+    "numpy>=2.4.2",
+    "httpx>=0.28.1",
+    "bcrypt>=4.0.0",
+    "pyjwt>=2.8.0",
+    "cryptography>=46.0.5",
+    "fpdf2>=2.8.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "httpx>=0.26.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]

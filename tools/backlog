@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+#===============================================================================
+# backlog - Manage backlog items in the SOREN tasks database
+#
+# Backlog is a status field on tasks in .soren/tasks.db.
+# This CLI provides a convenient interface for managing backlog items.
+#
+# Usage:
+#   backlog add "<title>" [priority 1-5]         - Add backlog item
+#   backlog add "<title>" "<desc>" [pri] [src]    - Add with description
+#   backlog list                                  - Show backlog items by priority
+#   backlog next                                  - Claim highest-priority backlog item
+#   backlog done <id> [remarks]                   - Mark item done with optional remarks
+#   backlog complete <id> [remarks]               - Alias for done
+#   backlog skip <id>                             - Mark item done (skipped)
+#   backlog prioritize <id> <priority>            - Change priority (1-5)
+#   backlog show <id>                             - Show full details
+#
+# Storage: .soren/tasks.db (SQLite — tasks with status='backlog')
+# Designed for supervisor agents to maintain autonomous work queues.
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+DB="${SOREN_HOME}/.soren/tasks.db"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+SEP="$(printf '\x1f')"  # Unit separator for field splitting
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+
+ensure_db() {
+    [[ -f "$DB" ]] || die "tasks database not found: $DB"
+}
+
+gen_uuid() {
+    uuidgen | tr '[:upper:]' '[:lower:]'
+}
+
+# Map numeric priority (1-5) to text
+pri_num_to_text() {
+    case "$1" in
+        1) echo "critical" ;;
+        2) echo "high" ;;
+        3) echo "medium" ;;
+        4|5) echo "low" ;;
+        *) echo "medium" ;;
+    esac
+}
+
+# Map text priority to numeric for display
+pri_text_to_num() {
+    case "$1" in
+        critical) echo "1" ;;
+        high)     echo "2" ;;
+        medium)   echo "3" ;;
+        low)      echo "4" ;;
+        *)        echo "3" ;;
+    esac
+}
+
+priority_label() {
+    case "$1" in
+        1|critical) echo -e "${RED}P1-critical${NC}" ;;
+        2|high)     echo -e "${YELLOW}P2-high${NC}" ;;
+        3|medium)   echo -e "${CYAN}P3-medium${NC}" ;;
+        4|5|low)    echo -e "${DIM}P4-low${NC}" ;;
+        *)          echo "P?" ;;
+    esac
+}
+
+status_label() {
+    case "$1" in
+        backlog)     echo -e "${CYAN}backlog${NC}" ;;
+        pending)     echo -e "${YELLOW}pending${NC}" ;;
+        done)        echo -e "${GREEN}done${NC}" ;;
+        *)           echo "$1" ;;
+    esac
+}
+
+# Abbreviate UUID for display (first 8 chars)
+short_id() {
+    echo "${1:0:8}"
+}
+
+# Resolve partial ID prefix to full task ID
+resolve_id() {
+    local partial="$1"
+    local matches
+    matches=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE id LIKE '$(echo "$partial" | sed "s/'/''/g")%';")
+
+    if [[ -z "$matches" ]]; then
+        die "item not found: ${partial}"
+    fi
+
+    local count
+    count=$(echo "$matches" | wc -l | tr -d ' ')
+
+    if [[ "$count" -eq 1 ]]; then
+        echo "$matches"
+    else
+        die "ambiguous ID '${partial}' — matches ${count} items. Use more characters."
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Commands
+#-------------------------------------------------------------------------------
+
+cmd_add() {
+    local title="${1:-}"
+    [[ -z "$title" ]] && die "usage: backlog add \"<title>\" [priority 1-5]"
+    shift
+
+    local description="" priority_num="3" source="system"
+
+    # Parse remaining args: if next is a number 1-5, it's priority.
+    # Otherwise it's a description (legacy format: "<desc>" [pri] [src]).
+    if [[ $# -gt 0 ]]; then
+        if [[ "$1" =~ ^[1-5]$ ]]; then
+            priority_num="$1"
+            shift
+        else
+            description="$1"
+            shift
+            if [[ $# -gt 0 && "$1" =~ ^[1-5]$ ]]; then
+                priority_num="$1"
+                shift
+            fi
+            if [[ $# -gt 0 ]]; then
+                source="$1"
+                shift
+            fi
+        fi
+    fi
+
+    ensure_db
+
+    local id priority_text now
+    id=$(gen_uuid)
+    priority_text=$(pri_num_to_text "$priority_num")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, project, assigned_to, status, priority, source, parent_id, resources, linked_workers, remarks, created_at, updated_at, completed_at)
+        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', '', '', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', '', '[]', '', '', '$now', '$now', '');"
+
+    ok "Added $(short_id "$id"): ${title} ($(priority_label "$priority_num"))"
+}
+
+cmd_list() {
+    ensure_db
+
+    local rows
+    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, source, title FROM tasks WHERE status='backlog' ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+
+    if [[ -z "$rows" ]]; then
+        echo -e "${DIM}No backlog items${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Backlog:${NC}"
+    echo ""
+    printf "${DIM}%-10s  %-12s  %-12s  %-14s  %s${NC}\n" "ID" "PRIORITY" "STATUS" "SOURCE" "TITLE"
+    echo -e "${DIM}──────────  ────────────  ────────────  ──────────────  ─────────────────────────${NC}"
+
+    local count=0
+    while IFS="$SEP" read -r id priority source title; do
+        printf "%-10s  %-12b  %-12b  %-14s  %s\n" \
+            "$(short_id "$id")" \
+            "$(priority_label "$priority")" \
+            "$(status_label "backlog")" \
+            "$source" \
+            "$title"
+        ((count++))
+    done <<< "$rows"
+
+    echo ""
+    echo -e "${DIM}${count} item(s)${NC}"
+}
+
+cmd_next() {
+    ensure_db
+
+    local row
+    row=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, title, description, priority FROM tasks WHERE status='backlog' ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at LIMIT 1;")
+
+    if [[ -z "$row" ]]; then
+        echo -e "${DIM}No backlog items${NC}"
+        return 1
+    fi
+
+    local id title description priority
+    IFS="$SEP" read -r id title description priority <<< "$row"
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    sqlite3 "$DB" "UPDATE tasks SET status='pending', updated_at='$now' WHERE id='$id';"
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', 'backlog', 'pending', '$now');"
+
+    echo -e "${BOLD}Next item: $(short_id "$id")${NC}"
+    echo -e "  Title:    ${title}"
+    echo -e "  Priority: $(priority_label "$priority")"
+    if [[ -n "$description" ]]; then
+        echo -e "  Description: ${description}"
+    fi
+    echo ""
+    ok "Marked $(short_id "$id") as pending"
+}
+
+cmd_done() {
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog done <id> [remarks]"
+    shift
+
+    local remarks="${*}"
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local old_status
+    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+
+    sqlite3 "$DB" "UPDATE tasks SET status='done', remarks='$(echo "$remarks" | sed "s/'/''/g")', completed_at='$now', updated_at='$now' WHERE id='$id';"
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Completed $(short_id "$id"): ${title}"
+}
+
+cmd_skip() {
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog skip <id>"
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local old_status
+    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+
+    sqlite3 "$DB" "UPDATE tasks SET status='done', remarks='skipped', completed_at='$now', updated_at='$now' WHERE id='$id';"
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Skipped $(short_id "$id"): ${title}"
+}
+
+cmd_prioritize() {
+    local id_input="${1:-}"
+    local priority_num="${2:-}"
+
+    [[ -z "$id_input" ]] && die "usage: backlog prioritize <id> <priority>"
+    [[ -z "$priority_num" ]] && die "usage: backlog prioritize <id> <priority>"
+
+    if ! [[ "$priority_num" =~ ^[1-5]$ ]]; then
+        die "priority must be 1-5 (1=highest, 5=lowest)"
+    fi
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    local priority_text now
+    priority_text=$(pri_num_to_text "$priority_num")
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    sqlite3 "$DB" "UPDATE tasks SET priority='$priority_text', updated_at='$now' WHERE id='$id';"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Reprioritized $(short_id "$id"): ${title} → $(priority_label "$priority_num")"
+}
+
+cmd_show() {
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog show <id>"
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    _qf() { sqlite3 "$DB" "SELECT $1 FROM tasks WHERE id='$id';"; }
+
+    local title description priority status source remarks created_at completed_at
+    title=$(_qf "title")
+    description=$(_qf "description")
+    priority=$(_qf "priority")
+    status=$(_qf "status")
+    source=$(_qf "source")
+    remarks=$(_qf "remarks")
+    created_at=$(_qf "created_at")
+    completed_at=$(_qf "completed_at")
+
+    echo -e "${BOLD}Backlog Item $(short_id "$id")${NC}"
+    echo -e "  ID:          ${id}"
+    echo -e "  Title:       ${title}"
+    if [[ -n "$description" ]]; then
+        echo -e "  Description: ${description}"
+    fi
+    echo -e "  Priority:    $(priority_label "$priority")"
+    echo -e "  Status:      $(status_label "$status")"
+    echo -e "  Source:      ${source}"
+    echo -e "  Created:     ${created_at}"
+    if [[ -n "$completed_at" ]]; then
+        echo -e "  Completed:   ${completed_at}"
+    fi
+    if [[ -n "$remarks" ]]; then
+        echo -e "  Remarks:     ${remarks}"
+    fi
+}
+
+cmd_help() {
+    cat << 'EOF'
+backlog - Manage backlog items in the SOREN tasks database
+
+USAGE:
+    backlog <command> [arguments]
+
+COMMANDS:
+    add "<title>" [priority] [src]       Add item (priority 1-5, source: user|system|self)
+    add "<title>" "<desc>" [pri] [src]   Add with description
+    list                                 List backlog items, sorted by priority
+    next                                 Claim highest-priority item (→ pending)
+    done <id> [remarks]                  Mark item done with optional remarks
+    complete <id> [remarks]              Alias for done
+    skip <id>                            Mark item done (skipped)
+    prioritize <id> <priority>           Change priority (1=highest, 5=lowest)
+    show <id>                            Show full details for one item
+    help                                 Show this help
+
+IDS:
+    Items use UUID identifiers. You can use a prefix (e.g. first 8 chars)
+    as long as it uniquely identifies the item.
+
+EXAMPLES:
+    backlog add "Fix auth bug" 1
+    backlog add "Run test suite" "Full pytest run" 3
+    backlog list
+    backlog next
+    backlog done 7966ee6a "Fixed in commit abc123"
+    backlog skip 368208bc
+    backlog prioritize 206c8978 1
+    backlog show 7966ee6a
+
+STORAGE:
+    .soren/tasks.db — tasks with status='backlog' in the unified tasks table.
+    Claimed items (via next) transition to status='pending'.
+
+ENVIRONMENT:
+    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        add)        cmd_add "$@" ;;
+        list)       cmd_list "$@" ;;
+        next)       cmd_next "$@" ;;
+        done)       cmd_done "$@" ;;
+        complete)   cmd_done "$@" ;;
+        skip)       cmd_skip "$@" ;;
+        prioritize) cmd_prioritize "$@" ;;
+        show)       cmd_show "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)          die "unknown command: $cmd (try 'backlog help')" ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# tools/extract-patterns — Extract reusable patterns from commits and journal entries
+#
+# Usage: tools/extract-patterns [--commits N] [--date YYYY-MM-DD] [--all]
+#
+#   --commits N:        extract from last N commits (default: 5)
+#   --date YYYY-MM-DD:  extract from journal entry for that date only
+#   --all:              extract from all journal dates + last 20 commits
+#
+# Output: human-readable summary to stdout, patterns stored in memory DB.
+
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+COMMITS=5
+DATE_ARG=""
+ALL_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --commits) COMMITS="${2:-5}"; shift 2 ;;
+        --date)    DATE_ARG="${2:-}";  shift 2 ;;
+        --all)     ALL_MODE=true;     shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+python_script=$(cat <<'PYEOF'
+import sys
+import json
+from pathlib import Path
+from datetime import datetime, timezone
+
+soren_home   = Path(sys.argv[1])
+commits_n   = int(sys.argv[2])
+date_arg    = sys.argv[3]   # "" or YYYY-MM-DD
+all_mode    = sys.argv[4] == "true"
+
+sys.path.insert(0, str(soren_home))
+
+from src.server.services.pattern_extractor import (
+    extract_patterns_from_commit,
+    extract_patterns_from_journal,
+    store_patterns,
+)
+from src.server.services.memory_store import memory_store
+import subprocess
+
+def get_recent_commits(n: int) -> list[str]:
+    try:
+        out = subprocess.check_output(
+            ["git", "log", f"-{n}", "--format=%H"],
+            text=True, cwd=str(soren_home), timeout=10,
+        ).strip()
+        return [l.strip() for l in out.splitlines() if l.strip()]
+    except Exception:
+        return []
+
+def get_all_journal_dates() -> list[str]:
+    journal_dir = soren_home / ".soren" / "journal"
+    return [d.name for d in sorted(journal_dir.glob("????-??-??")) if d.is_dir()]
+
+total_stored = 0
+total_found  = 0
+
+if all_mode:
+    # Extract from all journal dates
+    dates = get_all_journal_dates()
+    commits = get_recent_commits(20)
+elif date_arg:
+    dates = [date_arg]
+    commits = []
+else:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    dates = [today]
+    commits = get_recent_commits(commits_n)
+
+# --- Journal extraction ---
+for date in dates:
+    patterns = extract_patterns_from_journal(date)
+    if patterns:
+        stored = store_patterns(patterns)
+        total_found  += len(patterns)
+        total_stored += stored
+        print(f"Journal {date}: {len(patterns)} found, {stored} new stored")
+        for p in patterns[:3]:
+            conf = p.get('confidence', '?')
+            print(f"  [{conf}] {p['pattern'][:90]}")
+    else:
+        print(f"Journal {date}: no patterns found")
+
+# --- Commit extraction ---
+if commits:
+    print(f"\nCommits ({len(commits)}):")
+    for sha in commits:
+        patterns = extract_patterns_from_commit(sha)
+        if patterns:
+            stored = store_patterns(patterns)
+            total_found  += len(patterns)
+            total_stored += stored
+            print(f"  {sha[:7]}: {len(patterns)} found, {stored} new stored")
+            for p in patterns[:2]:
+                conf = p.get('confidence', '?')
+                print(f"    [{conf}] {p['pattern'][:85]}")
+
+stats = memory_store.stats()
+pattern_count = stats.get("by_type", {}).get("pattern", 0)
+print(f"\nSummary: {total_found} patterns found, {total_stored} new stored")
+print(f"Total pattern memories: {pattern_count}")
+PYEOF
+)
+
+uv run python -c "$python_script" "$(pwd)" "$COMMITS" "$DATE_ARG" "$ALL_MODE"

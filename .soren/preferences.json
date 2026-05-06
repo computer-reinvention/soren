@@ -1,0 +1,9 @@
+{
+  "heartbeat_warn_threshold": 300,
+  "heartbeat_nudge_interval": 600,
+  "heartbeat_max_nudges": 3,
+  "heartbeat_observe_timeout": 60,
+  "idle_sleep_minutes": 30,
+  "daily_budget_usd": 0,
+  "auto_compact_threshold": 0.85
+}

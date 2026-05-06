@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#===============================================================================
+# remind - Create reminder tasks in SOREN
+#
+# Usage:
+#   remind "title" "YYYY-MM-DD"                  - Create a reminder
+#   remind "title" "YYYY-MM-DD" "description"    - Create with description
+#
+# Creates a task via the API with tag=reminder and a due date.
+# The heartbeat system checks for due reminders and nudges the supervisor.
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_PORT="${SOREN_PORT:-8000}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+
+# Validate args
+title="${1:-}"
+due_date="${2:-}"
+description="${3:-}"
+
+[[ -z "$title" ]] && die "usage: remind \"<title>\" \"YYYY-MM-DD\" [\"description\"]"
+[[ -z "$due_date" ]] && die "usage: remind \"<title>\" \"YYYY-MM-DD\" [\"description\"]"
+
+# Validate date format
+if ! [[ "$due_date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    die "due_date must be YYYY-MM-DD format (got: $due_date)"
+fi
+
+# Build JSON payload
+payload=$(jq -n \
+    --arg title "$title" \
+    --arg description "$description" \
+    --arg due_date "$due_date" \
+    '{
+        title: $title,
+        description: $description,
+        tags: ["reminder"],
+        due_date: ($due_date + "T00:00:00Z"),
+        status: "pending",
+        source: "system"
+    }')
+
+# POST to API
+response=$(curl -sf --max-time 5 -X POST "http://localhost:${SOREN_PORT}/api/tasks" \
+    -H "Content-Type: application/json" \
+    -d "$payload" 2>&1) || die "API request failed — is the server running on port ${SOREN_PORT}?"
+
+ok "Reminder set: \"${title}\" due ${due_date}"

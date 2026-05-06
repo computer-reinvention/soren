@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# autonomy-check - Scan all work sources and output structured, actionable data
+#
+# Designed to feed the supervisor autonomy engine. The monitor calls this when
+# the supervisor is idle and injects the output as a rich [HEARTBEAT] message.
+#
+# Checks (in priority order):
+#   1. Mailbox  - unread messages with sender/type breakdown
+#   2. Workers  - active/idle counts with names
+#   3. Backlog  - pending items with priority breakdown
+#   4. Supervisors - project supervisor health
+#   5. Git      - uncommitted tracked changes
+#   6. Health   - system health endpoint
+#
+# Output modes:
+#   --summary    One-line-per-section format (default, used by monitor.sh)
+#   --raw        Raw JSON for programmatic consumption
+#
+# Exit 0 if work found, exit 1 if nothing to do
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+SOREN_PORT="${SOREN_PORT:-8000}"
+SOREN_MAILBOX="${SOREN_MAILBOX:-${SOREN_PROJECT_ROOT}/.soren/mailbox}"
+WORKER_IDLE_THRESHOLD=${WORKER_IDLE_THRESHOLD:-1800}  # 30 minutes in seconds
+
+# Parse flags
+OUTPUT_MODE="summary"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --summary) OUTPUT_MODE="summary"; shift ;;
+        --raw)     OUTPUT_MODE="raw"; shift ;;
+        *)         shift ;;
+    esac
+done
+
+# Accumulators for structured output
+mailbox_summary=""
+mailbox_count=0
+mailbox_priority=""
+worker_summary=""
+worker_active=0
+worker_idle_count=0
+worker_idle_names=""
+backlog_summary=""
+backlog_total=0
+supervisor_summary=""
+git_summary=""
+git_file_count=0
+health_summary=""
+highest_priority=""
+
+#───────────────────────────────────────────────────────────────────────────────
+# 1. Mailbox — unread messages with sender/type breakdown
+#───────────────────────────────────────────────────────────────────────────────
+
+if [[ -f "$SOREN_MAILBOX" ]] && [[ -s "$SOREN_MAILBOX" ]]; then
+    mailbox_count=$(wc -l < "$SOREN_MAILBOX" | tr -d ' ')
+    if ((mailbox_count > 0)); then
+        # Parse messages to extract senders and types
+        # Mailbox format: [timestamp] sender:name -> session:target: [TYPE] message
+        local_details=""
+        blocked_count=0
+        done_count=0
+        status_count=0
+        question_count=0
+        other_count=0
+        senders=()
+
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            # Extract sender name (between ] and ->)
+            sender=$(echo "$line" | sed -n 's/.*\] \([^:]*:[^ ]*\) ->.*/\1/p' | head -1)
+            if [[ -z "$sender" ]]; then
+                sender=$(echo "$line" | sed -n 's/.*\] \([^ ]*\) ->.*/\1/p' | head -1)
+            fi
+            [[ -n "$sender" ]] && senders+=("$sender")
+
+            # Extract subject field, then match tag at the START of subject only
+            # JSON format: "subject":"[TAG] ..." → extract after "subject":"
+            # Plain text: -> target: [TAG] ... → extract after ": "
+            subject=""
+            if echo "$line" | grep -q '"subject"'; then
+                subject=$(echo "$line" | sed -n 's/.*"subject":"\([^"]*\)".*/\1/p')
+            else
+                subject=$(echo "$line" | sed -n 's/.*-> [^:]*: *\(.*\)/\1/p')
+            fi
+
+            if echo "$subject" | grep -qE '^\[BLOCKED\]'; then
+                ((blocked_count++))
+            elif echo "$subject" | grep -qE '^\[DONE\]'; then
+                ((done_count++))
+            elif echo "$subject" | grep -qE '^\[STATUS\]'; then
+                ((status_count++))
+            elif echo "$subject" | grep -qE '^\[QUESTION\]'; then
+                ((question_count++))
+            else
+                ((other_count++))
+            fi
+        done < "$SOREN_MAILBOX"
+
+        # Build detail string
+        details_parts=()
+        ((blocked_count > 0)) && details_parts+=("${blocked_count} BLOCKED")
+        ((done_count > 0)) && details_parts+=("${done_count} DONE")
+        ((question_count > 0)) && details_parts+=("${question_count} QUESTION")
+        ((status_count > 0)) && details_parts+=("${status_count} STATUS")
+        ((other_count > 0)) && details_parts+=("${other_count} other")
+
+        # Unique senders
+        unique_senders=""
+        if ((${#senders[@]} > 0)); then
+            unique_senders=$(printf '%s\n' "${senders[@]}" | sort -u | paste -sd', ' -)
+        fi
+
+        type_detail=""
+        if ((${#details_parts[@]} > 0)); then
+            type_detail=$(IFS=', '; echo "${details_parts[*]}")
+        fi
+
+        mailbox_summary="${mailbox_count} unread"
+        if [[ -n "$type_detail" ]]; then
+            mailbox_summary="${mailbox_summary} (${type_detail})"
+        fi
+        if [[ -n "$unique_senders" ]]; then
+            mailbox_summary="${mailbox_summary} from: ${unique_senders}"
+        fi
+
+        # BLOCKED messages are highest priority
+        if ((blocked_count > 0)); then
+            mailbox_priority="blocked"
+            highest_priority="Mailbox has ${blocked_count} BLOCKED message(s) — agents need help"
+        elif ((question_count > 0)); then
+            mailbox_priority="question"
+            [[ -z "$highest_priority" ]] && highest_priority="Mailbox has ${question_count} QUESTION(s) awaiting response"
+        elif ((done_count > 0)); then
+            mailbox_priority="done"
+            [[ -z "$highest_priority" ]] && highest_priority="Mailbox has ${done_count} DONE report(s) to review"
+        fi
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 2. Workers — active/idle with names
+#───────────────────────────────────────────────────────────────────────────────
+
+context_dir="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+now=$(date +%s)
+
+if [[ -n "$windows" ]]; then
+    active_workers=()
+    idle_workers=()
+
+    while IFS= read -r wname; do
+        [[ -z "$wname" ]] && continue
+        # Skip system windows
+        [[ "$wname" == "monitor" ]] && continue
+        [[ "$wname" == "supervisor" ]] && continue
+        [[ "$wname" == sup-* ]] && continue
+        [[ "$wname" == "sentry" ]] && continue
+
+        # Check if this looks like a worker (has a context file)
+        local_ctx="${context_dir}/${wname}-context.md"
+        if [[ ! -f "$local_ctx" ]]; then
+            continue
+        fi
+
+        # Check idle time via context file mtime
+        file_mtime=$(stat -c %Y "$local_ctx" 2>/dev/null || stat -f %m "$local_ctx" 2>/dev/null || echo 0)
+
+        idle_seconds=$((now - file_mtime))
+        if ((idle_seconds > WORKER_IDLE_THRESHOLD)); then
+            idle_min=$((idle_seconds / 60))
+            idle_workers+=("${wname} (${idle_min}m)")
+            ((worker_idle_count++))
+        else
+            active_workers+=("$wname")
+        fi
+    done <<< "$windows"
+
+    worker_active=${#active_workers[@]}
+    total_workers=$((worker_active + worker_idle_count))
+
+    if ((total_workers > 0)); then
+        worker_summary="${worker_active} active"
+        if ((worker_idle_count > 0)); then
+            worker_idle_names=$(IFS=', '; echo "${idle_workers[*]}")
+            worker_summary="${worker_summary}, ${worker_idle_count} idle >30min (${worker_idle_names})"
+            [[ -z "$highest_priority" ]] && highest_priority="Worker(s) idle >30min: ${worker_idle_names} — consider cleanup"
+        fi
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 3. Backlog — pending items with priority breakdown (from tasks.db)
+#───────────────────────────────────────────────────────────────────────────────
+
+tasks_db="${SOREN_PROJECT_ROOT}/.soren/tasks.db"
+if [[ -f "$tasks_db" ]]; then
+    p1=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='critical';" 2>/dev/null || echo 0)
+    p2=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='high';" 2>/dev/null || echo 0)
+    p3=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='medium';" 2>/dev/null || echo 0)
+    p4=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='low';" 2>/dev/null || echo 0)
+    backlog_total=$((p1 + p2 + p3 + p4))
+
+    if ((backlog_total > 0)); then
+        priority_parts=()
+        ((p1 > 0)) && priority_parts+=("${p1} critical")
+        ((p2 > 0)) && priority_parts+=("${p2} high")
+        ((p3 > 0)) && priority_parts+=("${p3} medium")
+        ((p4 > 0)) && priority_parts+=("${p4} low")
+
+        backlog_summary="${backlog_total} items ($(IFS=', '; echo "${priority_parts[*]}"))"
+
+        if ((p1 > 0)) && [[ -z "$highest_priority" ]]; then
+            highest_priority="Backlog has ${p1} critical-priority item(s) — claim with ./tools/backlog next"
+        elif ((p2 > 0)) && [[ -z "$highest_priority" ]]; then
+            highest_priority="Backlog has ${p2} high-priority item(s) pending"
+        fi
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 4. Project supervisors — health status
+#───────────────────────────────────────────────────────────────────────────────
+
+registry="${SOREN_PROJECT_ROOT}/.soren/projects.json"
+if [[ -f "$registry" ]]; then
+    active_projects=$(jq -r '.projects[] | select(.active == true and .is_self == false) | .id' "$registry" 2>/dev/null || true)
+
+    if [[ -n "$active_projects" ]]; then
+        sup_parts=()
+        while IFS= read -r project_id; do
+            [[ -z "$project_id" ]] && continue
+            local_sup="sup-${project_id}"
+            local_hb="${SOREN_PROJECT_ROOT}/.soren/.${local_sup}-heartbeat"
+
+            if ! echo "$windows" | grep -qxF "$local_sup" 2>/dev/null; then
+                sup_parts+=("${local_sup} DOWN")
+                [[ -z "$highest_priority" ]] && highest_priority="Project supervisor ${local_sup} is down — needs relaunch"
+                continue
+            fi
+
+            if [[ -f "$local_hb" ]]; then
+                local_beat=$(cat "$local_hb" 2>/dev/null || echo 0)
+                if [[ "$local_beat" =~ ^[0-9]+$ ]]; then
+                    local_staleness=$((now - local_beat))
+                    if ((local_staleness < 600)); then
+                        sup_parts+=("${local_sup} active")
+                    elif ((local_staleness < 1800)); then
+                        idle_hr=$((local_staleness / 60))
+                        sup_parts+=("${local_sup} idle ${idle_hr}min")
+                    else
+                        idle_hr=$((local_staleness / 3600))
+                        idle_rem=$(( (local_staleness % 3600) / 60 ))
+                        if ((idle_hr > 0)); then
+                            sup_parts+=("${local_sup} idle ${idle_hr}hr${idle_rem}m")
+                        else
+                            sup_parts+=("${local_sup} idle ${idle_rem}min")
+                        fi
+                    fi
+                else
+                    sup_parts+=("${local_sup} unknown")
+                fi
+            else
+                sup_parts+=("${local_sup} no-heartbeat")
+            fi
+        done <<< "$active_projects"
+
+        if ((${#sup_parts[@]} > 0)); then
+            supervisor_summary=$(IFS=', '; echo "${sup_parts[*]}")
+        fi
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 4a. Scheduled check-ins — fire due reminders
+#───────────────────────────────────────────────────────────────────────────────
+
+schedule_summary=""
+schedule_tool="${SOREN_PROJECT_ROOT}/tools/schedule"
+if [[ -x "$schedule_tool" ]]; then
+    fired_notes=$("$schedule_tool" fire 2>/dev/null || true)
+    if [[ -n "$fired_notes" ]]; then
+        fired_count=$(echo "$fired_notes" | wc -l | tr -d ' ')
+        schedule_summary="${fired_count} reminder(s): ${fired_notes}"
+        highest_priority="Scheduled reminder: $(echo "$fired_notes" | head -1)"
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 4b. Watchdog — stuck agent detection
+#───────────────────────────────────────────────────────────────────────────────
+
+watchdog_summary=""
+watchdog_tool="${SOREN_PROJECT_ROOT}/tools/watchdog"
+if [[ -x "$watchdog_tool" ]]; then
+    watchdog_output=$("$watchdog_tool" scan 2>/dev/null || true)
+    # Extract stuck agents (lines with red dot indicator)
+    stuck_lines=$(echo "$watchdog_output" | grep -E '●.*critical|●.*warning' | grep -v 'healthy' || true)
+    if [[ -n "$stuck_lines" ]]; then
+        # Count stuck agents
+        stuck_count=$(echo "$stuck_lines" | wc -l | tr -d ' ')
+        # Extract agent names and issues
+        stuck_details=$(echo "$stuck_lines" | sed 's/.*●[[:space:]]*//' | sed 's/[[:space:]]*healthy.*//' | tr '\n' '; ' | sed 's/; $//')
+        watchdog_summary="${stuck_count} stuck agent(s): ${stuck_details}"
+        [[ -z "$highest_priority" ]] && highest_priority="Watchdog: ${stuck_count} agent(s) stuck — run ./tools/watchdog scan for details"
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 5. Git — uncommitted tracked changes
+#───────────────────────────────────────────────────────────────────────────────
+
+cd "$SOREN_PROJECT_ROOT"
+git_diff_stat=$(git diff --stat HEAD -- \
+    ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' \
+    ':!.soren/.router_line' ':!.soren/.router_position' ':!.soren/.log_markers/' \
+    ':!.soren/audit.log' ':!.soren/tasks.db' 2>/dev/null || true)
+
+if [[ -n "$git_diff_stat" ]]; then
+    git_file_count=$(echo "$git_diff_stat" | grep -c '|' || echo 0)
+    git_stat_line=$(echo "$git_diff_stat" | tail -1 | sed 's/^ *//')
+    git_summary="${git_file_count} uncommitted files (${git_stat_line})"
+    [[ -z "$highest_priority" ]] && highest_priority="Uncommitted changes — consider committing"
+fi
+
+# Also check untracked files (new files not yet added)
+untracked_count=$(git ls-files --others --exclude-standard -- ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' 2>/dev/null | wc -l | tr -d ' ')
+if ((untracked_count > 0)); then
+    if [[ -n "$git_summary" ]]; then
+        git_summary="${git_summary}, ${untracked_count} untracked"
+    else
+        git_summary="${untracked_count} untracked files"
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 6. Health — system health endpoint
+#───────────────────────────────────────────────────────────────────────────────
+
+if ! curl -sf "http://localhost:${SOREN_PORT}/api/webhooks/health" >/dev/null 2>&1; then
+    health_summary="FAILED (port ${SOREN_PORT})"
+    highest_priority="Server health check FAILED — immediate attention required"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# Check if anything was found
+#───────────────────────────────────────────────────────────────────────────────
+
+has_findings=false
+[[ -n "$mailbox_summary" ]] && has_findings=true
+[[ -n "$worker_summary" ]] && has_findings=true
+[[ -n "$backlog_summary" ]] && has_findings=true
+[[ -n "$supervisor_summary" ]] && has_findings=true
+[[ -n "$schedule_summary" ]] && has_findings=true
+[[ -n "$watchdog_summary" ]] && has_findings=true
+[[ -n "$git_summary" ]] && has_findings=true
+[[ -n "$health_summary" ]] && has_findings=true
+
+if [[ "$has_findings" != "true" ]]; then
+    if [[ "$OUTPUT_MODE" == "summary" ]]; then
+        echo "All clear — no pending work found."
+    fi
+    exit 1
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# Output
+#───────────────────────────────────────────────────────────────────────────────
+
+if [[ "$OUTPUT_MODE" == "summary" ]]; then
+    # Structured summary — one line per section, designed for monitor.sh to
+    # assemble into a [HEARTBEAT] message
+    [[ -n "$mailbox_summary" ]]    && echo "Mailbox: ${mailbox_summary}"
+    [[ -n "$worker_summary" ]]     && echo "Workers: ${worker_summary}"
+    [[ -n "$backlog_summary" ]]    && echo "Backlog: ${backlog_summary}"
+    [[ -n "$supervisor_summary" ]] && echo "Supervisors: ${supervisor_summary}"
+    [[ -n "$schedule_summary" ]]   && echo "Reminders: ${schedule_summary}"
+    [[ -n "$watchdog_summary" ]]   && echo "Watchdog: ${watchdog_summary}"
+    [[ -n "$git_summary" ]]        && echo "Git: ${git_summary}"
+    [[ -n "$health_summary" ]]     && echo "Health: ${health_summary}"
+
+    # Priority recommendation
+    if [[ -n "$highest_priority" ]]; then
+        echo "---"
+        echo "Highest priority: ${highest_priority}"
+    fi
+fi
+
+exit 0

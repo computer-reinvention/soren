@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# pre-commit hook — validates staged Python and TypeScript files before commit.
+#
+# Python (.py):  AST parse each staged file to catch syntax errors.
+# TS/TSX:        Run tsc --noEmit if any frontend files are staged.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Collect staged files (added, copied, modified — not deleted)
+staged_py=()
+staged_ts=()
+
+while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    case "$file" in
+        *.py)          staged_py+=("$file") ;;
+        *.ts|*.tsx)    staged_ts+=("$file") ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+errors=0
+
+# --- Python: AST syntax check ---
+if [[ ${#staged_py[@]} -gt 0 ]]; then
+    echo "pre-commit: checking ${#staged_py[@]} Python file(s)..."
+    for f in "${staged_py[@]}"; do
+        abs="${REPO_ROOT}/${f}"
+        if ! python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$abs" 2>/dev/null; then
+            # Re-run to show the actual error message
+            python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$abs" || true
+            echo "  SYNTAX ERROR: $f"
+            ((errors++)) || true
+        fi
+    done
+fi
+
+# --- TypeScript: tsc --noEmit ---
+if [[ ${#staged_ts[@]} -gt 0 ]]; then
+    echo "pre-commit: checking TypeScript (${#staged_ts[@]} file(s) staged)..."
+    if [[ -f "${REPO_ROOT}/src/frontend/package.json" ]]; then
+        tsc_output=$(cd "${REPO_ROOT}/src/frontend" && npx tsc --noEmit --pretty false 2>&1 | head -20 || true)
+        if [[ -n "$tsc_output" ]]; then
+            echo "$tsc_output"
+            echo "  TypeScript errors found."
+            ((errors++)) || true
+        fi
+    else
+        echo "  WARN: src/frontend/package.json not found, skipping tsc"
+    fi
+fi
+
+if [[ $errors -gt 0 ]]; then
+    echo "pre-commit: $errors check(s) failed. Fix errors and re-stage."
+    exit 1
+fi
+
+exit 0

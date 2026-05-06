@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# auto-maintenance - Periodic cleanup of stale workers and orphaned files
+#
+# Actions:
+#   1. Kill workers with no activity for 30+ min (context file mtime)
+#   2. Remove worker context files for windows that no longer exist
+#
+# Safety:
+#   - NEVER touches supervisor, project-supervisor (sup-*), sentry, or monitor
+#   - Only kills workers, not system-level agents
+#
+# Designed to be called by monitor.sh every 5 minutes.
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+SOREN_PORT="${SOREN_PORT:-8000}"
+WORKER_IDLE_THRESHOLD=${WORKER_IDLE_THRESHOLD:-1800}  # 30 minutes in seconds
+
+CONTEXT_DIR="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+
+# Protected window names — never touch these
+is_protected() {
+    local name="$1"
+    [[ "$name" == "supervisor" ]] && return 0
+    [[ "$name" == sup-* ]] && return 0
+    [[ "$name" == "sentry" ]] && return 0
+    [[ "$name" == "monitor" ]] && return 0
+    [[ "$name" == perm-* ]] && return 0   # Name-based fast path for permanent workers
+
+    # Also check registry for permanent flag (covers non-standard names)
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    if [[ -f "$reg_file" ]]; then
+        local is_perm
+        is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null)
+        [[ "$is_perm" == "true" ]] && return 0
+    fi
+
+    return 1
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# 1. Kill idle workers (context file mtime > threshold)
+#───────────────────────────────────────────────────────────────────────────────
+
+kill_idle_workers() {
+    [[ -d "$CONTEXT_DIR" ]] || return 0
+
+    local now windows
+    now=$(date +%s)
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    for ctx_file in "${CONTEXT_DIR}"/*-context.md; do
+        [[ -f "$ctx_file" ]] || continue
+        local basename worker_name
+        basename=$(basename "$ctx_file")
+        worker_name="${basename%-context.md}"
+
+        # Skip protected windows
+        is_protected "$worker_name" && continue
+
+        # Only check workers that have a live tmux window
+        echo "$windows" | grep -qxF "$worker_name" || continue
+
+        # Check context file modification time
+        local file_mtime
+        file_mtime=$(stat -c %Y "$ctx_file" 2>/dev/null || stat -f %m "$ctx_file" 2>/dev/null || echo 0)
+
+        local idle_seconds=$((now - file_mtime))
+        if ((idle_seconds > WORKER_IDLE_THRESHOLD)); then
+            local idle_min=$((idle_seconds / 60))
+            echo "[MAINTENANCE] Killing idle worker '${worker_name}' (${idle_min}m inactive)"
+
+            # Archive conversation before killing
+            curl -sX POST "http://localhost:${SOREN_PORT}/api/agents/${worker_name}/archive" >/dev/null 2>&1 || true
+
+            # Graceful stop then kill
+            tmux send-keys -t "${SOREN_SESSION}:${worker_name}" C-c 2>/dev/null || true
+            sleep 1
+            tmux kill-window -t "${SOREN_SESSION}:${worker_name}" 2>/dev/null || true
+        fi
+    done
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# 2. Remove orphaned context files (window no longer exists)
+#───────────────────────────────────────────────────────────────────────────────
+
+cleanup_orphaned_contexts() {
+    [[ -d "$CONTEXT_DIR" ]] || return 0
+
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    for ctx_file in "${CONTEXT_DIR}"/*-context.md; do
+        [[ -f "$ctx_file" ]] || continue
+        local basename worker_name
+        basename=$(basename "$ctx_file")
+        worker_name="${basename%-context.md}"
+
+        # Skip protected names — their context files are managed separately
+        is_protected "$worker_name" && continue
+
+        # If no matching tmux window exists, the context file is orphaned
+        if ! echo "$windows" | grep -qxF "$worker_name"; then
+            echo "[MAINTENANCE] Removing orphaned context: ${basename}"
+            rm -f "$ctx_file"
+        fi
+    done
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    kill_idle_workers
+    cleanup_orphaned_contexts
+}
+
+main

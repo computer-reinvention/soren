@@ -1,0 +1,119 @@
+import { useState } from 'react';
+import { Terminal, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
+import { useThemeStore } from '../../stores/themeStore';
+import { useProjectStore } from '../../stores/projectStore';
+import { useProjects } from '../../hooks/useProjects';
+import { RegisterProjectDialog } from '../projects/RegisterProjectDialog';
+import { HeartbeatIndicator } from '../status/HeartbeatIndicator';
+import { BudgetStatusline } from '../budget/BudgetPanel';
+import { Button } from '../ui/button';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '../ui/tooltip';
+import { useAuthStore } from '../../stores/authStore';
+
+export function Header() {
+  const { theme, toggleTheme } = useThemeStore();
+  const { selectedProjectId, selectProject } = useProjectStore();
+  const { data: projectsData } = useProjects();
+  const [registerOpen, setRegisterOpen] = useState(false);
+  const { username, isAuthenticated, logout } = useAuthStore();
+
+  const projects = projectsData?.projects || [];
+
+  return (
+    <header className="h-12 border-b border-border/50 flex items-center justify-between px-4 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="flex items-center gap-3">
+        {/* Dev-toolish logo */}
+        <div className="flex items-center gap-2">
+          <div className="relative">
+            <Terminal className="h-5 w-5 text-emerald-500" strokeWidth={2.5} />
+            <div className="absolute -bottom-0.5 -right-0.5 h-2 w-2 bg-emerald-500 rounded-full animate-pulse" />
+          </div>
+          <span className="font-mono font-bold text-base tracking-tight">
+            soren
+          </span>
+        </div>
+        <div className="h-4 w-px bg-border" />
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
+          <GitBranch className="h-3.5 w-3.5" />
+          <span>main</span>
+        </div>
+
+        {/* Project Selector */}
+        {projects.length > 0 && (
+          <>
+            <div className="h-4 w-px bg-border" />
+            <select
+              value={selectedProjectId ?? ''}
+              onChange={(e) => selectProject(e.target.value || null)}
+              className="h-7 text-xs font-mono rounded-md border bg-background px-2 text-foreground"
+            >
+              <option value="">All Projects</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </select>
+          </>
+        )}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-7 w-7"
+          onClick={() => setRegisterOpen(true)}
+          title="Register project"
+        >
+          <FolderPlus className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground font-mono hidden sm:inline">
+          multi-agent orchestrator
+        </span>
+
+        <div className="h-4 w-px bg-border" />
+
+        {/* Heartbeat + cost badge + dark mode grouped tight */}
+        <div className="flex items-center">
+          <HeartbeatIndicator />
+          <BudgetStatusline />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleTheme}
+            className="h-8 w-8"
+          >
+          {theme === 'dark' ? (
+            <Sun className="h-4 w-4 text-yellow-500" />
+          ) : (
+            <Moon className="h-4 w-4 text-slate-600" />
+          )}
+          <span className="sr-only">Toggle theme</span>
+          </Button>
+          {isAuthenticated && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={logout}
+                  className="h-8 w-8"
+                >
+                  <LogOut className="h-4 w-4 text-muted-foreground" />
+                  <span className="sr-only">Sign out {username}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs font-mono">
+                sign out{username ? ` (${username})` : ''}
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+      </div>
+      <RegisterProjectDialog open={registerOpen} onOpenChange={setRegisterOpen} />
+    </header>
+  );
+}

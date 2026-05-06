@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# prune-lessons - Remove stale lessons from worker role files
+#
+# Usage:  prune-lessons [--apply|--json]
+# Rules:  >7 days old + <2 confirmations = prune. "confirmed Nx" (N>=2) = keep.
+
+set -uo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+CONTEXTS_DIR="${SOREN_HOME}/.soren/worker-contexts"
+
+MODE="dry-run"
+case "${1:-}" in --apply) MODE="apply" ;; --json) MODE="json" ;; esac
+
+today_epoch=$(date -u +%s)
+cutoff_days=7
+total_workers=0 total_lessons=0 total_pruned=0 total_kept=0
+worker_summaries=""
+
+for role_file in "$CONTEXTS_DIR"/*-role.md; do
+    [[ -f "$role_file" ]] || continue
+    section_line=$(grep -n '## Accumulated Knowledge' "$role_file" | tail -1 | cut -d: -f1) || true
+    [[ -z "$section_line" ]] && continue
+
+    worker=$(basename "$role_file" .md); worker="${worker%-role}"
+    ((total_workers++))
+    keep_lines="" prune_count=0 keep_count=0
+
+    while IFS= read -r line; do
+        [[ "$line" =~ ^-\ \[([0-9]{4}-[0-9]{2}-[0-9]{2})\] ]] || continue
+        ((total_lessons++))
+        entry_date="${BASH_REMATCH[1]}"
+
+        # Parse date to epoch (macOS then Linux fallback)
+        entry_epoch=$(date -jf "%Y-%m-%d" "$entry_date" +%s 2>/dev/null) || \
+            entry_epoch=$(date -d "$entry_date" +%s 2>/dev/null) || \
+            entry_epoch=$today_epoch
+
+        age_days=$(( (today_epoch - entry_epoch) / 86400 ))
+        confirmed=0
+        [[ "$line" =~ confirmed\ ([0-9]+) ]] && confirmed="${BASH_REMATCH[1]}"
+
+        if (( age_days > cutoff_days && confirmed < 2 )); then
+            ((prune_count++)); ((total_pruned++))
+            [[ "$MODE" == "dry-run" ]] && echo "  PRUNE [$worker] (${age_days}d old): ${line:0:80}"
+        else
+            keep_lines="${keep_lines}${line}
+"
+            ((keep_count++)); ((total_kept++))
+        fi
+    done < <(tail -n +"$section_line" "$role_file" | grep '^- \[')
+
+    if [[ "$MODE" == "apply" ]] && (( prune_count > 0 )); then
+        head_content=$(head -n "$section_line" "$role_file")
+        tmp="${role_file}.tmp.$$"
+        { echo "$head_content"; echo ""; [[ -n "${keep_lines%$'\n'}" ]] && printf '%s' "$keep_lines"; } > "$tmp" && mv "$tmp" "$role_file"
+        echo "  APPLIED [$worker]: pruned $prune_count, kept $keep_count"
+    fi
+    worker_summaries="${worker_summaries}{\"worker\":\"$worker\",\"total\":$((prune_count+keep_count)),\"pruned\":$prune_count,\"kept\":$keep_count},"
+done
+
+case "$MODE" in
+    json)
+        worker_summaries="${worker_summaries%,}"
+        echo "{\"workers\":$total_workers,\"total_lessons\":$total_lessons,\"pruned\":$total_pruned,\"kept\":$total_kept,\"details\":[${worker_summaries}]}"
+        ;;
+    dry-run)
+        echo ""
+        echo "Summary: $total_workers workers, $total_lessons lessons ($total_kept kept, $total_pruned stale)"
+        (( total_pruned > 0 )) && echo "Run with --apply to remove stale entries." || true
+        ;;
+    apply)
+        echo "Done: pruned $total_pruned stale lessons across $total_workers workers." ;;
+esac
+exit 0

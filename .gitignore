@@ -1,0 +1,80 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+vendor/
+venv/
+__pycache__/
+
+# Build outputs
+dist/
+build/
+*.o
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+.venv
+
+# SOREN runtime (locks, server logs)
+.soren/logs/
+.soren/run/
+
+# SOREN runtime data — must survive git reset --hard rollback
+# Journals (accumulated intelligence)
+.soren/journal/
+# Databases (agent registry, conversations, memories, auth)
+.soren/*.db
+.soren/*.db-shm
+.soren/*.db-wal
+# Agent registry JSON cache (regenerated from .db)
+.soren/agent_registry.json
+# Mailbox (ephemeral message queue)
+.soren/mailbox
+# Worker contexts (generated per-spawn, not source code)
+.soren/worker-contexts/
+# Daemon state files
+.soren/.compact-timestamps
+.soren/.compact-effectiveness
+.soren/.supervisor-heartbeat
+.soren/.sup-site-heartbeat
+.soren/.last_healthy_commit
+.soren/.router_line
+.soren/.router_position
+.soren/.log_markers/
+.soren/.fix-retries/
+.soren/.ui-check-flags/
+.soren/.reminder-sent-ids
+.soren/.auth-secret
+# Mailbox archives (historical, large)
+.soren/mailbox-archive/
+.soren/mailbox.archive-*
+
+# MCP config (contains secret tokens)
+.mcp.json
+
+# Encrypted secret vault (passphrase not stored; vault itself excluded from VCS)
+.soren/secrets.enc
+.soren/.secrets-salt
+
+# SOREN runtime state (not tracked)
+.soren/.heartbeat-*
+.soren/.last-*
+.soren/.sup-*
+.soren/.tunnel.*
+.soren/orchestrator.log*
+.soren/server.pid
+nohup.out

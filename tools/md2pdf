@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+#===============================================================================
+# md2pdf - Convert Markdown files to PDF
+#
+# Usage:
+#   md2pdf <input.md>                         - Convert to PDF (same dir, .pdf ext)
+#   md2pdf <input.md> <output.pdf>            - Convert with custom output path
+#   md2pdf <input.md> --title "My Doc"        - Custom document title
+#   md2pdf help                               - Show help
+#
+# Supports: headings, code blocks, tables, blockquotes, bullet/numbered lists,
+#           inline formatting (bold, italic, code, links), horizontal rules.
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SCRIPT="${SOREN_HOME}/src/server/scripts/md2pdf.py"
+
+RED='\033[0;31m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+
+cmd_help() {
+    cat << 'EOF'
+md2pdf - Convert Markdown files to PDF
+
+USAGE:
+    md2pdf <input.md>                         Convert (output next to input)
+    md2pdf <input.md> <output.pdf>            Convert with custom output
+    md2pdf <input.md> --title "My Doc"        Custom document title
+    md2pdf help                               Show this help
+
+FEATURES:
+    - Headings (h1-h6) with proper sizing and underlines
+    - Fenced code blocks with monospace font and background
+    - Tables with headers and borders
+    - Blockquotes with left border styling
+    - Bullet and numbered lists with nesting
+    - Inline: **bold**, *italic*, `code`, [links](url)
+    - Horizontal rules
+    - Unicode sanitization (em-dashes, arrows, etc.)
+
+EXAMPLES:
+    md2pdf README.md
+    md2pdf docs/spec.md /tmp/spec.pdf
+    md2pdf notes.md --title "Meeting Notes"
+
+ENVIRONMENT:
+    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+EOF
+}
+
+cmd_convert() {
+    local input="${1:-}"
+    [[ -z "$input" ]] && die "usage: md2pdf <input.md> [output.pdf]"
+    [[ ! -f "$input" ]] && die "file not found: $input"
+    [[ ! -f "$SCRIPT" ]] && die "script not found: $SCRIPT"
+
+    shift
+    cd "$SOREN_HOME"
+    uv run python "$SCRIPT" "$input" "$@"
+}
+
+main() {
+    case "${1:-help}" in
+        help|--help|-h)
+            cmd_help
+            ;;
+        *)
+            cmd_convert "$@"
+            ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# tools/auth — Manage SOREN dashboard users
+# Usage: ./tools/auth <subcommand> [args]
+#   add-user <username> [password]   Add a user (generates password if omitted)
+#   remove-user <username>           Remove a user
+#   list-users                       List all users
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+SUBCMD="${1:-}"
+
+case "$SUBCMD" in
+  add-user)
+    USERNAME="${2:-}"
+    PASSWORD="${3:-}"
+    if [[ -z "$USERNAME" ]]; then
+      echo "Usage: ./tools/auth add-user <username> [password]" >&2
+      exit 1
+    fi
+    uv run python - "$USERNAME" "$PASSWORD" <<'EOF'
+import sys
+from src.server.services.auth import add_user, init_db
+init_db()
+username = sys.argv[1]
+password = sys.argv[2] if sys.argv[2] else None
+pw = add_user(username, password)
+print(f"User '{username}' added. Password: {pw}")
+EOF
+    ;;
+
+  remove-user)
+    USERNAME="${2:-}"
+    if [[ -z "$USERNAME" ]]; then
+      echo "Usage: ./tools/auth remove-user <username>" >&2
+      exit 1
+    fi
+    uv run python - "$USERNAME" <<'EOF'
+import sys
+from src.server.services.auth import remove_user, init_db
+init_db()
+username = sys.argv[1]
+removed = remove_user(username)
+if removed:
+    print(f"User '{username}' removed.")
+else:
+    print(f"User '{username}' not found.", file=sys.stderr)
+    sys.exit(1)
+EOF
+    ;;
+
+  list-users)
+    uv run python - <<'EOF'
+from src.server.services.auth import list_users, init_db
+init_db()
+users = list_users()
+if not users:
+    print("No users found.")
+else:
+    print(f"{'ID':<5} {'Username':<20} {'Created At'}")
+    print("-" * 50)
+    for u in users:
+        print(f"{u['id']:<5} {u['username']:<20} {u['created_at']}")
+EOF
+    ;;
+
+  *)
+    echo "Usage: ./tools/auth <subcommand> [args]"
+    echo ""
+    echo "Subcommands:"
+    echo "  add-user <username> [password]   Add a user"
+    echo "  remove-user <username>           Remove a user"
+    echo "  list-users                       List all users"
+    exit 1
+    ;;
+esac

@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+# memory-index - Index journal entries and artifacts into semantic memory store
+#
+# Usage: memory-index [--date YYYY-MM-DD] [--all]
+#                     [--project <id>] [--all-projects]
+#
+#   No args:            index SOREN journal for today + yesterday
+#   --date YYYY-MM-DD:  index SOREN journal for a specific date
+#   --all:              index SOREN journal for all available dates
+#   --project <id>:     index a specific project (journal + docs)
+#   --all-projects:     index all active projects from projects.json
+
+set -uo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+JOURNAL_DIR="${SOREN_HOME}/.soren/journal"
+PROJECTS_FILE="${SOREN_HOME}/.soren/projects.json"
+
+# Parse args
+DATE_MODE="recent"
+SPECIFIC_DATE=""
+PROJECT_MODE="self"
+PROJECT_ID=""
+
+WITH_PATTERNS=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --all)           DATE_MODE="all"; shift ;;
+        --date)          DATE_MODE="single"; SPECIFIC_DATE="${2:-}"; shift 2 ;;
+        --project)       PROJECT_MODE="single"; PROJECT_ID="${2:-}"; shift 2 ;;
+        --all-projects)  PROJECT_MODE="all"; shift ;;
+        --with-patterns) WITH_PATTERNS=true; shift ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+# Build Python script that uses memory_store to index entries
+python_script=$(cat <<'PYEOF'
+import sys
+import json
+import re
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
+soren_home    = Path(sys.argv[1])
+date_mode    = sys.argv[2]   # recent | single | all
+project_mode = sys.argv[3]   # self | single | all
+project_id   = sys.argv[4]   # "" unless single
+specific_date = sys.argv[5]  # "" unless date_mode=single
+
+# Add project root to path so we can import the service
+sys.path.insert(0, str(soren_home))
+from src.server.services.memory_store import memory_store
+
+projects_file = soren_home / ".soren" / "projects.json"
+
+
+def load_projects() -> list[dict]:
+    if not projects_file.exists():
+        return []
+    data = json.loads(projects_file.read_text())
+    return [p for p in data.get("projects", []) if p.get("active", True)]
+
+
+def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
+    """Index journal entries and artifacts from a journal directory.
+
+    Returns (entries_added, artifacts_added).
+    """
+    if not journal_dir.exists():
+        return 0, 0
+
+    total_entries = 0
+    total_artifacts = 0
+
+    for day_dir in sorted(journal_dir.glob("????-??-??")):
+        if not day_dir.is_dir():
+            continue
+        d = day_dir.name
+
+        # Index journal entries (split by ## headers)
+        journal_file = day_dir / "journal.md"
+        if journal_file.exists():
+            content = journal_file.read_text()
+            sections = re.split(r'^(## .+)$', content, flags=re.MULTILINE)
+            entries = []
+            i = 1
+            while i < len(sections) - 1:
+                header = sections[i].strip()
+                body = sections[i + 1].strip()
+                if body:
+                    full_text = f"{header}\n{body}"
+                    entries.append({
+                        "content": full_text,
+                        "source_type": "journal",
+                        "source_path": f"{pid}/.soren/journal/{d}/journal.md",
+                        "keywords": [],
+                        "tags": [d, pid],
+                        "project_id": pid,
+                    })
+                i += 2
+            if entries:
+                total_entries += memory_store.add_memories_batch(entries)
+
+        # Index artifacts (markdown files)
+        artifacts_dir = day_dir / "artifacts"
+        if artifacts_dir.exists():
+            artifact_entries = []
+            for artifact in sorted(artifacts_dir.glob("*.md")):
+                text = artifact.read_text().strip()
+                if len(text) >= 20:
+                    artifact_entries.append({
+                        "content": text[:2000],
+                        "source_type": "artifact",
+                        "source_path": f"{pid}/.soren/journal/{d}/artifacts/{artifact.name}",
+                        "keywords": [],
+                        "tags": [d, artifact.stem, pid],
+                        "project_id": pid,
+                    })
+            if artifact_entries:
+                total_artifacts += memory_store.add_memories_batch(artifact_entries)
+
+    return total_entries, total_artifacts
+
+
+def index_docs(project_path: Path, pid: str) -> int:
+    """Index key documentation files when no journal exists.
+
+    Looks for: README.md, CLAUDE.md, docs/**/*.md
+    Returns count added.
+    """
+    candidates = []
+    for name in ("README.md", "CLAUDE.md"):
+        f = project_path / name
+        if f.exists():
+            candidates.append(f)
+    docs_dir = project_path / "docs"
+    if docs_dir.exists():
+        candidates.extend(sorted(docs_dir.glob("**/*.md")))
+
+    if not candidates:
+        return 0
+
+    entries = []
+    for f in candidates:
+        text = f.read_text().strip()
+        if len(text) >= 20:
+            rel = str(f.relative_to(project_path))
+            entries.append({
+                "content": text[:2000],
+                "source_type": "documentation",
+                "source_path": f"{pid}/{rel}",
+                "keywords": [],
+                "tags": [pid, f.stem],
+                "project_id": pid,
+            })
+
+    if not entries:
+        return 0
+    return memory_store.add_memories_batch(entries)
+
+
+def index_project(project: dict) -> None:
+    pid  = project["id"]
+    path = Path(project["path"])
+    print(f"\nIndexing project: {pid} ({path})")
+
+    # If this is the self project, use date-mode journal indexing
+    if project.get("is_self"):
+        journal_dir = path / ".soren" / "journal"
+        entries, artifacts = index_journal_dir(journal_dir, pid)
+        print(f"  Indexed {entries} journal entries, {artifacts} artifacts")
+        return
+
+    # External project: prefer journal, fall back to docs
+    ext_journal = path / ".soren" / "journal"
+    if ext_journal.exists():
+        entries, artifacts = index_journal_dir(ext_journal, pid)
+        print(f"  Indexed {entries} journal entries, {artifacts} artifacts (from journal)")
+    else:
+        added = index_docs(path, pid)
+        print(f"  Indexed {added} documentation files (no journal found)")
+
+
+# ── Main logic ───────────────────────────────────────────────────────────────
+
+if project_mode == "all":
+    projects = load_projects()
+    if not projects:
+        print("No active projects found in projects.json")
+        sys.exit(0)
+    for p in projects:
+        index_project(p)
+
+elif project_mode == "single":
+    if not project_id:
+        print("Error: --project requires a project ID", file=sys.stderr)
+        sys.exit(1)
+    projects = load_projects()
+    match = next((p for p in projects if p["id"] == project_id), None)
+    if not match:
+        print(f"Error: project '{project_id}' not found in projects.json", file=sys.stderr)
+        sys.exit(1)
+    index_project(match)
+
+else:
+    # self/date-based mode — index SOREN journal only
+    journal_dir = soren_home / ".soren" / "journal"
+    dates = []
+    if date_mode == "recent":
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        if (journal_dir / today).is_dir():
+            dates.append(today)
+        if (journal_dir / yesterday).is_dir():
+            dates.append(yesterday)
+    elif date_mode == "single":
+        if not specific_date:
+            print("Error: --date requires YYYY-MM-DD argument", file=sys.stderr)
+            sys.exit(1)
+        if (journal_dir / specific_date).is_dir():
+            dates.append(specific_date)
+    else:  # all
+        dates = [d.name for d in sorted(journal_dir.glob("????-??-??")) if d.is_dir()]
+
+    if not dates:
+        print("No journal directories found to index.")
+        sys.exit(0)
+
+    print(f"Indexing {len(dates)} date(s): {' '.join(dates)}")
+    total_entries = 0
+    total_artifacts = 0
+    for d in dates:
+        day_dir = journal_dir / d
+        # Index single day (reuse logic inline for date-scoped source_path)
+        journal_file = day_dir / "journal.md"
+        if journal_file.exists():
+            content = journal_file.read_text()
+            sections = re.split(r'^(## .+)$', content, flags=re.MULTILINE)
+            entries = []
+            i = 1
+            while i < len(sections) - 1:
+                header = sections[i].strip()
+                body = sections[i + 1].strip()
+                if body:
+                    entries.append({
+                        "content": f"{header}\n{body}",
+                        "source_type": "journal",
+                        "source_path": f".soren/journal/{d}/journal.md",
+                        "keywords": [],
+                        "tags": [d],
+                        "project_id": "soren",
+                    })
+                i += 2
+            if entries:
+                total_entries += memory_store.add_memories_batch(entries)
+
+        artifacts_dir = day_dir / "artifacts"
+        if artifacts_dir.exists():
+            artifact_entries = []
+            for artifact in sorted(artifacts_dir.glob("*.md")):
+                text = artifact.read_text().strip()
+                if len(text) >= 20:
+                    artifact_entries.append({
+                        "content": text[:2000],
+                        "source_type": "artifact",
+                        "source_path": f".soren/journal/{d}/artifacts/{artifact.name}",
+                        "keywords": [],
+                        "tags": [d, artifact.stem],
+                        "project_id": "soren",
+                    })
+            if artifact_entries:
+                total_artifacts += memory_store.add_memories_batch(artifact_entries)
+
+    print(f"Indexed {total_entries} journal entries, {total_artifacts} artifacts")
+
+stats = memory_store.stats()
+print(f"\nTotal memories: {stats['total']} | by_type: {json.dumps(stats['by_type'])} | by_project: {json.dumps(stats.get('by_project', {}))}")
+PYEOF
+)
+
+cd "$SOREN_HOME"
+uv run python -c "$python_script" "$SOREN_HOME" "$DATE_MODE" "$PROJECT_MODE" "$PROJECT_ID" "$SPECIFIC_DATE"
+
+# Optionally run pattern extraction on indexed dates
+if [[ "$WITH_PATTERNS" == "true" && "$PROJECT_MODE" == "self" ]]; then
+    echo ""
+    echo "Running pattern extraction..."
+    tools/extract-patterns ${SPECIFIC_DATE:+--date "$SPECIFIC_DATE"} ${DATE_MODE:+} 2>/dev/null || true
+fi

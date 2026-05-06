@@ -1,0 +1,1348 @@
+#!/usr/bin/env bash
+#===============================================================================
+# tasks - Hierarchical task management backed by SQLite
+#
+# Usage:
+#   tasks add <title> [--project <id>] [--assign <agent>] [--parent <task-id>]
+#                     [--desc <description>] [--priority <level>] [--source <src>]
+#                     [--resources <comma-separated-urls>]
+#   tasks list [--project <id>] [--status <status>] [--assign <agent>]
+#              [--priority <level>] [--supervisor <name>] [--worker <name>] [--all]
+#   tasks tree [--project <id>]
+#   tasks show <id>
+#   tasks update <id> <status>
+#   tasks assign <id> <agent>
+#   tasks link <id> <worker-name>
+#   tasks done <id>
+#   tasks delete <id>
+#   tasks for-project <project-id>
+#   tasks dashboard
+#   tasks global
+#   tasks import-backlog [<backlog-id>]
+#   tasks help
+#
+# Storage: .soren/tasks.db (SQLite with WAL mode)
+# Designed for agents to manage hierarchical work breakdown.
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+DB="${SOREN_HOME}/.soren/tasks.db"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+SEP="$(printf '\x1f')"  # Unit separator (ASCII 31) — safe for field splitting
+
+#-------------------------------------------------------------------------------
+# Database
+#-------------------------------------------------------------------------------
+
+ensure_db() {
+    mkdir -p "$(dirname "$DB")"
+    if [[ ! -f "$DB" ]]; then
+        sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    project TEXT DEFAULT '',
+    assigned_to TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    priority TEXT DEFAULT 'medium',
+    source TEXT DEFAULT 'system',
+    parent_id TEXT DEFAULT '',
+    resources TEXT DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT DEFAULT ''
+);
+SQL
+    fi
+    # Migrate: add priority column if missing
+    local has_priority
+    has_priority=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='priority';")
+    if [[ "$has_priority" == "0" ]]; then
+        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium';"
+    fi
+    # Migrate: add source column if missing
+    local has_source
+    has_source=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='source';")
+    if [[ "$has_source" == "0" ]]; then
+        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'system';"
+    fi
+    # Migrate: add linked_workers column if missing
+    local has_linked
+    has_linked=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='linked_workers';")
+    if [[ "$has_linked" == "0" ]]; then
+        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN linked_workers TEXT DEFAULT '';"
+    fi
+    # Migrate: create status history table if missing
+    sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS task_status_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL,
+    old_status TEXT DEFAULT '',
+    new_status TEXT NOT NULL,
+    changed_at TEXT NOT NULL
+);
+SQL
+    sqlite3 "$DB" 'PRAGMA journal_mode=WAL;' > /dev/null 2>&1
+    # Migrate: create task_dependencies table for DAG support
+    sqlite3 "$DB" <<'SQL'
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id    TEXT NOT NULL,
+    depends_on TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on),
+    FOREIGN KEY (task_id)    REFERENCES tasks(id) ON DELETE CASCADE,
+    FOREIGN KEY (depends_on) REFERENCES tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_task_deps_dep ON task_dependencies(depends_on);
+SQL
+}
+
+gen_id() {
+    local chars='abcdefghijklmnopqrstuvwxyz0123456789'
+    local id='t_'
+    for _ in $(seq 1 8); do
+        id+="${chars:$((RANDOM % ${#chars})):1}"
+    done
+    echo "$id"
+}
+
+status_color() {
+    # Pad raw text first, then wrap with color to preserve column alignment
+    local padded
+    padded=$(printf "%-11s" "$1")
+    case "$1" in
+        pending)     echo -e "${DIM}${padded}${NC}" ;;
+        assigned)    echo -e "${YELLOW}${padded}${NC}" ;;
+        in-progress) echo -e "${BLUE}${padded}${NC}" ;;
+        review)      echo -e "${MAGENTA}${padded}${NC}" ;;
+        done)        echo -e "${GREEN}${padded}${NC}" ;;
+        blocked)     echo -e "${RED}${padded}${NC}" ;;
+        failed)      echo -e "${RED}${BOLD}${padded}${NC}" ;;
+        backlog)     echo -e "${CYAN}${padded}${NC}" ;;
+        *)           echo "$padded" ;;
+    esac
+}
+
+priority_color() {
+    local padded
+    padded=$(printf "%-8s" "$1")
+    case "$1" in
+        critical) echo -e "${RED}${BOLD}${padded}${NC}" ;;
+        high)     echo -e "${YELLOW}${padded}${NC}" ;;
+        medium)   echo -e "${CYAN}${padded}${NC}" ;;
+        low)      echo -e "${DIM}${padded}${NC}" ;;
+        *)        echo "$padded" ;;
+    esac
+}
+
+# Sort key for priority ordering (lower = higher priority)
+priority_sort_key() {
+    case "$1" in
+        critical) echo "1" ;;
+        high)     echo "2" ;;
+        medium)   echo "3" ;;
+        low)      echo "4" ;;
+        *)        echo "5" ;;
+    esac
+}
+
+validate_status() {
+    case "$1" in
+        pending|assigned|in-progress|review|done|blocked|failed|backlog) ;;
+        *) die "invalid status: $1 (valid: pending, assigned, in-progress, review, done, blocked, failed, backlog)" ;;
+    esac
+}
+
+validate_priority() {
+    case "$1" in
+        critical|high|medium|low) ;;
+        *) die "invalid priority: $1 (valid: critical, high, medium, low)" ;;
+    esac
+}
+
+validate_source() {
+    case "$1" in
+        user|backlog|self-generated|worker-escalation|system) ;;
+        *) die "invalid source: $1 (valid: user, backlog, self-generated, worker-escalation, system)" ;;
+    esac
+}
+
+#-------------------------------------------------------------------------------
+# Commands
+#-------------------------------------------------------------------------------
+
+cmd_add() {
+    local title="" project="" assign="" parent="" desc="" resources="" priority="medium" source="system"
+
+    # First positional arg is the title
+    if [[ $# -gt 0 && "${1:0:2}" != "--" ]]; then
+        title="$1"
+        shift
+    fi
+
+    # Parse flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project)   project="${2:-}"; shift 2 ;;
+            --assign)    assign="${2:-}"; shift 2 ;;
+            --parent)    parent="${2:-}"; shift 2 ;;
+            --desc)      desc="${2:-}"; shift 2 ;;
+            --resources) resources="${2:-}"; shift 2 ;;
+            --priority)  priority="${2:-}"; shift 2 ;;
+            --source)    source="${2:-}"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+
+    [[ -z "$title" ]] && die "usage: tasks add <title> [--project <id>] [--assign <agent>] [--parent <task-id>] [--desc <description>] [--priority <level>] [--source <src>] [--resources <urls>]"
+
+    validate_priority "$priority"
+    validate_source "$source"
+    ensure_db
+
+    # Validate parent exists if given
+    if [[ -n "$parent" ]]; then
+        local parent_exists
+        parent_exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$parent';")
+        [[ "$parent_exists" == "0" ]] && die "parent task not found: $parent"
+    fi
+
+    local id
+    id=$(gen_id)
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Build resources JSON array
+    local res_json='[]'
+    if [[ -n "$resources" ]]; then
+        res_json=$(echo "$resources" | tr ',' '\n' | jq -R . | jq -sc .)
+    fi
+
+    local status="pending"
+    if [[ -n "$assign" ]]; then
+        status="assigned"
+    fi
+
+    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, project, assigned_to, status, priority, source, parent_id, resources, created_at, updated_at)
+        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$desc" | sed "s/'/''/g")', '$project', '$assign', '$status', '$priority', '$source', '$parent', '$(echo "$res_json" | sed "s/'/''/g")', '$now', '$now');"
+
+    ok "Created ${id}: ${title}"
+    echo -e "  ${DIM}Priority: $(priority_color "$priority")${NC}"
+    if [[ -n "$parent" ]]; then
+        echo -e "  ${DIM}Parent: ${parent}${NC}"
+    fi
+    if [[ -n "$assign" ]]; then
+        echo -e "  ${DIM}Assigned: ${assign}${NC}"
+    fi
+    if [[ "$source" != "system" ]]; then
+        echo -e "  ${DIM}Source: ${source}${NC}"
+    fi
+}
+
+cmd_list() {
+    local project="" status="" assign="" priority="" show_all=0 supervisor="" worker=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project)    project="${2:-}"; shift 2 ;;
+            --status)     status="${2:-}"; shift 2 ;;
+            --assign)     assign="${2:-}"; shift 2 ;;
+            --priority)   priority="${2:-}"; shift 2 ;;
+            --supervisor) supervisor="${2:-}"; shift 2 ;;
+            --worker)     worker="${2:-}"; shift 2 ;;
+            --all)        show_all=1; shift ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+
+    ensure_db
+
+    local where="1=1"
+    if [[ "$show_all" == "0" && -z "$status" ]]; then
+        where="$where AND status NOT IN ('done', 'failed')"
+    fi
+    if [[ -n "$project" ]]; then
+        where="$where AND project = '$project'"
+    fi
+    if [[ -n "$status" ]]; then
+        validate_status "$status"
+        where="$where AND status = '$status'"
+    fi
+    if [[ -n "$assign" ]]; then
+        where="$where AND assigned_to = '$assign'"
+    fi
+    if [[ -n "$priority" ]]; then
+        validate_priority "$priority"
+        where="$where AND priority = '$priority'"
+    fi
+    # --supervisor: tasks assigned to this supervisor OR associated with their project
+    if [[ -n "$supervisor" ]]; then
+        local sup_project=""
+        local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+        if [[ -f "$reg_file" ]]; then
+            sup_project=$(jq -r --arg name "$supervisor" '.[$name].project_id // empty' "$reg_file" 2>/dev/null)
+        fi
+        if [[ -n "$sup_project" ]]; then
+            where="$where AND (assigned_to = '$supervisor' OR project = '$sup_project')"
+        else
+            where="$where AND assigned_to = '$supervisor'"
+        fi
+    fi
+    # --worker: tasks assigned to or linked with a specific worker
+    if [[ -n "$worker" ]]; then
+        where="$where AND (assigned_to = '$worker' OR linked_workers LIKE '%$worker%')"
+    fi
+
+    # Order by priority weight then creation time
+    local rows
+    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE $where ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+
+    if [[ -z "$rows" ]]; then
+        echo -e "${DIM}No tasks found${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Tasks:${NC}"
+    echo ""
+    printf "${DIM}%-12s  %-11s  %-8s  %-12s  %-12s  %s${NC}\n" "ID" "STATUS" "PRI" "PROJECT" "ASSIGNED" "TITLE"
+    echo -e "${DIM}────────────  ───────────  ────────  ────────────  ────────────  ─────────────────────────${NC}"
+
+    local count=0
+    while IFS="$SEP" read -r id st pri proj assigned ttl; do
+        printf "%-12s  %b  %b  %-12s  %-12s  %s\n" \
+            "$id" \
+            "$(status_color "$st")" \
+            "$(priority_color "${pri:-medium}")" \
+            "${proj:--}" \
+            "${assigned:--}" \
+            "$ttl"
+        ((count++))
+    done <<< "$rows"
+
+    echo ""
+    echo -e "${DIM}${count} task(s)${NC}"
+}
+
+cmd_tree() {
+    local project=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="${2:-}"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+
+    ensure_db
+
+    local where="1=1"
+    if [[ -n "$project" ]]; then
+        where="project = '$project'"
+    fi
+
+    # Get all tasks
+    local all_tasks
+    all_tasks=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, parent_id, priority, title FROM tasks WHERE $where ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+
+    if [[ -z "$all_tasks" ]]; then
+        echo -e "${DIM}No tasks found${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Task Tree:${NC}"
+    echo ""
+
+    # Print root tasks (no parent) and their children recursively
+    _print_tree_children "" "" "$all_tasks"
+}
+
+_print_tree_children() {
+    local parent_id="$1"
+    local prefix="$2"
+    local all_tasks="$3"
+
+    # Find children of this parent
+    local children=()
+    while IFS="$SEP" read -r id st pid pri ttl; do
+        [[ -z "$id" ]] && continue
+        if [[ "$pid" == "$parent_id" ]]; then
+            children+=("${id}|${st}|${pri}|${ttl}")
+        fi
+    done <<< "$all_tasks"
+
+    local total=${#children[@]}
+    [[ "$total" -eq 0 ]] && return
+    local i=0
+    for child in "${children[@]}"; do
+        ((i++))
+        local cid cst cpri cttl
+        cid=$(echo "$child" | cut -d'|' -f1)
+        cst=$(echo "$child" | cut -d'|' -f2)
+        cpri=$(echo "$child" | cut -d'|' -f3)
+        cttl=$(echo "$child" | cut -d'|' -f4-)
+
+        local connector="├── "
+        local next_prefix="${prefix}│   "
+        if [[ $i -eq $total ]]; then
+            connector="└── "
+            next_prefix="${prefix}    "
+        fi
+
+        # Show priority tag inline for non-medium priorities
+        local pri_tag=""
+        case "$cpri" in
+            critical) pri_tag=" ${RED}[CRIT]${NC}" ;;
+            high)     pri_tag=" ${YELLOW}[HIGH]${NC}" ;;
+            low)      pri_tag=" ${DIM}[LOW]${NC}" ;;
+        esac
+
+        printf "%s%s%-12s  %b  %s%b\n" \
+            "$prefix" "$connector" "$cid" "$(status_color "$cst")" "$cttl" "$pri_tag"
+
+        # Recurse into children
+        _print_tree_children "$cid" "$next_prefix" "$all_tasks"
+    done
+}
+
+cmd_show() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: tasks show <id>"
+
+    ensure_db
+
+    # Query individual fields to avoid multiline JSON breaking read
+    _qf() { sqlite3 "$DB" "SELECT $1 FROM tasks WHERE id='$id';"; }
+
+    local exists
+    exists=$(_qf "COUNT(*)")
+    [[ "$exists" == "0" ]] && die "task not found: $id"
+
+    local ttl st desc proj assigned pid pri src res created updated completed linked
+    ttl=$(_qf "title")
+    st=$(_qf "status")
+    desc=$(_qf "description")
+    proj=$(_qf "project")
+    assigned=$(_qf "assigned_to")
+    pid=$(_qf "parent_id")
+    pri=$(_qf "priority")
+    src=$(_qf "source")
+    res=$(_qf "resources")
+    created=$(_qf "created_at")
+    updated=$(_qf "updated_at")
+    completed=$(_qf "completed_at")
+    linked=$(_qf "linked_workers")
+
+    echo -e "${BOLD}Task ${id}${NC}"
+    echo -e "  Title:       ${ttl}"
+    echo -e "  Status:      $(status_color "$st")"
+    echo -e "  Priority:    $(priority_color "${pri:-medium}")"
+    if [[ -n "$src" && "$src" != "system" ]]; then
+        echo -e "  Source:      ${src}"
+    fi
+    if [[ -n "$desc" ]]; then
+        echo -e "  Description: ${desc}"
+    fi
+    if [[ -n "$proj" ]]; then
+        echo -e "  Project:     ${proj}"
+    fi
+    if [[ -n "$assigned" ]]; then
+        echo -e "  Assigned:    ${assigned}"
+    fi
+    if [[ -n "$linked" ]]; then
+        echo -e "  Workers:     ${linked}"
+    fi
+    if [[ -n "$pid" ]]; then
+        echo -e "  Parent:      ${pid}"
+    fi
+    if [[ "$res" != "[]" && -n "$res" ]]; then
+        echo -e "  Resources:"
+        echo "$res" | jq -r '.[]' 2>/dev/null | while read -r url; do
+            echo -e "    - ${url}"
+        done
+    fi
+    echo -e "  Created:     ${created}"
+    echo -e "  Updated:     ${updated}"
+    if [[ -n "$completed" ]]; then
+        echo -e "  Completed:   ${completed}"
+    fi
+
+    # Show status history
+    local history
+    history=$(sqlite3 -separator "$SEP" "$DB" "SELECT old_status, new_status, changed_at FROM task_status_history WHERE task_id='$id' ORDER BY changed_at;")
+    if [[ -n "$history" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Status History:${NC}"
+        while IFS="$SEP" read -r old_st new_st changed; do
+            if [[ -n "$old_st" ]]; then
+                echo -e "    ${DIM}${changed}${NC}  ${old_st} → ${new_st}"
+            else
+                echo -e "    ${DIM}${changed}${NC}  → ${new_st}"
+            fi
+        done <<< "$history"
+    fi
+
+    # Show children
+    local children
+    children=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, title FROM tasks WHERE parent_id='$id' ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+    if [[ -n "$children" ]]; then
+        echo ""
+        echo -e "  ${BOLD}Children:${NC}"
+        while IFS="$SEP" read -r cid cst cpri cttl; do
+            printf "    %-12s  %b  %b  %s\n" "$cid" "$(status_color "$cst")" "$(priority_color "${cpri:-medium}")" "$cttl"
+        done <<< "$children"
+    fi
+}
+
+cmd_update() {
+    local id="${1:-}"
+    local new_status="${2:-}"
+
+    [[ -z "$id" ]] && die "usage: tasks update <id> <status>"
+    [[ -z "$new_status" ]] && die "usage: tasks update <id> <status>"
+
+    validate_status "$new_status"
+    ensure_db
+
+    local exists
+    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" == "0" ]] && die "task not found: $id"
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local completed_clause=""
+    if [[ "$new_status" == "done" ]]; then
+        completed_clause=", completed_at='$now'"
+
+        # Warn about incomplete children
+        local undone_children
+        undone_children=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE parent_id='$id' AND status NOT IN ('done', 'failed');")
+        if [[ "$undone_children" -gt 0 ]]; then
+            warn "${undone_children} child task(s) are not done"
+        fi
+    fi
+
+    # Record status history
+    local old_status
+    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+
+    sqlite3 "$DB" "UPDATE tasks SET status='$new_status', updated_at='$now'${completed_clause} WHERE id='$id';"
+
+    # Insert status history entry
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', '$new_status', '$now');"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Updated ${id}: ${title} → $(status_color "$new_status")"
+}
+
+cmd_assign() {
+    local id="${1:-}"
+    local agent="${2:-}"
+
+    [[ -z "$id" ]] && die "usage: tasks assign <id> <agent>"
+    [[ -z "$agent" ]] && die "usage: tasks assign <id> <agent>"
+
+    ensure_db
+
+    local exists
+    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" == "0" ]] && die "task not found: $id"
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # If currently pending, auto-advance to assigned
+    local current_status
+    current_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    local status_clause=""
+    if [[ "$current_status" == "pending" ]]; then
+        status_clause=", status='assigned'"
+    fi
+
+    sqlite3 "$DB" "UPDATE tasks SET assigned_to='$agent', updated_at='$now'${status_clause} WHERE id='$id';"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Assigned ${id}: ${title} → ${agent}"
+}
+
+cmd_done() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: tasks done <id>"
+
+    cmd_update "$id" "done"
+}
+
+cmd_link() {
+    local id="${1:-}"
+    local worker_name="${2:-}"
+
+    [[ -z "$id" ]] && die "usage: tasks link <id> <worker-name>"
+    [[ -z "$worker_name" ]] && die "usage: tasks link <id> <worker-name>"
+
+    ensure_db
+
+    local exists
+    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" == "0" ]] && die "task not found: $id"
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    # Get current linked workers
+    local current
+    current=$(sqlite3 "$DB" "SELECT linked_workers FROM tasks WHERE id='$id';")
+
+    # Append worker if not already linked
+    if [[ -z "$current" ]]; then
+        current="$worker_name"
+    elif ! echo ",$current," | grep -qF ",$worker_name,"; then
+        current="${current},${worker_name}"
+    else
+        ok "Worker '${worker_name}' already linked to ${id}"
+        return
+    fi
+
+    sqlite3 "$DB" "UPDATE tasks SET linked_workers='$current', updated_at='$now' WHERE id='$id';"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Linked worker '${worker_name}' to ${id}: ${title}"
+}
+
+cmd_for_project() {
+    local project_id="${1:-}"
+    [[ -z "$project_id" ]] && die "usage: tasks for-project <project-id>"
+
+    ensure_db
+
+    local rows
+    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, assigned_to, linked_workers, title FROM tasks WHERE project='$project_id' ORDER BY
+        CASE status
+            WHEN 'blocked' THEN 1
+            WHEN 'failed' THEN 2
+            WHEN 'in-progress' THEN 3
+            WHEN 'review' THEN 4
+            WHEN 'assigned' THEN 5
+            WHEN 'pending' THEN 6
+            WHEN 'done' THEN 7
+            ELSE 8
+        END,
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+
+    if [[ -z "$rows" ]]; then
+        echo -e "${DIM}No tasks for project '${project_id}'${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Tasks for project: ${project_id}${NC}"
+    echo ""
+    printf "${DIM}%-12s  %-11s  %-8s  %-14s  %-14s  %s${NC}\n" "ID" "STATUS" "PRI" "ASSIGNED" "WORKERS" "TITLE"
+    echo -e "${DIM}────────────  ───────────  ────────  ──────────────  ──────────────  ─────────────────────────${NC}"
+
+    local count=0
+    while IFS="$SEP" read -r id st pri assigned linked ttl; do
+        printf "%-12s  %b  %b  %-14s  %-14s  %s\n" \
+            "$id" \
+            "$(status_color "$st")" \
+            "$(priority_color "${pri:-medium}")" \
+            "${assigned:--}" \
+            "${linked:--}" \
+            "$ttl"
+        ((count++))
+    done <<< "$rows"
+
+    echo ""
+
+    # Summary stats
+    local active_count done_count blocked_count
+    active_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status NOT IN ('done', 'failed');")
+    done_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='done';")
+    blocked_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='blocked';")
+    echo -e "${DIM}${count} task(s) | Active: ${active_count} | Done: ${done_count} | Blocked: ${blocked_count}${NC}"
+}
+
+cmd_delete() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: tasks delete <id>"
+
+    ensure_db
+
+    local exists
+    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    [[ "$exists" == "0" ]] && die "task not found: $id"
+
+    # Count children for reporting
+    local child_count
+    child_count=$(_count_descendants "$id")
+
+    # Delete recursively
+    _delete_recursive "$id"
+
+    local msg="Deleted ${id}"
+    if [[ "$child_count" -gt 0 ]]; then
+        msg+=" and ${child_count} child task(s)"
+    fi
+    ok "$msg"
+}
+
+_count_descendants() {
+    local parent_id="$1"
+    local count=0
+    local children
+    children=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE parent_id='$parent_id';")
+
+    for child_id in $children; do
+        ((count++))
+        local sub
+        sub=$(_count_descendants "$child_id")
+        ((count += sub))
+    done
+    echo "$count"
+}
+
+_delete_recursive() {
+    local parent_id="$1"
+    local children
+    children=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE parent_id='$parent_id';")
+
+    for child_id in $children; do
+        _delete_recursive "$child_id"
+    done
+
+    sqlite3 "$DB" "DELETE FROM tasks WHERE id='$parent_id';"
+}
+
+cmd_dashboard() {
+    ensure_db
+
+    local total
+    total=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks;")
+
+    if [[ "$total" == "0" ]]; then
+        echo -e "${DIM}No tasks in system${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Task Dashboard${NC}"
+    echo -e "${DIM}══════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Status breakdown
+    echo -e "${BOLD}By Status:${NC}"
+    local statuses
+    statuses=$(sqlite3 -separator "$SEP" "$DB" "SELECT status, COUNT(*) FROM tasks GROUP BY status ORDER BY
+        CASE status
+            WHEN 'blocked' THEN 1
+            WHEN 'failed' THEN 2
+            WHEN 'in-progress' THEN 3
+            WHEN 'review' THEN 4
+            WHEN 'assigned' THEN 5
+            WHEN 'pending' THEN 6
+            WHEN 'done' THEN 7
+            ELSE 8
+        END;")
+    if [[ -n "$statuses" ]]; then
+        while IFS="$SEP" read -r st cnt; do
+            printf "  %b  %s\n" "$(status_color "$st")" "$cnt"
+        done <<< "$statuses"
+    fi
+    echo ""
+
+    # Priority breakdown (non-done only)
+    echo -e "${BOLD}By Priority (active):${NC}"
+    local priorities
+    priorities=$(sqlite3 -separator "$SEP" "$DB" "SELECT COALESCE(NULLIF(priority,''), 'medium'), COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY priority ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END;")
+    if [[ -n "$priorities" ]]; then
+        while IFS="$SEP" read -r pri cnt; do
+            printf "  %b  %s\n" "$(priority_color "${pri:-medium}")" "$cnt"
+        done <<< "$priorities"
+    else
+        echo -e "  ${DIM}(no active tasks)${NC}"
+    fi
+    echo ""
+
+    # By assignee (non-done only)
+    echo -e "${BOLD}By Assignee (active):${NC}"
+    local assignees
+    assignees=$(sqlite3 -separator "$SEP" "$DB" "SELECT CASE WHEN assigned_to = '' THEN '(unassigned)' ELSE assigned_to END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY assigned_to ORDER BY COUNT(*) DESC;")
+    if [[ -n "$assignees" ]]; then
+        while IFS="$SEP" read -r agent cnt; do
+            printf "  %-20s  %s\n" "$agent" "$cnt"
+        done <<< "$assignees"
+    else
+        echo -e "  ${DIM}(no active tasks)${NC}"
+    fi
+    echo ""
+
+    # By project (non-done only, if projects exist)
+    local projects
+    projects=$(sqlite3 -separator "$SEP" "$DB" "SELECT CASE WHEN project = '' THEN '(none)' ELSE project END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') AND project != '' GROUP BY project ORDER BY COUNT(*) DESC;")
+    if [[ -n "$projects" ]]; then
+        echo -e "${BOLD}By Project (active):${NC}"
+        while IFS="$SEP" read -r proj cnt; do
+            # Look up supervisor status from agent registry
+            local sup_status=""
+            local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+            if [[ -f "$reg_file" && "$proj" != "(none)" ]]; then
+                local sup_name="sup-${proj}"
+                local sup_exists
+                sup_exists=$(jq -r --arg key "$sup_name" 'has($key)' "$reg_file" 2>/dev/null)
+                if [[ "$sup_exists" == "true" ]]; then
+                    # Check if the supervisor tmux window is running
+                    if tmux list-windows -t "${SOREN_SESSION:-soren}" -F '#{window_name}' 2>/dev/null | grep -qxF "$sup_name"; then
+                        sup_status=" ${GREEN}[sup active]${NC}"
+                    else
+                        sup_status=" ${DIM}[sup idle]${NC}"
+                    fi
+                fi
+            fi
+            printf "  %-20s  %s%b\n" "$proj" "$cnt" "$sup_status"
+        done <<< "$projects"
+        echo ""
+    fi
+
+    # Attention needed: blocked, failed, or critical+pending
+    local attention
+    attention=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, assigned_to, title FROM tasks WHERE status IN ('blocked', 'failed') OR (priority = 'critical' AND status NOT IN ('done', 'failed')) ORDER BY
+        CASE status WHEN 'failed' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END,
+        CASE priority WHEN 'critical' THEN 1 ELSE 2 END;")
+    if [[ -n "$attention" ]]; then
+        echo -e "${BOLD}${RED}Needs Attention:${NC}"
+        while IFS="$SEP" read -r id st pri agent ttl; do
+            printf "  %-12s  %b  %b  %-12s  %s\n" \
+                "$id" "$(status_color "$st")" "$(priority_color "${pri:-medium}")" "${agent:--}" "$ttl"
+        done <<< "$attention"
+        echo ""
+    fi
+
+    # Summary line
+    local active_count done_count
+    active_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
+    done_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status = 'done';")
+    local failed_count
+    failed_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status = 'failed';")
+    echo -e "${DIM}Total: ${total} | Active: ${active_count} | Done: ${done_count} | Failed: ${failed_count}${NC}"
+}
+
+cmd_import_backlog() {
+    warn "import-backlog is deprecated — backlog is now a status field in tasks.db."
+    echo -e "${DIM}Use 'backlog add' to create backlog items, or 'tasks add --status backlog'.${NC}"
+}
+
+cmd_global() {
+    ensure_db
+
+    echo -e "${BOLD}Global System Overview${NC}"
+    echo -e "${DIM}══════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # --- Projects ---
+    local projects_file="${SOREN_HOME}/.soren/projects.json"
+    local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+
+    echo -e "${BOLD}Projects:${NC}"
+    if [[ -f "$projects_file" ]]; then
+        local proj_count
+        proj_count=$(jq '.projects | length' "$projects_file" 2>/dev/null || echo "0")
+        if [[ "$proj_count" -gt 0 ]]; then
+            jq -r '.projects[] | [.id, (if .active then "active" else "inactive" end), .name] | @tsv' "$projects_file" 2>/dev/null | \
+            while IFS=$'\t' read -r pid pactive pname; do
+                local pcolor="${DIM}"
+                if [[ "$pactive" == "active" ]]; then
+                    pcolor="${GREEN}"
+                fi
+                printf "  ${pcolor}%-16s  %-8s  %s${NC}\n" "$pid" "$pactive" "$pname"
+            done
+        else
+            echo -e "  ${DIM}(no projects registered)${NC}"
+        fi
+    else
+        echo -e "  ${DIM}(no projects registered)${NC}"
+    fi
+    echo ""
+
+    # --- Supervisors ---
+    echo -e "${BOLD}Supervisors:${NC}"
+    if [[ -f "$reg_file" ]]; then
+        local sup_entries
+        sup_entries=$(jq -r 'to_entries[] | select(.value.role == "supervisor" or .value.role == "project-supervisor") | [.key, .value.role, .value.project_id // "-"] | @tsv' "$reg_file" 2>/dev/null)
+        if [[ -n "$sup_entries" ]]; then
+            while IFS=$'\t' read -r sname srole spid; do
+                local window_status="${RED}offline${NC}"
+                if tmux list-windows -t "${SOREN_SESSION:-soren}" -F '#{window_name}' 2>/dev/null | grep -qxF "$sname"; then
+                    window_status="${GREEN}online${NC}"
+                fi
+                # Count active tasks for this supervisor's project
+                local sup_tasks=0
+                if [[ -n "$spid" && "$spid" != "-" ]]; then
+                    sup_tasks=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$spid' AND status NOT IN ('done', 'failed');")
+                fi
+                printf "  %-20s  %-22s  project: %-12s  %b  tasks: %s\n" "$sname" "$srole" "$spid" "$window_status" "$sup_tasks"
+            done <<< "$sup_entries"
+        else
+            echo -e "  ${DIM}(no supervisors registered)${NC}"
+        fi
+    else
+        echo -e "  ${DIM}(no agent registry)${NC}"
+    fi
+    echo ""
+
+    # --- Active Workers ---
+    echo -e "${BOLD}Active Workers:${NC}"
+    if [[ -f "$reg_file" ]]; then
+        local worker_entries
+        worker_entries=$(jq -r 'to_entries[] | select(.value.role == "worker") | [.key, .value.project_id // "-"] | @tsv' "$reg_file" 2>/dev/null)
+        if [[ -n "$worker_entries" ]]; then
+            local wcount=0
+            while IFS=$'\t' read -r wname wpid; do
+                local wstatus="${RED}offline${NC}"
+                if tmux list-windows -t "${SOREN_SESSION:-soren}" -F '#{window_name}' 2>/dev/null | grep -qxF "$wname"; then
+                    wstatus="${GREEN}online${NC}"
+                    ((wcount++))
+                fi
+                # Find tasks assigned to this worker
+                local worker_tasks
+                worker_tasks=$(sqlite3 "$DB" "SELECT id || ':' || status FROM tasks WHERE (assigned_to='$wname' OR linked_workers LIKE '%$wname%') AND status NOT IN ('done', 'failed') LIMIT 3;" | tr '\n' ' ')
+                printf "  %-24s  project: %-12s  %b  %s\n" "$wname" "$wpid" "$wstatus" "${worker_tasks:--}"
+            done <<< "$worker_entries"
+            echo ""
+            echo -e "  ${DIM}${wcount} worker(s) online${NC}"
+        else
+            echo -e "  ${DIM}(no workers registered)${NC}"
+        fi
+    else
+        echo -e "  ${DIM}(no agent registry)${NC}"
+    fi
+    echo ""
+
+    # --- In-Flight Tasks ---
+    local inflight
+    inflight=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE status IN ('in-progress', 'assigned', 'review') ORDER BY
+        CASE priority
+            WHEN 'critical' THEN 1
+            WHEN 'high' THEN 2
+            WHEN 'medium' THEN 3
+            WHEN 'low' THEN 4
+            ELSE 5
+        END, created_at;")
+    echo -e "${BOLD}In-Flight Tasks:${NC}"
+    if [[ -n "$inflight" ]]; then
+        printf "  ${DIM}%-12s  %-11s  %-8s  %-12s  %-14s  %s${NC}\n" "ID" "STATUS" "PRI" "PROJECT" "ASSIGNED" "TITLE"
+        while IFS="$SEP" read -r id st pri proj assigned ttl; do
+            printf "  %-12s  %b  %b  %-12s  %-14s  %s\n" \
+                "$id" "$(status_color "$st")" "$(priority_color "${pri:-medium}")" \
+                "${proj:--}" "${assigned:--}" "$ttl"
+        done <<< "$inflight"
+    else
+        echo -e "  ${DIM}(none)${NC}"
+    fi
+    echo ""
+
+    # --- Blocked ---
+    local blocked
+    blocked=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, project, assigned_to, title FROM tasks WHERE status='blocked' ORDER BY
+        CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END;")
+    echo -e "${BOLD}${RED}Blocked:${NC}"
+    if [[ -n "$blocked" ]]; then
+        while IFS="$SEP" read -r id pri proj assigned ttl; do
+            printf "  %-12s  %b  %-12s  %-14s  %s\n" \
+                "$id" "$(priority_color "${pri:-medium}")" "${proj:--}" "${assigned:--}" "$ttl"
+        done <<< "$blocked"
+    else
+        echo -e "  ${DIM}(none)${NC}"
+    fi
+    echo ""
+
+    # --- Summary ---
+    local total active done_c failed_c blocked_c pending_c
+    total=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks;")
+    active=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
+    done_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='done';")
+    failed_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='failed';")
+    blocked_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='blocked';")
+    pending_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='pending';")
+    echo -e "${DIM}Total: ${total} | Active: ${active} | Pending: ${pending_c} | Blocked: ${blocked_c} | Done: ${done_c} | Failed: ${failed_c}${NC}"
+}
+
+cmd_depends() {
+    local task_id="${1:-}" dep_id="${2:-}"
+    [[ -z "$task_id" || -z "$dep_id" ]] && die "usage: tasks depends <task-id> <depends-on-id>"
+    ensure_db
+
+    # Verify both exist
+    local t1 t2
+    t1=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$task_id';")
+    t2=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$dep_id';")
+    [[ "$t1" == "0" ]] && die "task not found: $task_id"
+    [[ "$t2" == "0" ]] && die "dependency task not found: $dep_id"
+
+    # Cycle detection via Python (DFS through depends_on edges)
+    local has_cycle
+    has_cycle=$(uv run python -c "
+import sys, sqlite3
+db = sys.argv[1]; start = sys.argv[2]; target = sys.argv[3]
+conn = sqlite3.connect(db)
+visited, stack = set(), [start]
+while stack:
+    c = stack.pop()
+    if c == target: print('yes'); sys.exit()
+    if c in visited: continue
+    visited.add(c)
+    stack.extend(r[0] for r in conn.execute('SELECT depends_on FROM task_dependencies WHERE task_id=?', (c,)).fetchall())
+print('no')
+" "$DB" "$dep_id" "$task_id" 2>/dev/null)
+
+    if [[ "$has_cycle" == "yes" || "$task_id" == "$dep_id" ]]; then
+        die "cycle detected: adding $task_id → $dep_id would create a dependency cycle"
+    fi
+
+    sqlite3 "$DB" "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on) VALUES ('$task_id', '$dep_id');"
+    ok "$task_id depends on $dep_id"
+    echo -e "  ${DIM}$task_id will not start until $dep_id is done/verified${NC}"
+}
+
+cmd_undepends() {
+    local task_id="${1:-}" dep_id="${2:-}"
+    [[ -z "$task_id" || -z "$dep_id" ]] && die "usage: tasks undepends <task-id> <depends-on-id>"
+    ensure_db
+
+    local rows
+    rows=$(sqlite3 "$DB" "SELECT COUNT(*) FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';")
+    [[ "$rows" == "0" ]] && die "no dependency edge $task_id → $dep_id"
+
+    sqlite3 "$DB" "DELETE FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';"
+    ok "Removed dependency: $task_id no longer depends on $dep_id"
+}
+
+cmd_ready() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="${2:-}"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+    ensure_db
+
+    local where="status IN ('pending', 'assigned')"
+    [[ -n "$project" ]] && where="$where AND project='$project'"
+
+    # Tasks with at least one unmet dep
+    local blocked_ids
+    blocked_ids=$(sqlite3 "$DB" "
+        SELECT DISTINCT d.task_id FROM task_dependencies d
+        JOIN tasks t ON d.depends_on = t.id
+        WHERE t.status NOT IN ('done', 'verified')
+        AND d.task_id IN (SELECT id FROM tasks WHERE $where);")
+
+    # Build exclusion clause
+    local excl=""
+    if [[ -n "$blocked_ids" ]]; then
+        local ids_quoted
+        ids_quoted=$(echo "$blocked_ids" | awk '{printf "'"'"'%s'"'"'", $0; if (NR > 1 || NR == 1) printf ","}' | sed 's/,$//')
+        excl=" AND id NOT IN ($ids_quoted)"
+    fi
+
+    local rows
+    rows=$(sqlite3 -separator "$SEP" "$DB" \
+        "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE $where$excl ORDER BY created_at;")
+
+    if [[ -z "$rows" ]]; then
+        echo -e "${DIM}No ready tasks${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Ready tasks (all dependencies satisfied):${NC}"
+    echo ""
+    printf "  %-12s  %-11s  %-8s  %-12s  %-14s  %s\n" "ID" "STATUS" "PRIORITY" "PROJECT" "ASSIGNED" "TITLE"
+    echo "  $(printf '%.0s─' {1..90})"
+    while IFS="$SEP" read -r id status pri proj assigned ttl; do
+        printf "  %-12s  %b  %b  %-12s  %-14s  %s\n" \
+            "$id" "$(status_color "${status:-pending}")" "$(priority_color "${pri:-medium}")" \
+            "${proj:--}" "${assigned:--}" "$ttl"
+    done <<< "$rows"
+}
+
+cmd_order() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="${2:-}"; shift 2 ;;
+            *) die "unknown flag: $1" ;;
+        esac
+    done
+    ensure_db
+
+    # Topological sort via Python (Kahn's algorithm)
+    local proj_arg="${project:-}"
+    local ordered
+    ordered=$(uv run python -c "
+import sys, sqlite3
+from collections import deque
+db, proj = sys.argv[1], sys.argv[2]
+conn = sqlite3.connect(db)
+conn.row_factory = sqlite3.Row
+
+where = \"status NOT IN ('done', 'verified', 'failed')\"
+params = []
+if proj:
+    where += ' AND project = ?'
+    params.append(proj)
+
+task_ids = {r['id'] for r in conn.execute(f'SELECT id FROM tasks WHERE {where}', params).fetchall()}
+if not task_ids:
+    sys.exit(0)
+
+ph = ','.join('?' * len(task_ids))
+dep_rows = conn.execute(f'SELECT task_id, depends_on FROM task_dependencies WHERE task_id IN ({ph}) AND depends_on IN ({ph})', list(task_ids)*2).fetchall()
+
+in_deg = {t: 0 for t in task_ids}
+dependents = {t: [] for t in task_ids}
+for r in dep_rows:
+    t, d = r['task_id'], r['depends_on']
+    if t in task_ids and d in task_ids:
+        in_deg[t] += 1
+        dependents[d].append(t)
+
+queue = deque(sorted(t for t in task_ids if in_deg[t] == 0))
+result = []
+while queue:
+    cur = queue.popleft()
+    result.append(cur)
+    for dep in sorted(dependents.get(cur, [])):
+        in_deg[dep] -= 1
+        if in_deg[dep] == 0:
+            queue.append(dep)
+result.extend(sorted(t for t in task_ids if t not in set(result)))
+print('\n'.join(result))
+" "$DB" "$proj_arg" 2>/dev/null)
+
+    if [[ -z "$ordered" ]]; then
+        echo -e "${DIM}No active tasks${NC}"
+        return
+    fi
+
+    echo -e "${BOLD}Execution order (dependencies first):${NC}"
+    echo ""
+    printf "  %-4s  %-12s  %-11s  %-8s  %-14s  %s\n" "#" "ID" "STATUS" "PRIORITY" "ASSIGNED" "TITLE"
+    echo "  $(printf '%.0s─' {1..85})"
+    local n=1
+    while IFS= read -r tid; do
+        [[ -z "$tid" ]] && continue
+        local row
+        row=$(sqlite3 -separator "$SEP" "$DB" \
+            "SELECT status, priority, assigned_to, title FROM tasks WHERE id='$tid';")
+        if [[ -n "$row" ]]; then
+            IFS="$SEP" read -r status pri assigned ttl <<< "$row"
+            # Mark as READY or BLOCKED
+            local has_unmet
+            has_unmet=$(sqlite3 "$DB" "
+                SELECT COUNT(*) FROM task_dependencies d
+                JOIN tasks t ON d.depends_on = t.id
+                WHERE d.task_id='$tid' AND t.status NOT IN ('done','verified');")
+            local ready_marker=""
+            if [[ "$has_unmet" == "0" && "$status" != "done" && "$status" != "verified" ]]; then
+                ready_marker="${GREEN}✓${NC} "
+            elif [[ "$has_unmet" != "0" ]]; then
+                ready_marker="${RED}⊘${NC} "
+            fi
+            printf "  %-4s  %-12s  %b  %b  %-14s  %b%s\n" \
+                "$n" "$tid" "$(status_color "${status:-pending}")" \
+                "$(priority_color "${pri:-medium}")" "${assigned:--}" \
+                "$ready_marker" "$ttl"
+        fi
+        (( n++ ))
+    done <<< "$ordered"
+    echo ""
+    echo -e "  ${DIM}${GREEN}✓${NC}${DIM} = ready to start  ${RED}⊘${NC}${DIM} = waiting on dependency${NC}"
+}
+
+cmd_help() {
+    cat << 'EOF'
+tasks - Hierarchical task management backed by SQLite
+
+USAGE:
+    tasks <command> [arguments]
+
+COMMANDS:
+    add <title> [flags]              Create a task
+        --project <id>               Associate with a project
+        --assign <agent>             Assign to an agent (auto-sets status to assigned)
+        --parent <task-id>           Set parent task for hierarchy
+        --desc <description>         Add a description
+        --priority <level>           Set priority: critical, high, medium (default), low
+        --source <src>               Set source: user, backlog, self-generated,
+                                     worker-escalation, system (default)
+        --resources <url1,url2>      Attach resource URLs (comma-separated)
+
+    list [flags]                     List tasks (default: non-done/failed)
+        --project <id>               Filter by project
+        --status <status>            Filter by status
+        --assign <agent>             Filter by assignee
+        --priority <level>           Filter by priority
+        --supervisor <name>          Show tasks for a supervisor's project
+        --worker <name>              Show tasks assigned to/linked with a worker
+        --all                        Include done/failed tasks
+
+    tree [--project <id>]            Hierarchical view with indentation
+
+    show <id>                        Full details: assignee, linked workers, status history
+
+    update <id> <status>             Change status (records status history)
+                                     Valid: pending, assigned, in-progress, review,
+                                            done, blocked, failed
+
+    assign <id> <agent>              Assign task to an agent
+
+    link <id> <worker-name>          Link a worker to a task (tracks worker involvement)
+
+    done <id>                        Shortcut for update <id> done
+
+    delete <id>                      Delete task and all children
+
+    depends <id> <dep-id>            Add dependency: id waits for dep-id to complete
+    undepends <id> <dep-id>          Remove a dependency edge
+    ready [--project <id>]           List tasks ready to start (all deps satisfied)
+    order [--project <id>]           Show topological execution order
+
+    for-project <project-id>         All tasks for a project with worker assignments
+
+    dashboard                        Summary view: counts by status, priority,
+                                     assignee, project breakdown, attention items
+
+    global                           Full system overview: all projects, supervisors,
+                                     active workers, in-flight tasks, blocked items
+
+    import-backlog [<id>]            Import backlog items as tasks
+                                     Without ID: imports all pending items
+                                     With ID: imports a single item
+
+    help                             Show this help
+
+STATUS FLOW:
+    pending → assigned → in-progress → review → done
+                                     ↘ blocked (can resume to in-progress)
+                                     ↘ failed (terminal)
+
+PRIORITY LEVELS:
+    critical    Urgent, blocks other work
+    high        Important, should be next
+    medium      Normal priority (default)
+    low         Nice to have, do when free
+
+EXAMPLES:
+    tasks add "Implement auth" --project soren --priority high --source user
+    tasks add "Write login endpoint" --parent t_a3f8k2m9 --assign worker-auth
+    tasks add "Fix bug" --priority critical --assign worker-bugfix --source worker-escalation
+    tasks list --status blocked
+    tasks list --priority critical
+    tasks list --assign worker-auth
+    tasks list --supervisor sup-hero
+    tasks list --worker worker-auth
+    tasks for-project soren
+    tasks link t_a3f8k2m9 worker-auth
+    tasks tree --project soren
+    tasks show t_a3f8k2m9
+    tasks update t_a3f8k2m9 in-progress
+    tasks update t_a3f8k2m9 review
+    tasks done t_a3f8k2m9
+    tasks dashboard
+    tasks global
+    tasks import-backlog
+    tasks import-backlog 3
+    tasks delete t_a3f8k2m9
+
+STORAGE:
+    .soren/tasks.db — SQLite database with WAL mode for concurrent access.
+    Status history tracked in task_status_history table.
+
+ENVIRONMENT:
+    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        add)            cmd_add "$@" ;;
+        list)           cmd_list "$@" ;;
+        tree)           cmd_tree "$@" ;;
+        show)           cmd_show "$@" ;;
+        update)         cmd_update "$@" ;;
+        assign)         cmd_assign "$@" ;;
+        link)           cmd_link "$@" ;;
+        done)           cmd_done "$@" ;;
+        delete)         cmd_delete "$@" ;;
+        depends)        cmd_depends "$@" ;;
+        undepends)      cmd_undepends "$@" ;;
+        ready)          cmd_ready "$@" ;;
+        order)          cmd_order "$@" ;;
+        for-project)    cmd_for_project "$@" ;;
+        dashboard)      cmd_dashboard "$@" ;;
+        global)         cmd_global "$@" ;;
+        import-backlog) cmd_import_backlog "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)       die "unknown command: $cmd (try 'tasks help')" ;;
+    esac
+}
+
+main "$@"

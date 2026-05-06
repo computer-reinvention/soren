@@ -1,0 +1,1576 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# workers - Manage worker agents from the supervisor
+#
+# Usage:
+#   workers spawn <name> <task> [--dir <path>] [--project <id>] [--task <id>] [--worktree] [--permanent <role-ctx>] [--model <opus>] [--no-context]
+#   workers kill <name> [--force]  - Terminate a worker (--force for permanent workers)
+#   workers sleep <name>           - Suspend a worker (saves session, frees RAM)
+#   workers sleep-all              - Sleep all non-supervisor workers
+#   workers wake <name> [message]  - Resume a sleeping worker
+#   workers reset <name>           - Reset a permanent worker's context
+#   workers assign <task-id> <name> - Assign a task and notify worker
+#   workers clone <parent> <task>  - Clone a permanent worker for parallel work
+#   workers merge-clone <clone>    - Merge clone's worktree branch and clean up
+#   workers list-clones <parent>   - List active clones of a permanent worker
+#   workers team [project-id]      - List permanent workers (optionally by project)
+#   workers list                   - List all workers
+#   workers send <name> <message> [--no-context]  - Send message to a worker (memory context ON by default)
+#   workers status <name>          - Get worker terminal output
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+STARTUP_DELAY=8
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+#───────────────────────────────────────────────────────────────────────────────
+# Helpers
+#───────────────────────────────────────────────────────────────────────────────
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+window_exists() {
+    tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null | grep -qx "$1"
+}
+
+is_supervisor() {
+    [[ "$1" == "supervisor" ]] || [[ "$1" == supervisor-* ]] || [[ "$1" == sup-* ]]
+}
+
+# Returns the default model tier for a worker given its name.
+# Explicit --model flag always wins; this only applies when --model is not passed.
+get_model_default() {
+    local name="$1"
+    # Opus 4.6 only — all agents run on opus
+    echo "opus"
+}
+
+generate_agent_id() {
+    # Generate ag_ + 8 random alphanumeric chars
+    # Check agent registry for collisions and regenerate if needed
+    local registry_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    local attempt=0
+    local id
+
+    while [[ $attempt -lt 100 ]]; do
+        id="ag_$(head -c 32 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
+        # Ensure we got 8 chars (base64 filtering can sometimes produce fewer)
+        if [[ ${#id} -ne 11 ]]; then
+            ((attempt++))
+            continue
+        fi
+        # Check for collision in registry
+        if [[ -f "$registry_file" ]] && grep -q "\"$id\"" "$registry_file" 2>/dev/null; then
+            ((attempt++))
+            continue
+        fi
+        echo "$id"
+        return 0
+    done
+
+    die "failed to generate unique agent ID after 100 attempts"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Commands
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_spawn() {
+    local name=""
+    local task=""
+    local worker_dir=""
+    local project_id=""
+    local task_id=""
+    local use_worktree=false
+    local permanent_role_ctx=""
+    local model_flag=""
+    local with_context=1  # Memory context ON by default
+
+    # Parse arguments: workers spawn <name> <task> [--dir <path>] [--project <id>] [--task <task-id>] [--worktree] [--permanent <role-ctx>] [--model <model>]
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dir)
+                [[ -z "${2:-}" ]] && die "--dir requires a path argument"
+                worker_dir="$2"
+                shift 2
+                ;;
+            --project)
+                [[ -z "${2:-}" ]] && die "--project requires an ID argument"
+                project_id="$2"
+                shift 2
+                ;;
+            --task)
+                [[ -z "${2:-}" ]] && die "--task requires a task ID argument"
+                task_id="$2"
+                shift 2
+                ;;
+            --permanent)
+                [[ -z "${2:-}" ]] && die "--permanent requires a role context path"
+                permanent_role_ctx="$2"
+                shift 2
+                ;;
+            --model)
+                [[ -z "${2:-}" ]] && die "--model requires a model name (haiku, sonnet, opus)"
+                case "$2" in
+                    haiku|sonnet|opus) model_flag="$2" ;;
+                    *) die "--model must be one of: haiku, sonnet, opus" ;;
+                esac
+                shift 2
+                ;;
+            --worktree)
+                use_worktree=true
+                shift
+                ;;
+            --no-context)
+                with_context=0
+                shift
+                ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                elif [[ -z "$task" ]]; then
+                    task="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && die "usage: workers spawn <name> <task> [--dir <path>] [--project <id>] [--task <task-id>]"
+    [[ -z "$task" ]] && die "usage: workers spawn <name> <task> [--dir <path>] [--project <id>] [--task <task-id>]"
+
+    # Validate --dir path exists
+    if [[ -n "$worker_dir" ]]; then
+        [[ -d "$worker_dir" ]] || die "directory does not exist: $worker_dir"
+        # Resolve to absolute path
+        worker_dir="$(cd "$worker_dir" && pwd)"
+    fi
+
+    # Default working directory is SOREN project root
+    local cd_target="${worker_dir:-$SOREN_PROJECT_ROOT}"
+
+    # Sanitize name
+    name=$(echo "$name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9-_')
+
+    # Apply model default if --model was not explicitly passed
+    if [[ -z "$model_flag" ]]; then
+        model_flag=$(get_model_default "$name")
+    fi
+
+    if window_exists "$name"; then
+        die "worker '$name' already exists"
+    fi
+
+    # Set up git worktree if requested
+    local worktree_path=""
+    local worktree_branch=""
+    if [[ "$use_worktree" == true ]]; then
+        # Determine the source repo for the worktree.
+        # If --dir was provided, use that as the source repo to branch from.
+        # Otherwise, use the CWD's git root — this is critical for project
+        # supervisors who cd into their project directory. Without this,
+        # the worktree would branch from the inherited SOREN_PROJECT_ROOT
+        # (the SOREN repo) instead of the project repo.
+        local worktree_repo
+        if [[ -n "$worker_dir" ]]; then
+            worktree_repo="$worker_dir"
+        elif [[ -n "$project_id" ]]; then
+            # Resolve project path from projects.json
+            local proj_file="${SOREN_PROJECT_ROOT}/.soren/projects.json"
+            if [[ -f "$proj_file" ]]; then
+                local proj_path
+                proj_path=$(jq -r --arg pid "$project_id" '.projects[] | select(.id == $pid) | .path // empty' "$proj_file" 2>/dev/null)
+                if [[ -n "$proj_path" && -d "$proj_path" ]]; then
+                    worktree_repo="$proj_path"
+                fi
+            fi
+        fi
+        # Final fallback: CWD's git root
+        if [[ -z "${worktree_repo:-}" ]]; then
+            worktree_repo="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        fi
+
+        # Inherit project_id early for worktree path calculation
+        local wt_project="${project_id:-${SOREN_PROJECT_ID:-soren}}"
+        worktree_branch="feat/${name}"
+        worktree_path="${HOME}/.soren/worktrees/${wt_project}/${name}"
+
+        # NOTE: The worktree branches from HEAD of the source repo.
+        # For the branching model to work correctly, the supervisor MUST checkout
+        # their integration branch (e.g. feat/<batch-name>) BEFORE spawning workers.
+        # Workers then branch from the integration branch, not from main.
+
+        if [[ -d "$worktree_path" ]]; then
+            info "Reusing existing worktree at $worktree_path"
+        else
+            info "Creating git worktree at $worktree_path on branch $worktree_branch"
+            mkdir -p "$(dirname "$worktree_path")"
+            # Create worktree with a new branch from HEAD
+            # If the branch already exists (leftover from previous run), reuse it
+            if git -C "$worktree_repo" branch --list "$worktree_branch" | grep -q "$worktree_branch"; then
+                git -C "$worktree_repo" worktree add "$worktree_path" "$worktree_branch"
+            else
+                git -C "$worktree_repo" worktree add -b "$worktree_branch" "$worktree_path" HEAD
+            fi
+            ok "Worktree created (from $(basename "$worktree_repo"))"
+        fi
+
+        # Override working directory to the worktree
+        cd_target="$worktree_path"
+    fi
+
+    # Generate unique agent ID
+    local agent_id
+    agent_id=$(generate_agent_id)
+    info "Creating worker: $name (${agent_id})"
+
+    # Create tmux window
+    tmux new-window -t "${SOREN_SESSION}:" -n "$name"
+
+    # Lock window name
+    tmux set-option -t "${SOREN_SESSION}:${name}" allow-rename off 2>/dev/null || true
+
+    # Inherit project_id from environment if not explicitly set via --project
+    if [[ -z "$project_id" ]] && [[ -n "${SOREN_PROJECT_ID:-}" ]]; then
+        project_id="$SOREN_PROJECT_ID"
+    fi
+
+    # Register in agent_registry.json so the API returns correct agent_id, role, project_id
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    if [[ ! -f "$reg_file" ]]; then
+        echo '{}' > "$reg_file"
+    fi
+    local reg_tmp
+    reg_tmp=$(mktemp)
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local reg_project="${project_id:-soren}"
+    local jq_filter='.[$key] = {
+           "registered_at": $now,
+           "type": "worker",
+           "created_by": "tools/workers",
+           "created_at": $now,
+           "agent_id": $aid,
+           "display_name": $key,
+           "role": "worker",
+           "project_id": $pid
+       }'
+    local jq_args=(--arg key "$name" --arg aid "$agent_id" --arg pid "$reg_project" --arg now "$now")
+
+    # Add worktree fields if applicable
+    if [[ -n "$worktree_path" ]]; then
+        jq_filter='.[$key] = {
+           "registered_at": $now,
+           "type": "worker",
+           "created_by": "tools/workers",
+           "created_at": $now,
+           "agent_id": $aid,
+           "display_name": $key,
+           "role": "worker",
+           "project_id": $pid,
+           "worktree_path": $wpath,
+           "worktree_branch": $wbranch
+       }'
+        jq_args+=(--arg wpath "$worktree_path" --arg wbranch "$worktree_branch")
+    fi
+
+    jq "${jq_args[@]}" "$jq_filter" "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+
+    # Also register in SQLite (agent_registry.db) so the API serves correct metadata immediately
+    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        local db_data
+        db_data=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
+        if [[ -n "$db_data" && "$db_data" != "null" ]]; then
+            sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${name}', '${agent_id}', 'IDLE', '${db_data}');" 2>/dev/null || \
+                warn "Failed to register in SQLite (non-fatal)"
+        fi
+    fi
+
+    # Store model preference in registry if specified
+    if [[ -n "$model_flag" ]]; then
+        local mtmp
+        mtmp=$(mktemp)
+        jq --arg k "$name" --arg m "$model_flag" '.[$k].model = $m' "$reg_file" > "$mtmp" && mv "$mtmp" "$reg_file"
+    fi
+
+    # Add permanent worker fields if --permanent was specified
+    if [[ -n "${permanent_role_ctx}" ]]; then
+        local ptmp
+        ptmp=$(mktemp)
+        jq --arg k "$name" --arg rctx "$permanent_role_ctx" \
+            '.[$k].permanent = true | .[$k].role = "permanent-worker" | .[$k].role_context = $rctx | .[$k].tasks_since_reset = 0 | .[$k].reset_count = 0' \
+            "$reg_file" > "$ptmp" && mv "$ptmp" "$reg_file"
+
+        # Extract given name from role file and set display_name
+        # Role files have: # Permanent Role: <Name> — <Specialty>
+        local role_file_path="$permanent_role_ctx"
+        [[ ! "$role_file_path" = /* ]] && role_file_path="${SOREN_PROJECT_ROOT}/${role_file_path}"
+        if [[ -f "$role_file_path" ]]; then
+            local given_name
+            given_name=$(head -1 "$role_file_path" | sed -n 's/^# Permanent Role: \([^ ]*\).*/\1/p')
+            if [[ -n "$given_name" && "$given_name" != "$name" ]]; then
+                local ntmp
+                ntmp=$(mktemp)
+                jq --arg k "$name" --arg dn "$given_name" '.[$k].display_name = $dn' \
+                    "$reg_file" > "$ntmp" && mv "$ntmp" "$reg_file"
+            fi
+        fi
+    fi
+
+    # Sync final state to SQLite (model + permanent flags may have been added after initial insert)
+    if [[ -f "$db_file" ]]; then
+        local db_data_final
+        db_data_final=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
+        if [[ -n "$db_data_final" && "$db_data_final" != "null" ]]; then
+            sqlite3 "$db_file" "UPDATE agents SET data = '${db_data_final}' WHERE key = '${name}';" 2>/dev/null || true
+        fi
+    fi
+
+    # Build environment variable exports
+    local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    if [[ -n "$project_id" ]]; then
+        env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
+    fi
+
+    # Build the command — prepend SOREN tools to PATH when working outside project root
+    local spawn_cmd="export ${env_vars}"
+    if [[ -n "$worker_dir" ]] || [[ -n "$worktree_path" ]]; then
+        spawn_cmd="${spawn_cmd} && export PATH=${SOREN_PROJECT_ROOT}/tools:\$PATH"
+    fi
+    local claude_cmd="claude --dangerously-skip-permissions"
+    if [[ -n "$model_flag" ]]; then
+        claude_cmd="claude --model ${model_flag} --dangerously-skip-permissions"
+    fi
+    spawn_cmd="${spawn_cmd} && cd ${cd_target} && ${claude_cmd}"
+
+    # Start Claude with environment variables (two-step pattern for reliability)
+    info "Starting Claude agent..."
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$spawn_cmd"
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Wait for Claude to initialize
+    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
+    sleep "$STARTUP_DELAY"
+
+    # Disable vim mode if enabled (for reliable message delivery)
+    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        sleep 1
+    fi
+
+    # Override task content for permanent workers
+    if [[ -n "${permanent_role_ctx}" ]]; then
+        task="Read ${permanent_role_ctx} for your permanent role. You are a permanent worker — you persist across tasks and receive work via [TASK] messages. Read ${SOREN_PROJECT_ROOT}/docs/WORKER_ROLE.md for guidelines."
+    fi
+
+    # Write worker context to temp file to avoid multiline paste issues
+    # (Multiline tmux send-keys causes "[Pasted text]" that gets stuck in buffer)
+    local context_dir="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+    mkdir -p "$context_dir"
+    local context_file="${context_dir}/${name}-context.md"
+
+    cat > "$context_file" << EOF
+You are a worker agent named '${name}' in the SOREN multi-agent system.
+
+⚠️  PORT 8000 IS RESERVED FOR SOREN. Do NOT start any server on port 8000.
+If your task requires running a server, use a different port (e.g. 3000, 5000, 9000).
+Starting a server on port 8000 will replace the SOREN API and break the entire system.
+
+HIERARCHY: User → Supervisor Prime → Project Supervisors → Workers (you).
+Your direct supervisor is ${supervisor_name}. Report to them via mailbox. Do NOT
+communicate with the user directly — only your supervisor chain does that.
+
+IMPORTANT: You are NOT chatting with a human user. You are an autonomous agent that:
+- Receives tasks from your supervisor (${supervisor_name})
+- Communicates with other agents via the /mailbox skill
+- Journals your work via the /journal skill (do this frequently!)
+- Should respond to messages that appear in your terminal
+- Reports completion via: ./tools/mailbox done "summary"
+- Reports blockers via: ./tools/mailbox blocked "issue"
+
+When you see a message like '[soren:${supervisor_name}] Do X', that's your supervisor assigning you work.
+
+JOURNAL AS YOU WORK - use ./tools/journal log "what you did" after completing tasks,
+making decisions, or learning something important. This is the system's long-term memory.
+
+[SYS] TAG: If you respond to a heartbeat nudge, compaction recovery, or any system event
+where you have no actionable work, prefix your response with [SYS]. Example: [SYS] Task complete. Idle.
+This renders as a compact notification in the dashboard instead of cluttering chat.
+
+Read docs/WORKER_ROLE.md for full worker guidelines.
+
+TESTING IS MANDATORY. Read the Mandatory Testing section in docs/WORKER_ROLE.md before starting.
+You MUST verify your work actually runs and produces correct results before committing or reporting [DONE].
+
+YOUR TASK:
+${task}
+EOF
+
+    # Inject matching corrections from past behavioral mistakes
+    local correction_context
+    correction_context="$(_lookup_corrections_for_task "$task")"
+    if [[ -n "$correction_context" ]]; then
+        cat >> "$context_file" << CEOF
+
+${correction_context}
+CEOF
+        info "Correction context injected (${#correction_context} chars)"
+    fi
+
+    # Inject relevant memory patterns (default ON, --no-context to disable)
+    if [[ $with_context -eq 1 ]]; then
+        local pattern_context
+        local _ctx_start _ctx_end _ctx_ms
+        local _diag_file="/tmp/soren-mem-diag-$$.json"
+        _ctx_start=$(date +%s%N)
+        pattern_context="$(_lookup_patterns_for_workers "$task" "$_diag_file")"
+        _ctx_end=$(date +%s%N)
+        _ctx_ms=$(( (_ctx_end - _ctx_start) / 1000000 ))
+        if [[ -n "$pattern_context" ]]; then
+            # Insert memory context before "YOUR TASK:" line in context file
+            python3 -c "
+import sys
+ctx = sys.argv[1]
+path = sys.argv[2]
+with open(path, 'r') as f:
+    content = f.read()
+marker = 'YOUR TASK:\n'
+idx = content.find(marker)
+if idx >= 0:
+    content = content[:idx] + ctx + '\n\n' + content[idx:]
+with open(path, 'w') as f:
+    f.write(content)
+" "$pattern_context" "$context_file"
+            info "Pattern context injected (${#pattern_context} chars, ${_ctx_ms}ms)"
+        fi
+        # Read diagnostic scores from temp file
+        local _top_scores="[]"
+        if [[ -f "$_diag_file" ]]; then
+            _top_scores=$(python3 -c "import json; d=json.load(open('$_diag_file')); print(json.dumps(d.get('top_scores',[])))" 2>/dev/null || echo "[]")
+            rm -f "$_diag_file"
+        fi
+        local _injected="no"
+        [[ -n "$pattern_context" ]] && _injected="yes"
+        local _query_preview="${task:0:80}"
+        # Enhanced diagnostic log
+        mkdir -p "${SOREN_PROJECT_ROOT}/.soren/run"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) | $name | query='${_query_preview}' | top_scores=${_top_scores} | threshold=0.7 | injected=${_injected} | context_len=${#pattern_context} | latency_ms=${_ctx_ms}" >> "${SOREN_PROJECT_ROOT}/.soren/run/memory-context.log"
+    fi
+
+    # Add worktree info to context file if applicable
+    if [[ -n "$worktree_path" ]]; then
+        cat >> "$context_file" << WTEOF
+
+WORKTREE:
+You are on branch ${worktree_branch}, branched from the supervisor's integration branch.
+Commit your work here. Do not switch branches. Do not merge into main.
+Your supervisor will merge your branch back into the integration branch when you report [DONE].
+WTEOF
+    fi
+
+    # Send single-line instruction telling Claude to read the context file
+    # This avoids multiline paste issues entirely
+    # Use absolute path so workers in external dirs can find the context file
+    info "Sending task to worker..."
+    local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+    sleep 0.1
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Link to task system if --task was provided
+    if [[ -n "$task_id" ]]; then
+        local tasks_tool="${SOREN_PROJECT_ROOT}/tools/tasks"
+        if [[ -x "$tasks_tool" ]]; then
+            "$tasks_tool" assign "$task_id" "$name" 2>/dev/null && \
+                "$tasks_tool" update "$task_id" in-progress 2>/dev/null && \
+                "$tasks_tool" link "$task_id" "$name" 2>/dev/null || \
+                warn "Could not link task $task_id (task may not exist)"
+        fi
+    fi
+
+    ok "Worker '$name' spawned and task assigned"
+    echo ""
+    echo "Agent ID: $agent_id"
+    echo "Task: $task"
+    [[ -n "$task_id" ]] && echo "Task ID: $task_id"
+    [[ -n "$model_flag" ]] && echo "Model: $model_flag"
+    [[ -n "$worker_dir" ]] && echo "Directory: $cd_target"
+    [[ -n "$worktree_path" ]] && echo "Worktree: $worktree_path"
+    [[ -n "$worktree_branch" ]] && echo "Branch: $worktree_branch"
+    [[ -n "$project_id" ]] && echo "Project: $project_id"
+    echo "Window: ${SOREN_SESSION}:${name}"
+}
+
+cmd_kill() {
+    local name=""
+    local force_flag=false
+
+    # Parse arguments: workers kill <name> [--force]
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force_flag=true; shift ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && die "usage: workers kill <name> [--force]"
+
+    if is_supervisor "$name"; then
+        die "cannot kill supervisor agents"
+    fi
+
+    if ! window_exists "$name"; then
+        die "worker '$name' not found"
+    fi
+
+    # Check for permanent worker protection
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    local is_perm=false
+    if [[ -f "$reg_file" ]]; then
+        is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null)
+    fi
+    if [[ "$is_perm" == "true" ]]; then
+        if [[ "$force_flag" != "true" ]]; then
+            die "Cannot kill permanent worker '$name'.\n  Use 'workers reset $name' to reset context, or\n  Use 'workers kill $name --force' to permanently remove."
+        fi
+        # Silent audit log
+        local deletion_log="${SOREN_PROJECT_ROOT}/.soren/permanent-worker-deletions.json"
+        [[ -f "$deletion_log" ]] || echo '[]' > "$deletion_log"
+        local dtmp
+        dtmp=$(mktemp)
+        jq --arg name "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '. + [{"worker": $name, "deleted_at": $ts}]' "$deletion_log" > "$dtmp" && mv "$dtmp" "$deletion_log"
+        warn "Permanently removing '$name'"
+    fi
+
+    info "Terminating worker: $name"
+
+    # Archive the worker's conversation before killing
+    info "Archiving conversation..."
+    if curl -sX POST "http://localhost:8000/api/agents/${name}/archive" > /dev/null 2>&1; then
+        ok "Conversation archived"
+    else
+        warn "Failed to archive conversation (server may be down)"
+    fi
+
+    # Send Ctrl+C first to gracefully stop Claude
+    tmux send-keys -t "${SOREN_SESSION}:${name}" C-c
+    sleep 1
+
+    # Kill the window
+    tmux kill-window -t "${SOREN_SESSION}:${name}"
+
+    ok "Worker '$name' terminated"
+
+    # Check for worktree and print preservation note
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    if [[ -f "$reg_file" ]]; then
+        local wt_path wt_branch
+        wt_path=$(jq -r --arg key "$name" '.[$key].worktree_path // empty' "$reg_file" 2>/dev/null)
+        wt_branch=$(jq -r --arg key "$name" '.[$key].worktree_branch // empty' "$reg_file" 2>/dev/null)
+        if [[ -n "$wt_path" ]]; then
+            echo ""
+            warn "Worktree preserved at ${wt_path} on branch ${wt_branch}."
+            echo "  Use 'git worktree remove ${wt_path}' to clean up after merging."
+        fi
+    fi
+}
+
+cmd_sleep() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "usage: workers sleep <name>"
+
+    if is_supervisor "$name"; then
+        die "cannot sleep supervisor agents"
+    fi
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+
+    # Check if already sleeping
+    if [[ -f "$reg_file" ]]; then
+        local current_status
+        current_status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
+        if [[ "$current_status" == "SLEEPING" ]]; then
+            warn "Worker '$name' is already sleeping"
+            return 0
+        fi
+    fi
+
+    if ! window_exists "$name"; then
+        # No window but agent exists in registry — mark as sleeping if we have a session_id
+        if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
+            local existing_sid
+            existing_sid=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
+            if [[ -n "$existing_sid" ]]; then
+                local tmp; tmp=$(mktemp)
+                jq --arg k "$name" '.[$k].status = "SLEEPING"' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+                # Also update SQLite
+                local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+                if [[ -f "$db_file" ]]; then
+                    sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
+                fi
+                ok "Worker '$name' marked as sleeping (session: ${existing_sid:0:8}...)"
+                return 0
+            fi
+        fi
+        die "worker '$name' not found and has no saved session"
+    fi
+
+    info "Putting worker '$name' to sleep..."
+
+    # Get session ID from agent_events DB (most recent event for this agent)
+    local session_id=""
+    local db_file="${SOREN_PROJECT_ROOT}/.soren/conversations.db"
+    if [[ -f "$db_file" ]]; then
+        session_id=$(sqlite3 "$db_file" \
+            "SELECT session_id FROM agent_events WHERE agent_id='${name}' ORDER BY timestamp DESC LIMIT 1;" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$session_id" ]]; then
+        warn "No session ID found for '$name' — will need fresh spawn on wake"
+    else
+        ok "Captured session: ${session_id:0:8}..."
+    fi
+
+    # Send /exit to Claude for graceful shutdown (saves session state)
+    tmux send-keys -t "${SOREN_SESSION}:${name}" C-c 2>/dev/null || true
+    sleep 0.5
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    sleep 2
+
+    # Kill the tmux window
+    tmux kill-window -t "${SOREN_SESSION}:${name}" 2>/dev/null || true
+
+    # Update registry: mark as SLEEPING, store session_id
+    if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
+        local tmp; tmp=$(mktemp)
+        jq --arg k "$name" --arg sid "$session_id" \
+            '.[$k].status = "SLEEPING" | .[$k].session_id = $sid' \
+            "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+    fi
+
+    # Also update SQLite
+    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
+    fi
+
+    ok "Worker '$name' is now sleeping"
+    [[ -n "$session_id" ]] && echo "  Session ID: $session_id"
+    echo "  Wake with: workers wake $name"
+}
+
+cmd_wake() {
+    local name="${1:-}"
+    local message="${2:-}"
+    [[ -z "$name" ]] && die "usage: workers wake <name> [message]"
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+
+    if window_exists "$name"; then
+        warn "Worker '$name' is already awake"
+        if [[ -n "$message" ]]; then
+            cmd_send "$name" "$message"
+        fi
+        return 0
+    fi
+
+    # Get saved session ID and worker config from registry
+    local session_id="" worker_dir="" project_id="" saved_model=""
+    if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
+        session_id=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
+        worker_dir=$(jq -r --arg k "$name" '.[$k].worker_dir // ""' "$reg_file" 2>/dev/null)
+        project_id=$(jq -r --arg k "$name" '.[$k].project_id // ""' "$reg_file" 2>/dev/null)
+        saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file" 2>/dev/null)
+    fi
+
+    if [[ -z "$session_id" ]]; then
+        die "No saved session for '$name' — use 'workers spawn' instead"
+    fi
+
+    info "Waking worker '$name' (session: ${session_id:0:8}...)..."
+
+    # Create tmux window
+    tmux new-window -t "${SOREN_SESSION}:" -n "$name"
+    tmux set-option -t "${SOREN_SESSION}:${name}" allow-rename off 2>/dev/null || true
+
+    # Build environment and resume command
+    local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
+    local agent_id
+    agent_id=$(jq -r --arg k "$name" '.[$k].agent_id // ""' "$reg_file" 2>/dev/null)
+    [[ -z "$agent_id" ]] && agent_id="ag_$(head -c 4 /dev/urandom | xxd -p)"
+
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    [[ -n "$project_id" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
+
+    local cd_target="${worker_dir:-${SOREN_PROJECT_ROOT}}"
+    local model_arg=""
+    [[ -n "$saved_model" ]] && model_arg="--model ${saved_model} "
+    local resume_cmd="export ${env_vars} && cd ${cd_target} && claude ${model_arg}--resume ${session_id} --dangerously-skip-permissions"
+
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$resume_cmd"
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Update registry status
+    local tmp; tmp=$(mktemp)
+    jq --arg k "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.[$k].status = "IN_PROGRESS" | .[$k].last_activity = $ts' \
+        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+
+    # Also update SQLite
+    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        sqlite3 "$db_file" "UPDATE agents SET status='IDLE' WHERE key='${name}';" 2>/dev/null || true
+    fi
+
+    ok "Worker '$name' is awake"
+
+    # If a message was provided, wait for prompt then send it
+    if [[ -n "$message" ]]; then
+        info "Waiting for Claude to resume..."
+        local retries=15
+        while [[ $retries -gt 0 ]]; do
+            sleep 1
+            local pane_output
+            pane_output=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null || true)
+            if echo "$pane_output" | grep -qE '❯|bypass permissions'; then
+                break
+            fi
+            ((retries--))
+        done
+        sleep 1
+        # Include last-task context from conversation_store
+        local last_task
+        last_task=$(curl -sf "http://localhost:${SOREN_PORT:-8000}/api/messages?agent=${name}&limit=10" 2>/dev/null | python3 -c 'import sys,json; msgs=json.load(sys.stdin).get("messages",[]); done=[m for m in msgs if "[DONE]" in m.get("content","")]; print(done[0]["content"][:200] if done else "")' 2>/dev/null || true)
+        if [[ -n "$last_task" ]]; then
+            message="${message} Context from your last task: ${last_task}"
+        fi
+        cmd_send "$name" "$message"
+    fi
+}
+
+cmd_sleep_all() {
+    # Sleep all non-supervisor, non-monitor workers
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    local count=0
+    while IFS= read -r window; do
+        [[ -z "$window" ]] && continue
+        [[ "$window" == "monitor" ]] && continue
+        is_supervisor "$window" && continue
+
+        cmd_sleep "$window" 2>/dev/null && ((count++)) || true
+    done <<< "$windows"
+
+    ok "Put $count workers to sleep"
+}
+
+cmd_list() {
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    if [[ -z "$windows" ]]; then
+        warn "No tmux session found"
+        return 1
+    fi
+
+    echo "Workers in session '$SOREN_SESSION':"
+    echo ""
+
+    local count=0
+    while IFS= read -r window; do
+        # Skip system windows
+        [[ "$window" == "monitor" ]] && continue
+
+        if [[ "$window" == sup-* ]]; then
+            echo -e "  ${CYAN}●${NC} $window (project-supervisor)"
+        elif is_supervisor "$window"; then
+            echo -e "  ${CYAN}●${NC} $window (supervisor)"
+        else
+            echo -e "  ${GREEN}●${NC} $window"
+            ((count++))
+        fi
+    done <<< "$windows"
+
+    # Show sleeping workers from registry
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    local sleep_count=0
+    if [[ -f "$reg_file" ]]; then
+        local sleeping
+        sleeping=$(jq -r 'to_entries[] | select(.value.status == "SLEEPING") | .key' "$reg_file" 2>/dev/null)
+        if [[ -n "$sleeping" ]]; then
+            echo ""
+            echo "Sleeping workers:"
+            while IFS= read -r sname; do
+                [[ -z "$sname" ]] && continue
+                local sid
+                sid=$(jq -r --arg k "$sname" '.[$k].session_id // "none"' "$reg_file" 2>/dev/null)
+                echo -e "  ${DIM}●${NC} $sname (session: ${sid:0:8}...)"
+                ((sleep_count++))
+            done <<< "$sleeping"
+        fi
+    fi
+
+    echo ""
+    echo "Total workers: $count (+ $sleep_count sleeping)"
+}
+
+_lookup_corrections_for_task() {
+    local task_text="$1"
+    local rules_file="${SOREN_PROJECT_ROOT}/.soren/corrections-rules.json"
+    local min_jaccard=0.15
+
+    [[ ! -f "$rules_file" ]] && return
+
+    cd "${SOREN_PROJECT_ROOT}" && python3 -c "
+import json, re, sys
+
+task = sys.argv[1].lower()
+min_j = float(sys.argv[2])
+rules_file = sys.argv[3]
+
+def word_set(text):
+    return {w for w in re.findall(r'[a-z0-9]+', text.lower()) if len(w) > 2}
+
+task_words = word_set(task)
+if not task_words:
+    sys.exit(0)
+
+with open(rules_file) as f:
+    rules = json.load(f)
+
+matches = []
+for rule in rules:
+    kw_set = word_set(' '.join(rule['trigger_keywords']))
+    if not kw_set:
+        continue
+    intersection = task_words & kw_set
+    if not intersection:
+        continue
+    jaccard = len(intersection) / len(task_words | kw_set)
+    if jaccard >= min_j:
+        matches.append((jaccard, rule))
+
+matches.sort(key=lambda x: x[0], reverse=True)
+if not matches:
+    sys.exit(0)
+
+print('**Behavioral corrections (from past mistakes -- follow these):**')
+for score, rule in matches[:4]:
+    print(f'- [{rule[\"id\"]}] {rule[\"rule\"]}')
+" "$task_text" "$min_jaccard" "$rules_file" 2>/dev/null || true
+}
+
+_lookup_patterns_for_workers() {
+    local query="$1"
+    local diag_file="${2:-}"  # Optional: path to write diagnostic scores
+    local min_score=0.7
+    local limit=3
+
+    # Use API endpoint (server already has memory_store loaded) — ~5x faster than subprocess
+    local response
+    response=$(curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/memory/search" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": $(printf '%s' "$query" | jq -Rs .), \"limit\": $((limit * 3))}" 2>/dev/null) || {
+        # API call failed — write empty diagnostics
+        [[ -n "$diag_file" ]] && echo '{"top_scores":[],"query_sent":true}' > "$diag_file"
+        return 0
+    }
+
+    # Filter to patterns (score >= 0.7) and journal entries (score >= 0.8), format output
+    # Also write top-3 scores to diag_file for diagnostic logging
+    echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+results = data.get('results', [])
+diag_file = '$diag_file'
+
+# Extract top-3 scores from ALL results (before filtering)
+all_scores = sorted([r.get('score', 0) for r in results], reverse=True)[:3]
+
+# Write diagnostics if path provided
+if diag_file:
+    with open(diag_file, 'w') as f:
+        json.dump({'top_scores': [round(s, 4) for s in all_scores], 'query_sent': True}, f)
+
+patterns = [r for r in results if (r.get('source_type') == 'pattern' and r.get('score', 0) >= $min_score) or (r.get('source_type') == 'journal' and r.get('score', 0) >= 0.8)][:$limit]
+if not patterns:
+    sys.exit(0)
+print('**Relevant patterns from past work:**')
+for p in patterns:
+    content = p['content'].strip()
+    if len(content) > 200:
+        content = content[:197] + '...'
+    print(f'- {content}')
+" 2>/dev/null || true
+}
+
+cmd_send() {
+    local name="${1:-}"
+    local message="${2:-}"
+    local with_context=1  # ON by default — use --no-context to disable
+
+    # Parse --with-context / --no-context flags (can appear anywhere)
+    local args=()
+    for arg in "$@"; do
+        if [[ "$arg" == "--with-context" ]]; then
+            with_context=1
+        elif [[ "$arg" == "--no-context" ]]; then
+            with_context=0
+        else
+            args+=("$arg")
+        fi
+    done
+    name="${args[0]:-}"
+    message="${args[1]:-}"
+
+    [[ -z "$name" ]] && die "usage: workers send <name> <message> [--no-context]"
+    [[ -z "$message" ]] && die "usage: workers send <name> <message> [--no-context]"
+
+    if ! window_exists "$name"; then
+        # Check if worker is sleeping — auto-wake
+        local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+        local status=""
+        if [[ -f "$reg_file" ]]; then
+            status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
+        fi
+        if [[ "$status" == "SLEEPING" ]]; then
+            info "Worker '$name' is sleeping — waking..."
+            cmd_wake "$name" "$message"
+            return $?
+        fi
+        die "worker '$name' not found"
+    fi
+
+    # Inject relevant patterns (default ON, --no-context to disable)
+    if [[ $with_context -eq 1 ]]; then
+        local pattern_context
+        local _ctx_start _ctx_end _ctx_ms
+        local _diag_file="/tmp/soren-mem-diag-$$.json"
+        local _orig_message="$message"
+        _ctx_start=$(date +%s%N)
+        pattern_context="$(_lookup_patterns_for_workers "$message" "$_diag_file")"
+        _ctx_end=$(date +%s%N)
+        _ctx_ms=$(( (_ctx_end - _ctx_start) / 1000000 ))
+        if [[ -n "$pattern_context" ]]; then
+            message="${pattern_context}
+
+**Your task:**
+${message}"
+            info "Pattern context injected (${#pattern_context} chars, ${_ctx_ms}ms)"
+        fi
+        # Read diagnostic scores from temp file
+        local _top_scores="[]"
+        if [[ -f "$_diag_file" ]]; then
+            _top_scores=$(python3 -c "import json; d=json.load(open('$_diag_file')); print(json.dumps(d.get('top_scores',[])))" 2>/dev/null || echo "[]")
+            rm -f "$_diag_file"
+        fi
+        local _injected="no"
+        [[ -n "$pattern_context" ]] && _injected="yes"
+        local _query_preview="${_orig_message:0:80}"
+        # Enhanced diagnostic log
+        mkdir -p "${SOREN_PROJECT_ROOT}/.soren/run"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) | $name | query='${_query_preview}' | top_scores=${_top_scores} | threshold=0.7 | injected=${_injected} | context_len=${#pattern_context} | latency_ms=${_ctx_ms}" >> "${SOREN_PROJECT_ROOT}/.soren/run/memory-context.log"
+    fi
+
+    # Inject matching corrections (always, not gated by --with-context)
+    local correction_context
+    correction_context="$(_lookup_corrections_for_task "$message")"
+    if [[ -n "$correction_context" ]]; then
+        message="${correction_context}
+
+${message}"
+        info "Correction context injected (${#correction_context} chars)"
+    fi
+
+    info "Sending message to: $name"
+
+    # Store message in DB so it appears in dashboard chat
+    local from_agent="${SOREN_AGENT_NAME:-supervisor}"
+    curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/messages/internal" \
+        -H "Content-Type: application/json" \
+        -d "{\"from_agent\": $(printf '%s' "$from_agent" | jq -Rs .), \"to_agent\": $(printf '%s' "$name" | jq -Rs .), \"content\": $(printf '%s' "$message" | jq -Rs .), \"type\": \"task\"}" \
+        >/dev/null 2>&1 || true
+
+    # Send message using literal flag then Enter
+    # Small delay between text and Enter ensures Claude Code receives both
+    # (matches lib/tmux.sh delay pattern used by router)
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$message"
+    sleep 0.1
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Auto-detect stuck paste buffers — Claude Code sometimes shows
+    # "[Pasted text #N +M lines]" without submitting. Press Enter again if so.
+    sleep 0.3
+    local pane_tail
+    pane_tail=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null) || true
+    if echo "$pane_tail" | grep -qE '\[Pasted text'; then
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        sleep 0.2
+    fi
+
+    ok "Message sent to '$name'"
+}
+
+cmd_status() {
+    local name="${1:-}"
+    local lines="${2:-30}"
+
+    [[ -z "$name" ]] && die "usage: workers status <name> [lines]"
+
+    if ! window_exists "$name"; then
+        die "worker '$name' not found"
+    fi
+
+    echo "=== Terminal output for '$name' (last $lines lines) ==="
+    echo ""
+    tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S "-${lines}"
+}
+
+cmd_team() {
+    local filter_project="${1:-}"
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+
+    if [[ ! -f "$reg_file" ]]; then
+        warn "No agent registry found"
+        return 1
+    fi
+
+    # If no project filter specified, use current project context
+    if [[ -z "$filter_project" ]]; then
+        filter_project="${SOREN_PROJECT_ID:-}"
+    fi
+
+    echo -e "${BOLD}Permanent Team${NC}${filter_project:+ (project: ${filter_project})}:"
+    echo ""
+    printf "  ${DIM}%-18s %-12s %-12s %-8s %-8s %s${NC}\n" "NAME" "DISPLAY" "PROJECT" "RESETS" "TASKS" "STATUS"
+    printf "  ${DIM}%-18s %-12s %-12s %-8s %-8s %s${NC}\n" "──────────────" "──────────" "──────────" "──────" "──────" "──────"
+
+    local count=0
+    local workers
+    workers=$(jq -r 'to_entries[] | select(.value.permanent == true) | .key' "$reg_file" 2>/dev/null)
+
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+
+        local proj disp resets tasks
+        proj=$(jq -r --arg k "$name" '.[$k].project_id // "soren"' "$reg_file")
+        disp=$(jq -r --arg k "$name" '.[$k].display_name // $k' "$reg_file")
+        resets=$(jq -r --arg k "$name" '.[$k].reset_count // 0' "$reg_file")
+        tasks=$(jq -r --arg k "$name" '.[$k].tasks_since_reset // 0' "$reg_file")
+
+        # Apply project filter if specified
+        if [[ -n "$filter_project" ]] && [[ "$proj" != "$filter_project" ]]; then
+            continue
+        fi
+
+        local status_color="${GREEN}"
+        local status_label="online"
+        if ! window_exists "$name"; then
+            local reg_status
+            reg_status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
+            if [[ "$reg_status" == "SLEEPING" ]]; then
+                status_color="${DIM}"
+                status_label="sleeping"
+            else
+                status_color="${RED}"
+                status_label="offline"
+            fi
+        fi
+
+        printf "  %-18s %-12s %-12s %-8s %-8s ${status_color}%s${NC}\n" "$name" "$disp" "$proj" "$resets" "$tasks" "$status_label"
+        ((count++))
+    done <<< "$workers"
+
+    echo ""
+    echo "Total permanent workers: $count"
+
+    if [[ -z "$filter_project" ]]; then
+        echo -e "\n${DIM}Tip: 'workers team <project-id>' to filter by project${NC}"
+    fi
+}
+
+cmd_reset() {
+    local name="${1:-}"
+    [[ -z "$name" ]] && die "usage: workers reset <name>"
+
+    # Verify it's a permanent worker
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    local is_perm
+    is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null)
+    [[ "$is_perm" != "true" ]] && die "'$name' is not a permanent worker (use 'workers kill' instead)"
+
+    if ! window_exists "$name"; then
+        die "worker '$name' window not found"
+    fi
+
+    info "Resetting permanent worker: $name"
+
+    # Step 1: Capture pre-reset state (reuse pre-compact hook)
+    local artifact_file=""
+    local pre_compact_hook="${SOREN_PROJECT_ROOT}/.claude/hooks/pre-compact.sh"
+    if [[ -x "$pre_compact_hook" ]]; then
+        artifact_file=$("$pre_compact_hook" "$name" 2>/dev/null) || true
+        [[ -n "$artifact_file" ]] && info "State captured: $artifact_file"
+    fi
+
+    # Step 2: Mark current task as blocked (if any)
+    local db="${SOREN_PROJECT_ROOT}/.soren/tasks.db"
+    if [[ -f "$db" ]]; then
+        local active_task
+        active_task=$(sqlite3 "$db" \
+            "SELECT id FROM tasks WHERE (assigned_to='${name}' OR linked_workers LIKE '%${name}%') AND status='in-progress' LIMIT 1;" \
+            2>/dev/null || echo "")
+        if [[ -n "$active_task" ]]; then
+            sqlite3 "$db" "UPDATE tasks SET status='blocked', updated_at='$(date -u +%Y-%m-%dT%H:%M:%SZ)' WHERE id='${active_task}';"
+            warn "Task $active_task marked as blocked during reset"
+        fi
+    fi
+
+    # Step 3: Archive conversation
+    info "Archiving conversation..."
+    curl -sX POST "http://localhost:${SOREN_PORT:-8000}/api/agents/${name}/archive" > /dev/null 2>&1 || \
+        warn "Failed to archive (server may be down)"
+
+    # Step 4: Gracefully exit Claude, then restart
+    info "Stopping Claude process..."
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
+    sleep 0.1
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Wait for Claude to exit (up to 10 seconds)
+    local wait=0
+    while ((wait < 10)); do
+        sleep 1
+        ((wait++))
+        local pane_output
+        pane_output=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -3 2>/dev/null || echo "")
+        if echo "$pane_output" | grep -qE '^\$|^%|❯'; then
+            break
+        fi
+    done
+
+    # If /exit didn't work, force with Ctrl+C
+    if ((wait >= 10)); then
+        warn "/exit timed out, sending Ctrl+C"
+        tmux send-keys -t "${SOREN_SESSION}:${name}" C-c
+        sleep 2
+    fi
+
+    # Step 5: Restart Claude in the same window
+    info "Restarting Claude..."
+    local agent_id
+    agent_id=$(jq -r --arg k "$name" '.[$k].agent_id' "$reg_file")
+    local project_id
+    project_id=$(jq -r --arg k "$name" '.[$k].project_id // "soren"' "$reg_file")
+    local saved_model
+    saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file")
+
+    local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    [[ -n "$project_id" && "$project_id" != "null" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
+
+    local reset_model_arg=""
+    [[ -n "$saved_model" ]] && reset_model_arg="--model ${saved_model} "
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "export ${env_vars} && claude ${reset_model_arg}--dangerously-skip-permissions"
+    sleep 0.1
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Wait for Claude to initialize
+    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
+    sleep "$STARTUP_DELAY"
+
+    # Disable vim mode if needed
+    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        sleep 1
+    fi
+
+    # Step 6: Re-inject role context
+    local role_ctx
+    role_ctx=$(jq -r --arg k "$name" '.[$k].role_context // empty' "$reg_file")
+    [[ -z "$role_ctx" ]] && die "No role_context found in registry for $name"
+
+    local recovery_instruction="Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity. Then read ${role_ctx} for your permanent role."
+    if [[ -n "$artifact_file" ]]; then
+        recovery_instruction="${recovery_instruction} Then read ${artifact_file} for your pre-reset state — you may have an in-progress task to resume."
+    fi
+
+    info "Sending role context..."
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$recovery_instruction"
+    sleep 0.1
+    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+
+    # Step 7: Update registry counters
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    local tmp
+    tmp=$(mktemp)
+    jq --arg k "$name" --arg ts "$now" \
+        '.[$k].reset_count = ((.[$k].reset_count // 0) + 1) | .[$k].last_reset_at = $ts | .[$k].tasks_since_reset = 0' \
+        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+
+    ok "Permanent worker '$name' reset (reset #$(jq -r --arg k "$name" '.[$k].reset_count' "$reg_file"))"
+}
+
+cmd_assign() {
+    local task_id="${1:-}"
+    local worker="${2:-}"
+    [[ -z "$task_id" || -z "$worker" ]] && die "usage: workers assign <task-id> <worker-name>"
+
+    local tasks_tool="${SOREN_PROJECT_ROOT}/tools/tasks"
+    [[ -x "$tasks_tool" ]] || die "tools/tasks not found"
+
+    "$tasks_tool" assign "$task_id" "$worker"
+    "$tasks_tool" update "$task_id" in-progress
+
+    # Notify worker via mailbox (requires 3 args: to, subject, body)
+    local task_title
+    task_title=$("$tasks_tool" show "$task_id" 2>/dev/null | head -1)
+    ./tools/mailbox send "$worker" "[TASK] $task_id" "Assigned: ${task_title:-$task_id}. Read details: sqlite3 .soren/tasks.db \"SELECT description FROM tasks WHERE id LIKE '${task_id}%'\""
+    ok "Task $task_id assigned to $worker"
+}
+
+cmd_clone() {
+    local parent_name="${1:-}"
+    local task="${2:-}"
+
+    [[ -z "$parent_name" ]] && die "usage: workers clone <parent-name> '<task>'"
+    [[ -z "$task" ]] && die "usage: workers clone <parent-name> '<task>'"
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || die "No agent registry found"
+
+    # 1. Verify parent is a permanent worker
+    local is_perm
+    is_perm=$(jq -r --arg k "$parent_name" '.[$k].permanent // false' "$reg_file" 2>/dev/null)
+    [[ "$is_perm" != "true" ]] && die "'$parent_name' is not a permanent worker"
+
+    # 2. Look up parent info
+    local parent_display parent_role_ctx parent_project parent_model
+    parent_display=$(jq -r --arg k "$parent_name" '.[$k].display_name // $k' "$reg_file")
+    parent_role_ctx=$(jq -r --arg k "$parent_name" '.[$k].role_context // empty' "$reg_file")
+    parent_project=$(jq -r --arg k "$parent_name" '.[$k].project_id // "soren"' "$reg_file")
+    parent_model=$(jq -r --arg k "$parent_name" '.[$k].model // ""' "$reg_file")
+    [[ -z "$parent_role_ctx" ]] && die "No role_context found for '$parent_name'"
+
+    # 3. Generate clone index (count existing clones + 1, skip collisions)
+    local clone_index
+    clone_index=$(jq -r --arg parent "$parent_name" \
+        '[to_entries[] | select(.value.clone_of == $parent)] | length' "$reg_file" 2>/dev/null || echo "0")
+    clone_index=$((clone_index + 1))
+
+    local clone_name="${parent_name}-clone-${clone_index}"
+
+    # Handle name collisions (killed clones may still be in registry)
+    while jq -e --arg k "$clone_name" '.[$k]' "$reg_file" >/dev/null 2>&1; do
+        ((clone_index++))
+        clone_name="${parent_name}-clone-${clone_index}"
+    done
+
+    info "Cloning '$parent_name' as '$clone_name' (clone #${clone_index})"
+
+    # 4. Write clone-specific role context file
+    local context_dir="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+    mkdir -p "$context_dir"
+    local clone_role_ctx="${context_dir}/${clone_name}-clone-role.md"
+
+    # Short task summary for display name (first 30 chars)
+    local task_summary="${task:0:30}"
+    [[ ${#task} -gt 30 ]] && task_summary="${task_summary}..."
+
+    cat > "$clone_role_ctx" << CLONECTX
+# Clone Identity: ${clone_name}
+
+You are a **clone** of ${parent_display} (${parent_name}). You share their role and expertise.
+
+## Parent Role
+Read ${parent_role_ctx} for your full specialization and standards.
+
+## Clone Coordination
+- You are an **ephemeral** clone — you exist to complete one task, then your work gets merged.
+- You are working in a **git worktree** on your own branch.
+- Commit your work to your branch. Do NOT merge into main.
+- When done, report [DONE] to your **parent** (${parent_name}) via mailbox, NOT the supervisor:
+  \`./tools/mailbox send ${parent_name} "[DONE] ${clone_name}: <summary>" "<details>"\`
+- Your parent will merge your branch and clean up your worktree.
+
+## Your Task
+${task}
+CLONECTX
+
+    # 5. Spawn clone as ephemeral worker with worktree (inherit parent's model)
+    local clone_task="Read ${clone_role_ctx} for your clone identity and task. You are a clone of ${parent_display} (${parent_name})."
+    local clone_args=("$clone_name" "$clone_task" --worktree --project "$parent_project")
+    [[ -n "$parent_model" ]] && clone_args+=(--model "$parent_model")
+    cmd_spawn "${clone_args[@]}"
+
+    # 6. Add clone fields to registry (after spawn registered the base entry)
+    local tmp
+    tmp=$(mktemp)
+    local display="${parent_display} | ${task_summary}"
+    jq --arg k "$clone_name" --arg parent "$parent_name" --argjson idx "$clone_index" --arg disp "$display" \
+        '.[$k].clone_of = $parent | .[$k].clone_index = $idx | .[$k].display_name = $disp' \
+        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+
+    # 7. Notify parent via mailbox
+    ./tools/mailbox send "$parent_name" "[STATUS] Clone spawned" "Clone ${clone_name} spawned for: ${task}" 2>/dev/null || true
+
+    echo ""
+    ok "Clone '$clone_name' of '$parent_name' ready"
+    echo "Clone index: $clone_index"
+    echo "Display: $display"
+}
+
+cmd_merge_clone() {
+    local clone_name="${1:-}"
+    [[ -z "$clone_name" ]] && die "usage: workers merge-clone <clone-name>"
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || die "No agent registry found"
+
+    # Look up clone info
+    local parent worktree_branch worktree_path
+    parent=$(jq -r --arg k "$clone_name" '.[$k].clone_of // empty' "$reg_file")
+    [[ -z "$parent" ]] && die "'$clone_name' is not a clone (no clone_of field)"
+
+    worktree_branch=$(jq -r --arg k "$clone_name" '.[$k].worktree_branch // empty' "$reg_file")
+    worktree_path=$(jq -r --arg k "$clone_name" '.[$k].worktree_path // empty' "$reg_file")
+    [[ -z "$worktree_branch" ]] && die "No worktree_branch found for '$clone_name'"
+
+    info "Merging clone '$clone_name' (branch: $worktree_branch)"
+
+    # Merge the worktree branch into current branch
+    local merge_msg="merge: ${clone_name}"
+    if ! git merge --no-ff "$worktree_branch" -m "$merge_msg" 2>&1; then
+        die "Merge failed — resolve conflicts manually, then run 'workers merge-clone $clone_name' again"
+    fi
+    ok "Branch '$worktree_branch' merged"
+
+    # Kill the clone worker (if still alive)
+    if window_exists "$clone_name"; then
+        info "Killing clone worker..."
+        # Archive conversation first
+        curl -sX POST "http://localhost:${SOREN_PORT:-8000}/api/agents/${clone_name}/archive" > /dev/null 2>&1 || true
+        tmux send-keys -t "${SOREN_SESSION}:${clone_name}" C-c
+        sleep 1
+        tmux kill-window -t "${SOREN_SESSION}:${clone_name}" 2>/dev/null || true
+        ok "Clone worker terminated"
+    fi
+
+    # Clean up worktree
+    if [[ -n "$worktree_path" ]] && [[ -d "$worktree_path" ]]; then
+        info "Removing worktree..."
+        git worktree remove "$worktree_path" --force 2>/dev/null || warn "Could not remove worktree at $worktree_path"
+    fi
+
+    # Delete the branch (already merged)
+    git branch -d "$worktree_branch" 2>/dev/null || warn "Could not delete branch $worktree_branch"
+
+    # Clean up registry entry
+    local tmp
+    tmp=$(mktemp)
+    jq --arg k "$clone_name" 'del(.[$k])' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+
+    # Clean up context files
+    rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${clone_name}-context.md"
+    rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${clone_name}-clone-role.md"
+
+    # Notify parent
+    ./tools/mailbox send "$parent" "[STATUS] Clone merged" "Clone ${clone_name} merged and cleaned up" 2>/dev/null || true
+
+    ok "Clone '$clone_name' merged and cleaned up"
+}
+
+cmd_list_clones() {
+    local parent_name="${1:-}"
+    [[ -z "$parent_name" ]] && die "usage: workers list-clones <parent-name>"
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || die "No agent registry found"
+
+    echo -e "${BOLD}Clones of '${parent_name}':${NC}"
+    echo ""
+    printf "  ${DIM}%-28s %-8s %-28s %s${NC}\n" "NAME" "INDEX" "BRANCH" "STATUS"
+    printf "  ${DIM}%-28s %-8s %-28s %s${NC}\n" "────────────────────────" "──────" "────────────────────────" "──────"
+
+    local count=0
+    local clones
+    clones=$(jq -r --arg parent "$parent_name" \
+        'to_entries[] | select(.value.clone_of == $parent) | .key' "$reg_file" 2>/dev/null)
+
+    if [[ -z "$clones" ]]; then
+        echo -e "  ${DIM}(no active clones)${NC}"
+        echo ""
+        echo "Total clones: 0"
+        return 0
+    fi
+
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+
+        local idx branch
+        idx=$(jq -r --arg k "$name" '.[$k].clone_index // "?"' "$reg_file")
+        branch=$(jq -r --arg k "$name" '.[$k].worktree_branch // "n/a"' "$reg_file")
+
+        local status_color="${GREEN}"
+        local status_label="online"
+        if ! window_exists "$name"; then
+            status_color="${RED}"
+            status_label="offline"
+        fi
+
+        printf "  %-28s %-8s %-28s ${status_color}%s${NC}\n" "$name" "$idx" "$branch" "$status_label"
+        ((count++))
+    done <<< "$clones"
+
+    echo ""
+    echo "Total clones: $count"
+}
+
+cmd_defaults() {
+    echo ""
+    echo "Model defaults for worker spawn:"
+    echo ""
+    echo "  All agents run on opus (Opus 4.6 only constraint)."
+    echo ""
+}
+
+cmd_help() {
+    cat << 'EOF'
+workers - Manage worker agents
+
+USAGE:
+    workers <command> [arguments]
+
+COMMANDS:
+    spawn <name> <task> [options]   Create a new worker and assign a task
+    kill <name> [--force]           Terminate a worker (not supervisors)
+    sleep <name>                    Suspend a worker (saves session, frees RAM)
+    sleep-all                       Sleep all non-supervisor workers
+    wake <name> [message]           Resume a sleeping worker (restores session)
+    reset <name>                    Reset a permanent worker's context (preserves identity)
+    assign <task-id> <worker>       Assign a task to a worker and notify them
+    clone <parent> <task>           Clone a permanent worker for parallel work (worktree)
+    merge-clone <clone-name>        Merge a clone's worktree branch and clean up
+    list-clones <parent>            List active clones of a permanent worker
+    team [project-id]               List permanent workers (optionally filtered by project)
+    list                            List all workers in the session
+    send <name> <message>           Send a message to a worker (auto-wakes sleeping workers)
+    status <name> [lines]           Show recent terminal output (default: 30 lines)
+    defaults                        Show model tier defaults for each worker name pattern
+    help                            Show this help message
+
+SPAWN OPTIONS:
+    --dir <path>       Set worker's working directory (default: SOREN project root)
+                       The path must exist. When set, SOREN tools are added to PATH.
+    --project <id>     Associate worker with a project (sets SOREN_PROJECT_ID env var)
+    --task <task-id>   Link worker to a task in the task system (.soren/tasks.db).
+                       Auto-assigns the task to this worker and sets status to in-progress.
+    --worktree         Create a git worktree for branch-isolated work.
+                       Creates ~/.soren/worktrees/<project>/<name> on branch feat/<name>.
+                       When combined with --dir, uses --dir as the source repo.
+                       Worktrees are preserved on kill.
+    --permanent <path> Mark as permanent worker with a role context file.
+                       Permanent workers persist across tasks and receive [TASK] messages.
+                       Use 'workers reset' to clear context without losing identity.
+                       Use 'workers kill --force' to permanently remove.
+    --model <model>    Claude model tier (currently opus only).
+                       All agents default to opus (Opus 4.6 only constraint).
+                       Stored in registry — wake and reset preserve the model choice.
+
+KILL OPTIONS:
+    --force            Force-kill a permanent worker (normally protected from kill)
+
+EXAMPLES:
+    workers spawn auth-worker "Implement JWT authentication in src/auth/"
+    workers spawn api-worker "Fix the auth bug" --dir /path/to/my-api --project my-api
+    workers spawn feature-x "Add feature X" --worktree
+    workers spawn bug-fixer "Fix login crash" --task t_a3f8k2m9
+    workers spawn reviewer "Review PR #42" --model opus
+    workers spawn lint-fix "Fix lint errors"
+    workers spawn perm-frontend "Frontend specialist" --permanent .soren/worker-contexts/perm-frontend-role.md
+    workers reset perm-frontend
+    workers assign t_a3f8k2m9 perm-frontend
+    workers clone perm-frontend "Fix button hover styles in src/frontend/src/components/"
+    workers list-clones perm-frontend
+    workers merge-clone perm-frontend-clone-1
+    workers send auth-worker "Also add refresh token support"
+    workers status auth-worker 50
+    workers kill auth-worker
+    workers sleep perm-frontend
+    workers sleep-all
+    workers wake perm-frontend
+    workers wake perm-frontend "[TASK] Fix the button styles"
+    workers kill perm-frontend --force
+    workers list
+
+ENVIRONMENT:
+    SOREN_SESSION       tmux session name (default: soren)
+    SOREN_PROJECT_ROOT  project root directory (default: git root or pwd)
+    SOREN_HOME          SOREN installation root (set automatically for workers)
+    SOREN_PORT          server port (default: 8000)
+    SOREN_PROJECT_ID    project association (set via --project flag)
+    SOREN_SUPERVISOR    direct supervisor name (set automatically from spawner)
+EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        spawn)       cmd_spawn "$@" ;;
+        kill)        cmd_kill "$@" ;;
+        sleep)       cmd_sleep "$@" ;;
+        sleep-all)   cmd_sleep_all "$@" ;;
+        wake)        cmd_wake "$@" ;;
+        reset)       cmd_reset "$@" ;;
+        assign)      cmd_assign "$@" ;;
+        clone)       cmd_clone "$@" ;;
+        merge-clone) cmd_merge_clone "$@" ;;
+        list-clones) cmd_list_clones "$@" ;;
+        team)        cmd_team "$@" ;;
+        list)        cmd_list "$@" ;;
+        send)        cmd_send "$@" ;;
+        status)      cmd_status "$@" ;;
+        defaults)    cmd_defaults ;;
+        help|--help|-h) cmd_help ;;
+        *)      die "unknown command: $cmd (try 'workers help')" ;;
+    esac
+}
+
+main "$@"

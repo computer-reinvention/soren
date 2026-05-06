@@ -1,0 +1,429 @@
+#!/usr/bin/env bash
+#===============================================================================
+# mailbox - Send messages to other agents or the user
+#
+# Usage:
+#   mailbox send <to> "<subject>" "<body>"         - Send message (inline <500 chars, file otherwise)
+#   mailbox quick <to> "<subject>"                 - Quick notification (no body)
+#   mailbox done "<summary>"                       - Tell supervisor complete
+#   mailbox blocked "<issue>"                      - Tell supervisor blocked
+#   mailbox update <message-id> <new-status>       - Update task lifecycle status
+#
+# Mailbox Format (JSONL - one JSON object per line):
+#   {"id":"...","ts":"...","from":"soren:worker","to":"soren:supervisor","subject":"...","status":"submitted","body":"path"}
+#
+# Recipients:
+#   supervisor, worker-name      - Adds soren: prefix automatically
+#   soren-feature:worker-a        - Full session:window address
+#   user                         - Goes to dashboard API
+#===============================================================================
+
+set -euo pipefail
+
+# Source portable file locking
+TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${TOOLS_DIR}/../src/orchestrator/lib/filelock.sh"
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SOREN_MAILBOX="${SOREN_MAILBOX:-.soren/mailbox}"
+SOREN_PORT="${SOREN_PORT:-8000}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+SOREN_AGENT_NAME="${SOREN_AGENT_NAME:-unknown}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+
+# Full tmux address for this agent
+get_from_address() {
+    echo "${SOREN_SESSION}:${SOREN_AGENT_NAME}"
+}
+
+# Normalize recipient to tmux address
+normalize_to() {
+    local to="$1"
+    if [[ "$to" == "user" ]]; then
+        echo "user"
+    elif [[ "$to" == *":"* ]]; then
+        echo "$to"  # Already a full address
+    else
+        echo "${SOREN_SESSION}:${to}"  # Add session prefix
+    fi
+}
+
+# Get today's attachments directory
+get_attachments_dir() {
+    local dir="${SOREN_HOME}/.soren/journal/$(date +%Y-%m-%d)/attachments"
+    mkdir -p "$dir"
+    echo "$dir"
+}
+
+# Ensure mailbox file exists
+ensure_mailbox() {
+    mkdir -p "$(dirname "$SOREN_MAILBOX")"
+    touch "$SOREN_MAILBOX"
+}
+
+# Generate a UUID (portable: uses uuidgen or Python fallback)
+generate_uuid() {
+    if command -v uuidgen &>/dev/null; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    else
+        python3 -c "import uuid; print(uuid.uuid4())"
+    fi
+}
+
+# Valid task statuses
+VALID_STATUSES="submitted working input-required completed failed"
+
+validate_status() {
+    local status="$1"
+    for valid in $VALID_STATUSES; do
+        [[ "$status" == "$valid" ]] && return 0
+    done
+    return 1
+}
+
+# Build a JSONL mailbox line using jq (safe for any content)
+build_mailbox_line() {
+    local from="$1"
+    local to="$2"
+    local subject="$3"
+    local body="${4:-}"
+
+    local ts msg_id
+    ts=$(date -Iseconds)
+    msg_id=$(generate_uuid)
+
+    if [[ -n "$body" ]]; then
+        jq -cn --arg id "$msg_id" --arg ts "$ts" --arg from "$from" --arg to "$to" \
+            --arg subject "$subject" --arg body "$body" --arg status "submitted" \
+            '{id: $id, ts: $ts, from: $from, to: $to, subject: $subject, body: $body, status: $status}'
+    else
+        jq -cn --arg id "$msg_id" --arg ts "$ts" --arg from "$from" --arg to "$to" \
+            --arg subject "$subject" --arg status "submitted" \
+            '{id: $id, ts: $ts, from: $from, to: $to, subject: $subject, status: $status}'
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Commands
+#-------------------------------------------------------------------------------
+
+cmd_send() {
+    local to="${1:-}"
+    local subject="${2:-}"
+    local body="${3:-}"
+
+    [[ -z "$to" ]] && die "usage: mailbox send <to> \"<subject>\" \"<body>\""
+    [[ -z "$subject" ]] && die "usage: mailbox send <to> \"<subject>\" \"<body>\""
+    [[ -z "$body" ]] && die "usage: mailbox send <to> \"<subject>\" \"<body>\""
+
+    local from=$(get_from_address)
+    local to_addr=$(normalize_to "$to")
+    local timestamp=$(date -Iseconds)
+
+    # Inline threshold: short messages go directly in JSONL body field,
+    # long messages get written to an attachment file
+    local INLINE_THRESHOLD=500
+    local body_value
+
+    if (( ${#body} < INLINE_THRESHOLD )); then
+        # Short message: inline in JSONL body field
+        body_value="$body"
+    else
+        # Long message: create attachment file
+        local attachments_dir=$(get_attachments_dir)
+        local filename="${SOREN_AGENT_NAME}-$(date +%s).md"
+        local filepath="${attachments_dir}/${filename}"
+
+        cat > "$filepath" << EOF
+# $subject
+
+**From:** $from
+**To:** $to_addr
+**Date:** $timestamp
+
+---
+
+$body
+EOF
+        body_value="$filepath"
+    fi
+
+    # Special case: user messages go to API (use /messages/internal to store + broadcast)
+    if [[ "$to_addr" == "user" ]]; then
+        local msg_content
+        if (( ${#body} < INLINE_THRESHOLD )); then
+            msg_content=$(printf '%s\n\n%s' "$subject" "$body" | jq -Rs .)
+        else
+            msg_content=$(printf '%s\n\n(see: %s)' "$subject" "$body_value" | jq -Rs .)
+        fi
+        if curl -sf -X POST "http://localhost:${SOREN_PORT}/api/messages/internal" \
+            -H "Content-Type: application/json" \
+            -d "{\"from_agent\": \"$SOREN_AGENT_NAME\", \"to_agent\": \"user\", \"content\": $msg_content, \"type\": \"user\"}" \
+            >/dev/null 2>&1; then
+            ok "Sent to user: $subject"
+        else
+            die "Failed to send to user (API unavailable)"
+        fi
+        return 0
+    fi
+
+    # Append JSONL entry to mailbox (with cross-process file lock)
+    ensure_mailbox
+    mailbox_lock
+    build_mailbox_line "$from" "$to_addr" "$subject" "$body_value" >> "$SOREN_MAILBOX"
+    mailbox_unlock
+    ok "Sent: $subject -> $to"
+    if (( ${#body} >= INLINE_THRESHOLD )); then
+        echo -e "${DIM}Body: $body_value${NC}"
+    fi
+}
+
+cmd_quick() {
+    local to="${1:-}"
+    local subject="${2:-}"
+
+    [[ -z "$to" ]] && die "usage: mailbox quick <to> \"<subject>\""
+    [[ -z "$subject" ]] && die "usage: mailbox quick <to> \"<subject>\""
+
+    local from=$(get_from_address)
+    local to_addr=$(normalize_to "$to")
+
+    # Special case: user messages go to API (use /messages/internal to store + broadcast)
+    if [[ "$to_addr" == "user" ]]; then
+        if curl -sf -X POST "http://localhost:${SOREN_PORT}/api/messages/internal" \
+            -H "Content-Type: application/json" \
+            -d "{\"from_agent\": \"$SOREN_AGENT_NAME\", \"to_agent\": \"user\", \"content\": $(printf '%s' "$subject" | jq -Rs .), \"type\": \"user\"}" \
+            >/dev/null 2>&1; then
+            ok "Sent to user: $subject"
+        else
+            die "Failed to send to user (API unavailable)"
+        fi
+        return 0
+    fi
+
+    # JSONL entry without body (with cross-process file lock)
+    ensure_mailbox
+    mailbox_lock
+    build_mailbox_line "$from" "$to_addr" "$subject" >> "$SOREN_MAILBOX"
+    mailbox_unlock
+    ok "Sent: $subject -> $to"
+}
+
+cmd_done() {
+    # Usage: mailbox done "summary"
+    #    or: mailbox done <target> "summary"
+    #    or: mailbox done <target> "summary" "body"
+    local target="${SOREN_SUPERVISOR:-supervisor}"
+    local summary=""
+    local body=""
+
+    if [[ $# -ge 2 ]]; then
+        # First arg is target, second is summary, optional third is body
+        target="$1"
+        summary="$2"
+        body="${3:-}"
+    else
+        summary="${1:-}"
+    fi
+
+    [[ -z "$summary" ]] && die "usage: mailbox done \"<summary>\" or mailbox done <target> \"<summary>\" [\"<body>\"]"
+
+    if [[ -n "$body" ]]; then
+        cmd_send "$target" "[DONE] $summary" "$body"
+    else
+        cmd_quick "$target" "[DONE] $summary"
+    fi
+}
+
+cmd_blocked() {
+    local target="${SOREN_SUPERVISOR:-supervisor}"
+    local issue=""
+
+    if [[ $# -ge 2 ]]; then
+        target="$1"; issue="$2"
+    else
+        issue="${1:-}"
+    fi
+
+    [[ -z "$issue" ]] && die "usage: mailbox blocked \"<issue>\""
+    cmd_quick "$target" "[BLOCKED] $issue"
+}
+
+cmd_status() {
+    local target="${SOREN_SUPERVISOR:-supervisor}"
+    local update=""
+
+    if [[ $# -ge 2 ]]; then
+        target="$1"; update="$2"
+    else
+        update="${1:-}"
+    fi
+
+    [[ -z "$update" ]] && die "usage: mailbox status \"<update>\""
+    cmd_quick "$target" "[STATUS] $update"
+}
+
+cmd_read() {
+    # Show recent mailbox entries (pretty-printed from JSONL)
+    local lines="${1:-10}"
+
+    if [[ ! -f "$SOREN_MAILBOX" ]]; then
+        echo -e "${DIM}Mailbox is empty${NC}"
+        return 0
+    fi
+
+    echo -e "${CYAN}Recent mailbox entries:${NC}"
+    echo ""
+    tail -n "$lines" "$SOREN_MAILBOX" | while IFS= read -r line; do
+        # Pretty-print JSONL lines, fall back to raw for non-JSON
+        local formatted
+        if formatted=$(echo "$line" | jq -r '"[\(.ts)] \(.from) -> \(.to): \(.subject)"' 2>/dev/null); then
+            echo -e "${DIM}$formatted${NC}"
+        else
+            echo -e "${DIM}$line${NC}"
+        fi
+    done
+}
+
+cmd_update() {
+    local msg_id="${1:-}"
+    local new_status="${2:-}"
+
+    [[ -z "$msg_id" ]] && die "usage: mailbox update <message-id> <new-status>"
+    [[ -z "$new_status" ]] && die "usage: mailbox update <message-id> <new-status>"
+
+    if ! validate_status "$new_status"; then
+        die "invalid status: $new_status (valid: $VALID_STATUSES)"
+    fi
+
+    local from=$(get_from_address)
+    local ts
+    ts=$(date -Iseconds)
+
+    # Append a status update record to the mailbox
+    local update_line
+    update_line=$(jq -cn --arg id "$msg_id" --arg ts "$ts" --arg from "$from" \
+        --arg status "$new_status" \
+        '{type: "status_update", id: $id, ts: $ts, from: $from, status: $status}')
+
+    ensure_mailbox
+    mailbox_lock
+    echo "$update_line" >> "$SOREN_MAILBOX"
+    mailbox_unlock
+
+    # Also update via API if server is running
+    curl -sf -X PATCH "http://localhost:${SOREN_PORT}/api/messages/${msg_id}/status" \
+        -H "Content-Type: application/json" \
+        -d "{\"status\": \"$new_status\"}" \
+        >/dev/null 2>&1 || true
+
+    ok "Updated $msg_id -> $new_status"
+}
+
+cmd_help() {
+    cat << 'EOF'
+mailbox - Send messages to other agents or the user
+
+USAGE:
+    mailbox <command> [arguments]
+
+COMMANDS:
+    send <to> "<subject>" "<body>"       Send message (inline if <500 chars, file if longer)
+    quick <to> "<subject>"               Quick notification (no body)
+    done "<summary>"                     Tell your supervisor: [DONE] summary
+    blocked "<issue>"                    Tell your supervisor: [BLOCKED] issue
+    status "<update>"                    Tell your supervisor: [STATUS] update
+    update <message-id> <new-status>     Update task lifecycle status
+    read [lines]                         Show recent mailbox entries
+    help                                 Show this help message
+
+TASK STATUSES:
+    submitted       Message sent, awaiting pickup (default)
+    working         Being actively worked on
+    input-required  Blocked, needs input from sender
+    completed       Task finished successfully
+    failed          Task failed
+
+RECIPIENTS:
+    supervisor, worker-auth          Adds session prefix automatically
+    soren-feature:worker-a            Full session:window address
+    user                             Goes to dashboard API
+
+EXAMPLES:
+    # Send detailed analysis
+    mailbox send worker-auth "JWT Review" "Found issues in token.py..."
+
+    # Quick status update
+    mailbox quick supervisor "Starting auth work"
+
+    # Report done
+    mailbox done "JWT implementation complete, tests passing"
+
+    # Report blocked
+    mailbox blocked "Need API credentials"
+
+    # Progress update
+    mailbox status "Implementing token refresh logic"
+
+    # Update task lifecycle
+    mailbox update abc-123 working
+    mailbox update abc-123 completed
+
+    # Message to user
+    mailbox send user "Bug Fixed" "Changed token.py line 42..."
+
+MAILBOX FORMAT:
+    JSONL (one JSON object per line):
+    {"id":"...","ts":"...","from":"soren:worker","to":"soren:supervisor","subject":"...","status":"submitted"}
+
+    With body:
+    {"id":"...","ts":"...","from":"...","to":"...","subject":"...","body":"path/to/file.md","status":"submitted"}
+
+    Status update record:
+    {"type":"status_update","id":"...","ts":"...","from":"...","status":"working"}
+
+ENVIRONMENT:
+    SOREN_MAILBOX        Path to mailbox file (default: .soren/mailbox)
+    SOREN_SESSION         tmux session name (default: soren)
+    SOREN_AGENT_NAME     This agent's name (default: unknown)
+    SOREN_PORT            API server port (default: 8000)
+    SOREN_SUPERVISOR      Direct supervisor name (default: supervisor)
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        send)    cmd_send "$@" ;;
+        quick)   cmd_quick "$@" ;;
+        done)    cmd_done "$@" ;;
+        blocked) cmd_blocked "$@" ;;
+        status)  cmd_status "$@" ;;
+        update)  cmd_update "$@" ;;
+        read)    cmd_read "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)       die "unknown command: $cmd (try 'mailbox help')" ;;
+    esac
+}
+
+main "$@"

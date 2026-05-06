@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# workers-init-role - Generate a starter role file from project scan
+#
+# Usage:
+#   workers-init-role <worker-name> <role-type> [--project <id>] [--dir <path>]
+#
+# Role types: frontend, backend, fullstack, qa, devops, research, reviewer
+#
+# Scans the target directory for tech stack, structure, and conventions,
+# then generates a role file at .soren/worker-contexts/<worker-name>-role.md.
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+
+# Source shared scanning library
+source "${SOREN_PROJECT_ROOT}/tools/lib/scan-project.sh"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+VALID_ROLES="frontend backend fullstack qa devops research reviewer"
+
+#───────────────────────────────────────────────────────────────────────────────
+# Parse arguments
+#───────────────────────────────────────────────────────────────────────────────
+
+worker_name=""
+role_type=""
+project_id=""
+scan_dir=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --project)
+            [[ -z "${2:-}" ]] && die "--project requires an ID"
+            project_id="$2"; shift 2 ;;
+        --dir)
+            [[ -z "${2:-}" ]] && die "--dir requires a path"
+            scan_dir="$2"; shift 2 ;;
+        --help|-h)
+            cat << 'USAGE'
+workers-init-role - Generate a starter role file from project scan
+
+USAGE:
+    workers-init-role <worker-name> <role-type> [--project <id>] [--dir <path>]
+
+ROLE TYPES:
+    frontend   — React, Vue, Svelte, CSS, UI components
+    backend    — FastAPI, Express, Django, APIs, databases
+    fullstack  — Both frontend and backend
+    qa         — Testing, quality assurance, browser testing
+    devops     — CI/CD, automation, deployment, scripts
+    research   — Web research, documentation, analysis
+    reviewer   — Code review, adversarial quality checks
+
+OPTIONS:
+    --project <id>   Resolve directory from projects registry (.soren/projects.json)
+    --dir <path>     Scan this directory (overrides --project path)
+
+OUTPUT:
+    .soren/worker-contexts/<worker-name>-role.md
+
+EXAMPLES:
+    workers-init-role hero-frontend frontend --project hero
+    workers-init-role api-worker backend --dir /path/to/api
+    workers-init-role tester qa --project soren
+USAGE
+            exit 0 ;;
+        -*)
+            die "unknown option: $1 (try --help)" ;;
+        *)
+            if [[ -z "$worker_name" ]]; then
+                worker_name="$1"
+            elif [[ -z "$role_type" ]]; then
+                role_type="$1"
+            else
+                die "unexpected argument: $1"
+            fi
+            shift ;;
+    esac
+done
+
+[[ -z "$worker_name" ]] && die "usage: workers-init-role <worker-name> <role-type> [--project <id>] [--dir <path>]"
+[[ -z "$role_type" ]] && die "role type required. Valid: $VALID_ROLES"
+
+# Validate role type
+if ! echo "$VALID_ROLES" | grep -qw "$role_type"; then
+    die "invalid role type '$role_type'. Valid: $VALID_ROLES"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# Resolve scan directory
+#───────────────────────────────────────────────────────────────────────────────
+
+if [[ -n "$scan_dir" ]]; then
+    [[ -d "$scan_dir" ]] || die "directory does not exist: $scan_dir"
+    scan_dir="$(cd "$scan_dir" && pwd)"
+elif [[ -n "$project_id" ]]; then
+    scan_dir=$(resolve_project_path "$project_id" "$SOREN_PROJECT_ROOT") || \
+        die "project '$project_id' not found in registry"
+else
+    scan_dir="$SOREN_PROJECT_ROOT"
+    project_id="soren"
+fi
+
+# Infer project_id from registry if --dir was given but no --project
+if [[ -z "$project_id" ]]; then
+    local_projects="${SOREN_PROJECT_ROOT}/.soren/projects.json"
+    if [[ -f "$local_projects" ]]; then
+        project_id=$(jq -r --arg p "$scan_dir" '.projects[] | select(.path == $p) | .id' "$local_projects" 2>/dev/null)
+    fi
+    project_id="${project_id:-unknown}"
+fi
+
+info "Scanning: $scan_dir (project: $project_id)"
+
+#───────────────────────────────────────────────────────────────────────────────
+# Scan project (uses shared lib)
+#───────────────────────────────────────────────────────────────────────────────
+
+scan_project "$scan_dir"
+
+#───────────────────────────────────────────────────────────────────────────────
+# Role-type specific specialization templates
+#───────────────────────────────────────────────────────────────────────────────
+
+gen_specialization() {
+    local rt="$1"
+    case "$rt" in
+        frontend)
+            cat << 'SPEC'
+## Specialization
+
+You own the frontend codebase:
+- UI components, pages, layouts, styling
+- State management and data fetching
+- TypeScript type safety
+- Responsive design and dark mode theming
+- Build tooling and frontend bundler config
+SPEC
+            ;;
+        backend)
+            cat << 'SPEC'
+## Specialization
+
+You own the backend codebase:
+- API endpoints, routes, middleware
+- Database models, migrations, queries
+- Authentication and authorization
+- Background jobs and async processing
+- Server configuration and deployment
+SPEC
+            ;;
+        fullstack)
+            cat << 'SPEC'
+## Specialization
+
+You own both frontend and backend:
+- API endpoints + UI components that consume them
+- End-to-end feature implementation
+- Data flow from database through API to UI
+- TypeScript types shared across the stack
+- Integration between frontend and backend systems
+SPEC
+            ;;
+        qa)
+            cat << 'SPEC'
+## Specialization
+
+You own testing and quality assurance:
+- Unit tests, integration tests, end-to-end tests
+- Browser testing via Chrome MCP for UI verification
+- API endpoint testing with curl or test scripts
+- Edge case discovery and regression testing
+- Test coverage analysis and gap identification
+SPEC
+            ;;
+        devops)
+            cat << 'SPEC'
+## Specialization
+
+You own CI/CD, automation, and deployment:
+- GitHub Actions workflows and CI/CD pipelines
+- Git hooks and build automation
+- Deployment scripts and release processes
+- Dependency management and environment setup
+- Monitoring, alerting, and script orchestration
+SPEC
+            ;;
+        research)
+            cat << 'SPEC'
+## Specialization
+
+You own research, information gathering, and analysis:
+- Web research via WebSearch and WebFetch tools
+- Documentation reading and API reference analysis
+- Codebase exploration and architectural review
+- Competitive/landscape research
+- Saving research artifacts for team reference
+SPEC
+            ;;
+        reviewer)
+            cat << 'SPEC'
+## Specialization
+
+You review code changes for correctness and quality:
+- Code correctness — does it do what it claims?
+- Style consistency — does it match existing patterns?
+- Edge cases — error states, empty inputs, boundary conditions
+- Performance — unnecessary computation, N+1 queries, large payloads
+- Security — injection, auth bypass, data leaks
+- Types — are they accurate and complete?
+SPEC
+            ;;
+    esac
+}
+
+gen_standards() {
+    local rt="$1"
+    case "$rt" in
+        frontend)
+            cat << 'SPEC'
+## Standards
+
+- Always run typecheck and build before reporting done
+- Follow existing patterns: match the project's component/styling conventions
+- Never introduce new dependencies without supervisor approval
+- Match existing code style — no reformatting files you didn't change
+- Test in browser via Chrome MCP when visual changes are involved
+SPEC
+            ;;
+        backend)
+            cat << 'SPEC'
+## Standards
+
+- Always run tests before reporting done
+- Follow existing patterns: match the project's routing/model conventions
+- Never introduce new dependencies without supervisor approval
+- Write tests for new endpoints and business logic
+- Match existing code style — no reformatting unrelated files
+SPEC
+            ;;
+        fullstack)
+            cat << 'SPEC'
+## Standards
+
+- Run both backend tests and frontend build/typecheck before reporting done
+- Follow existing patterns on both sides of the stack
+- Never introduce new dependencies without supervisor approval
+- Test API endpoints AND verify UI works via browser
+- Match existing code style across both codebases
+SPEC
+            ;;
+        qa)
+            cat << 'SPEC'
+## Standards
+
+- ALWAYS use Chrome MCP for frontend changes — never skip browser testing
+- Save screenshot evidence for visual changes
+- When tests fail, provide exact error and reproduction steps
+- If you find a bug, report [BLOCKED] with details — don't fix it yourself
+- Run the FULL test suite, not just tests you think are relevant
+SPEC
+            ;;
+        devops)
+            cat << 'SPEC'
+## Standards
+
+- Every automation must have a failure mode — what happens when it breaks?
+- Scripts must be idempotent — running them twice should be safe
+- Always test automation locally before committing
+- Document trigger conditions and expected behavior in comments
+- Prefer shell scripts for system-level automation, Python for complex logic
+SPEC
+            ;;
+        research)
+            cat << 'SPEC'
+## Standards
+
+- Always save research output as an artifact file, not just journal entries
+- Cite sources with URLs when available
+- Distinguish between facts and inferences in reports
+- When given a link, actually read it — don't just summarize the URL
+- Structure reports: Summary → Key Findings → Details → Sources → Open Questions
+SPEC
+            ;;
+        reviewer)
+            cat << 'SPEC'
+## Standards
+
+- Review every change — never rubber-stamp
+- Be specific: "spacing feels off" is not actionable; "gap-2 should be gap-3 to match CardPanel" is
+- List issues by severity: critical / major / minor / nit
+- Always acknowledge what works well alongside critiques
+- Verdict: APPROVE (ship it), REVISE (needs changes), BLOCK (breaks something)
+SPEC
+            ;;
+    esac
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Generate role file
+#───────────────────────────────────────────────────────────────────────────────
+
+output_dir="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+mkdir -p "$output_dir"
+output_file="${output_dir}/${worker_name}-role.md"
+
+if [[ -f "$output_file" ]]; then
+    warn "File already exists: $output_file"
+    warn "Overwriting..."
+fi
+
+info "Generating role file..."
+
+# Pretty role label
+role_label=""
+case "$role_type" in
+    frontend)  role_label="Frontend Specialist" ;;
+    backend)   role_label="Backend Specialist" ;;
+    fullstack) role_label="Full-Stack Engineer" ;;
+    qa)        role_label="QA Engineer" ;;
+    devops)    role_label="DevOps Engineer" ;;
+    research)  role_label="Research Specialist" ;;
+    reviewer)  role_label="Code Reviewer" ;;
+esac
+
+# Lowercase role label (bash 3.2 compatible)
+role_label_lower=$(echo "$role_label" | tr '[:upper:]' '[:lower:]')
+
+# Write the role file section by section
+{
+    echo "# Permanent Role: ${worker_name} — ${role_label}"
+    echo ""
+    echo "You are **${worker_name}**, a permanent ${role_label_lower} for the ${project_id} project."
+    echo ""
+    echo "## Identity"
+    echo ""
+    echo "- **Name**: ${worker_name}"
+    echo "- **Role**: ${role_label} (permanent)"
+    echo "- **Project**: ${project_id}"
+    echo "- **Personality**: TODO — give this worker a personality. What motivates them? How do they approach problems?"
+    echo "- **Communication style**: TODO — terse? verbose? structured reports? casual updates?"
+    echo ""
+
+    gen_specialization "$role_type"
+    echo ""
+
+    write_project_context
+    echo ""
+
+    gen_standards "$role_type"
+    echo ""
+
+    write_permanent_worker_section
+} > "$output_file"
+
+ok "Generated: $output_file"
+echo ""
+echo -e "${DIM}Review and customize the TODO placeholders (personality, communication style).${NC}"
+echo -e "${DIM}Then use: workers spawn ${worker_name} \"task\" --permanent ${output_file}${NC}"

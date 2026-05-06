@@ -1,0 +1,38 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "env": {},
+      "disabled": false
+    },
+    "browseruse": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropic/browseruse-mcp@latest"
+      ],
+      "env": {
+        "BROWSERUSE_HEADLESS": "true"
+      },
+      "disabled": false
+    },
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "shadcn@latest",
+        "mcp"
+      ]
+    },
+    "notionApi": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "NOTION_TOKEN": "your-notion-token-here"
+      }
+    }
+  }
+}

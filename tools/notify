@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# tools/notify — append a notification line to .soren/notifications.log
+#
+# Usage:
+#   tools/notify "<message>"
+#   tools/notify "<message>" --level warning
+#   tools/notify "<message>" --level alert
+#
+# Levels:  info (default) | warning | alert
+#
+# This template ships with local-only notifications. To wire this up to a
+# delivery channel (Telegram, Slack, email, push, etc.), replace the body
+# below with whatever sender you prefer.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+LOG_FILE="${PROJECT_ROOT}/.soren/notifications.log"
+
+usage() {
+    cat <<EOF
+Usage: tools/notify "<message>" [--level info|warning|alert]
+
+Appends a notification line to .soren/notifications.log.
+
+Options:
+  --level <level>   Notification level: info (default), warning, alert
+  --help            Show this help
+EOF
+}
+
+MESSAGE=""
+LEVEL="info"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --level)
+            LEVEL="${2:-info}"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+        *)
+            if [[ -z "$MESSAGE" ]]; then
+                MESSAGE="$1"
+            else
+                MESSAGE="$MESSAGE $1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$MESSAGE" ]]; then
+    echo "Error: message is required" >&2
+    usage >&2
+    exit 1
+fi
+
+ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+mkdir -p "$(dirname "$LOG_FILE")"
+printf '[%s] [%s] %s\n' "$ts" "$LEVEL" "$MESSAGE" >> "$LOG_FILE"
+echo "[${LEVEL}] ${MESSAGE}"

@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# schedule - Self-scheduling check-ins for supervisor agents
+#
+# Schedule future reminders that get injected into the supervisor's prompt
+# via the autonomy-check/heartbeat system. Based on the tmux-orchestrator
+# schedule_with_note pattern.
+#
+# Usage:
+#   schedule add <seconds> "<note>"    Schedule a check-in N seconds from now
+#   schedule add-at <HH:MM> "<note>"   Schedule at a specific time today
+#   schedule list                      List pending check-ins
+#   schedule fire                      Check for due items and output them
+#   schedule clear [id]                Clear one or all check-ins
+#   schedule help                      Show this help
+#
+# The "fire" command is called by tools/autonomy-check during heartbeat scans.
+# Due items are returned as text and removed from the schedule.
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
+SCHEDULE_FILE="${SOREN_PROJECT_ROOT}/.soren/schedule.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Ensure schedule file exists
+[[ -f "$SCHEDULE_FILE" ]] || echo '[]' > "$SCHEDULE_FILE"
+
+#───────────────────────────────────────────────────────────────────────────────
+# Add a check-in N seconds from now
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_add() {
+    local seconds="${1:-}"
+    local note="${2:-}"
+
+    if [[ -z "$seconds" ]] || [[ -z "$note" ]]; then
+        echo -e "${RED}error:${NC} usage: schedule add <seconds> \"<note>\""
+        exit 1
+    fi
+
+    if ! [[ "$seconds" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}error:${NC} seconds must be a number"
+        exit 1
+    fi
+
+    local now due_at id
+    now=$(date +%s)
+    due_at=$((now + seconds))
+    id="s_$(printf '%08x' $((RANDOM * RANDOM)))"
+
+    local due_human
+    if [[ "$(uname)" == "Darwin" ]]; then
+        due_human=$(date -r "$due_at" '+%H:%M:%S')
+    else
+        due_human=$(date -d "@$due_at" '+%H:%M:%S')
+    fi
+
+    # Add to schedule file
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" \
+       --arg note "$note" \
+       --argjson due "$due_at" \
+       --argjson created "$now" \
+       '. + [{"id": $id, "note": $note, "due_at": $due, "created_at": $created}]' \
+       "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
+
+    local mins=$((seconds / 60))
+    local secs=$((seconds % 60))
+    local time_str=""
+    ((mins > 0)) && time_str="${mins}m"
+    ((secs > 0 || mins == 0)) && time_str="${time_str}${secs}s"
+
+    echo -e "${GREEN}✓${NC} Scheduled ${BOLD}${id}${NC} in ${time_str} (at ${due_human}): ${note}"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Add a check-in at a specific time today
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_add_at() {
+    local time_str="${1:-}"
+    local note="${2:-}"
+
+    if [[ -z "$time_str" ]] || [[ -z "$note" ]]; then
+        echo -e "${RED}error:${NC} usage: schedule add-at <HH:MM> \"<note>\""
+        exit 1
+    fi
+
+    # Parse HH:MM
+    local target_epoch
+    if [[ "$(uname)" == "Darwin" ]]; then
+        target_epoch=$(date -j -f '%H:%M' "$time_str" '+%s' 2>/dev/null || echo "")
+    else
+        target_epoch=$(date -d "today $time_str" '+%s' 2>/dev/null || echo "")
+    fi
+
+    if [[ -z "$target_epoch" ]]; then
+        echo -e "${RED}error:${NC} invalid time format (use HH:MM)"
+        exit 1
+    fi
+
+    local now
+    now=$(date +%s)
+    if ((target_epoch <= now)); then
+        echo -e "${YELLOW}warning:${NC} time $time_str is in the past, scheduling for tomorrow"
+        target_epoch=$((target_epoch + 86400))
+    fi
+
+    local seconds=$((target_epoch - now))
+    cmd_add "$seconds" "$note"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# List pending check-ins
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local count
+    count=$(jq 'length' "$SCHEDULE_FILE")
+
+    if ((count == 0)); then
+        echo -e "${DIM}No scheduled check-ins${NC}"
+        return
+    fi
+
+    local now
+    now=$(date +%s)
+
+    echo -e "${BOLD}Scheduled check-ins:${NC}\n"
+    printf "${DIM}%-12s  %-10s  %-s${NC}\n" "ID" "DUE IN" "NOTE"
+    printf "${DIM}%-12s  %-10s  %-s${NC}\n" "────────────" "──────────" "────────────────────────────────"
+
+    jq -r --argjson now "$now" '.[] | [.id, (.due_at - $now | tostring), .note] | @tsv' "$SCHEDULE_FILE" | \
+    while IFS=$'\t' read -r id remaining note; do
+        if ((remaining <= 0)); then
+            printf "  ${RED}%-12s${NC}  ${RED}%-10s${NC}  %s\n" "$id" "OVERDUE" "$note"
+        else
+            local mins=$((remaining / 60))
+            local secs=$((remaining % 60))
+            local time_display=""
+            if ((mins >= 60)); then
+                local hrs=$((mins / 60))
+                mins=$((mins % 60))
+                time_display="${hrs}h${mins}m"
+            elif ((mins > 0)); then
+                time_display="${mins}m${secs}s"
+            else
+                time_display="${secs}s"
+            fi
+            printf "  ${CYAN}%-12s${NC}  ${BOLD}%-10s${NC}  %s\n" "$id" "$time_display" "$note"
+        fi
+    done
+
+    echo -e "\n${DIM}${count} item(s)${NC}"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Fire due check-ins — called by autonomy-check
+# Outputs due items as text and removes them from the schedule
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_fire() {
+    local now
+    now=$(date +%s)
+
+    # Find due items
+    local due_items
+    due_items=$(jq -r --argjson now "$now" '[.[] | select(.due_at <= $now)] | .[] | .note' "$SCHEDULE_FILE" 2>/dev/null || true)
+
+    if [[ -z "$due_items" ]]; then
+        return 1  # nothing due
+    fi
+
+    # Output due notes
+    echo "$due_items"
+
+    # Remove fired items from schedule
+    local tmp
+    tmp=$(mktemp)
+    jq --argjson now "$now" '[.[] | select(.due_at > $now)]' "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
+
+    return 0
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Clear check-ins
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_clear() {
+    local target_id="${1:-}"
+
+    if [[ -z "$target_id" ]]; then
+        echo '[]' > "$SCHEDULE_FILE"
+        echo -e "${GREEN}✓${NC} Cleared all scheduled check-ins"
+    else
+        local tmp
+        tmp=$(mktemp)
+        local before after
+        before=$(jq 'length' "$SCHEDULE_FILE")
+        jq --arg id "$target_id" '[.[] | select(.id != $id)]' "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
+        after=$(jq 'length' "$SCHEDULE_FILE")
+        if ((before == after)); then
+            echo -e "${RED}error:${NC} check-in $target_id not found"
+            exit 1
+        fi
+        echo -e "${GREEN}✓${NC} Cleared $target_id"
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Help
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_help() {
+    cat << 'EOF'
+schedule - Self-scheduling check-ins for supervisor agents
+
+USAGE:
+    schedule add <seconds> "<note>"    Schedule a check-in N seconds from now
+    schedule add-at <HH:MM> "<note>"   Schedule at a specific time today
+    schedule list                      List pending check-ins
+    schedule fire                      Check for due items (used by autonomy-check)
+    schedule clear [id]                Clear one or all check-ins
+    schedule help                      Show this help
+
+EXAMPLES:
+    schedule add 300 "Check if worker-X finished the auth refactor"
+    schedule add 1800 "Review sup-todo-backend's test results"
+    schedule add-at 14:00 "Run full test suite before EOD"
+    schedule list
+    schedule fire          # Called automatically by heartbeat
+    schedule clear s_abc123
+
+INTEGRATION:
+    The heartbeat system (tools/autonomy-check) calls "schedule fire" on each
+    scan cycle. Due items are injected into the supervisor's prompt as
+    scheduled reminders. Items are automatically removed after firing.
+EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main dispatch
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+    add)     cmd_add "$@" ;;
+    add-at)  cmd_add_at "$@" ;;
+    list)    cmd_list "$@" ;;
+    fire)    cmd_fire "$@" ;;
+    clear)   cmd_clear "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+        echo -e "${RED}error:${NC} unknown command: $cmd (try 'schedule help')"
+        exit 1
+        ;;
+esac

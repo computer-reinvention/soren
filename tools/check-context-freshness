@@ -1,0 +1,305 @@
+#!/usr/bin/env bash
+#===============================================================================
+# check-context-freshness - Detect stale or orphaned worker context files
+#
+# Usage:
+#   check-context-freshness              # Full report
+#   check-context-freshness --json       # JSON output (for system-verify)
+#   check-context-freshness --stale-only # Only show STALE/ORPHANED entries
+#
+# Checks:
+#   1. Extracts file/directory paths referenced in each context file
+#   2. Compares context mtime to referenced source files' mtimes
+#   3. Flags STALE if any referenced source is >24h newer than the context
+#   4. Flags ORPHANED if the agent has no tmux window in any soren session
+#   5. Reports FRESH otherwise
+#
+# Designed for agents and system-verify integration.
+#===============================================================================
+
+set -uo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+CONTEXTS_DIR="${SOREN_HOME}/.soren/worker-contexts"
+STALE_THRESHOLD=$((24 * 3600))  # 24 hours in seconds
+
+# Colors (disabled if not a terminal or --json)
+if [[ -t 1 ]] && [[ "${1:-}" != "--json" ]]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    DIM='\033[2m'
+    NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' DIM='' NC=''
+fi
+
+#-------------------------------------------------------------------------------
+# Get all tmux windows across all soren sessions
+#-------------------------------------------------------------------------------
+get_all_agent_windows() {
+    local sessions
+    sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep -E '^soren(-|$)' || true)
+    for sess in $sessions; do
+        tmux list-windows -t "$sess" -F '#{window_name}' 2>/dev/null || true
+    done | sort -u
+}
+
+#-------------------------------------------------------------------------------
+# Get file mtime as epoch seconds (macOS + Linux compatible)
+#-------------------------------------------------------------------------------
+file_mtime() {
+    local f="$1"
+    # Try Linux stat first, then macOS stat
+    stat -c '%Y' "$f" 2>/dev/null || stat -f '%m' "$f" 2>/dev/null || echo "0"
+}
+
+#-------------------------------------------------------------------------------
+# Extract referenced paths from a context/role file
+# Looks for backtick-quoted paths and markdown link paths
+#-------------------------------------------------------------------------------
+extract_paths() {
+    local file="$1"
+
+    # Match backtick-quoted paths like `src/server/main.py` or `tools/workers`
+    # Match markdown links like [text](../../docs/TEAM.md)
+    # Match bare paths like src/frontend/src/ at word boundaries
+    grep -oE '`[a-zA-Z0-9_./-]+`' "$file" 2>/dev/null | tr -d '`' || true
+    grep -oE '\]\([^)]+\)' "$file" 2>/dev/null | sed 's/^](//;s/)$//' || true
+}
+
+#-------------------------------------------------------------------------------
+# Resolve a path to an absolute path within the project
+#-------------------------------------------------------------------------------
+resolve_path() {
+    local p="$1"
+    # Strip leading ./ or ../../ etc
+    p="${p#./}"
+    while [[ "$p" == ../* ]]; do
+        p="${p#../}"
+    done
+
+    local full="${SOREN_HOME}/${p}"
+
+    # Return the path if it exists as file or directory
+    if [[ -e "$full" ]]; then
+        echo "$full"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Get the newest mtime among a file or the files within a directory
+# For directories, only checks top-level files (not recursive — too slow)
+#-------------------------------------------------------------------------------
+newest_mtime_of() {
+    local path="$1"
+    local newest=0
+
+    if [[ -f "$path" ]]; then
+        newest=$(file_mtime "$path")
+    elif [[ -d "$path" ]]; then
+        # Check files directly in the directory (one level)
+        for f in "$path"/*; do
+            [[ -f "$f" ]] || continue
+            local mt
+            mt=$(file_mtime "$f")
+            if (( mt > newest )); then
+                newest=$mt
+            fi
+        done
+    fi
+
+    echo "$newest"
+}
+
+#-------------------------------------------------------------------------------
+# Extract agent name from context filename
+# perm-backend-context.md -> perm-backend
+# perm-backend-role.md -> perm-backend
+# hero-squad-lead-context.md -> hero-squad-lead
+#-------------------------------------------------------------------------------
+agent_name_from_file() {
+    local fname
+    fname=$(basename "$1" .md)
+    # Strip known suffixes (longest match first to avoid partial stripping)
+    fname="${fname%-clone-role}"
+    fname="${fname%-context}"
+    fname="${fname%-role}"
+    echo "$fname"
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+mode="full"
+case "${1:-}" in
+    --json)       mode="json" ;;
+    --stale-only) mode="stale" ;;
+    --help|-h)
+        echo "Usage: check-context-freshness [--json|--stale-only]"
+        exit 0
+        ;;
+esac
+
+if [[ ! -d "$CONTEXTS_DIR" ]]; then
+    echo "No worker contexts directory found at $CONTEXTS_DIR" >&2
+    exit 1
+fi
+
+# Collect all live agent windows once
+live_windows=$(get_all_agent_windows)
+
+# Track results for JSON and summary
+total=0
+fresh=0
+stale=0
+orphaned=0
+json_entries=""
+
+# Process each context file — group by agent (check role + context together)
+seen_agents=""
+
+for ctx_file in "$CONTEXTS_DIR"/*.md; do
+    [[ -f "$ctx_file" ]] || continue
+
+    agent=$(agent_name_from_file "$ctx_file")
+
+    # Skip if we've already processed this agent (role + context = one check)
+    if echo "$seen_agents" | grep -qx "$agent"; then
+        continue
+    fi
+    seen_agents="${seen_agents}${agent}
+"
+    ((total++))
+
+    display_name=$(basename "$ctx_file")
+
+    # Check if agent exists in tmux
+    is_orphaned=false
+    if ! echo "$live_windows" | grep -qx "$agent"; then
+        is_orphaned=true
+    fi
+
+    # Find all context/role files for this agent
+    agent_files=()
+    for suffix in context role clone-role; do
+        local_f="${CONTEXTS_DIR}/${agent}-${suffix}.md"
+        [[ -f "$local_f" ]] && agent_files+=("$local_f")
+    done
+
+    # Get oldest mtime among the agent's context files
+    ctx_mtime=0
+    ctx_file_used=""
+    for af in "${agent_files[@]}"; do
+        mt=$(file_mtime "$af")
+        # Use the oldest file as the staleness reference
+        if (( ctx_mtime == 0 || mt < ctx_mtime )); then
+            ctx_mtime=$mt
+            ctx_file_used="$af"
+        fi
+    done
+
+    # Extract paths from all agent files and check freshness
+    is_stale=false
+    stale_files=""
+    max_drift=0
+
+    for af in "${agent_files[@]}"; do
+        while IFS= read -r ref_path; do
+            [[ -z "$ref_path" ]] && continue
+            # Skip non-source paths (URLs, anchors, etc.)
+            [[ "$ref_path" == http* ]] && continue
+            [[ "$ref_path" == "#"* ]] && continue
+            # Skip .soren/ paths (runtime data, not source)
+            [[ "$ref_path" == .soren/* ]] && continue
+
+            resolved=$(resolve_path "$ref_path")
+            [[ -z "$resolved" ]] && continue
+
+            src_mtime=$(newest_mtime_of "$resolved")
+            (( src_mtime == 0 )) && continue
+
+            drift=$((src_mtime - ctx_mtime))
+            if (( drift > STALE_THRESHOLD )); then
+                is_stale=true
+                if (( drift > max_drift )); then
+                    max_drift=$drift
+                fi
+                drift_hours=$((drift / 3600))
+                stale_files="${stale_files}${ref_path} (${drift_hours}h newer), "
+            fi
+        done < <(extract_paths "$af")
+    done
+
+    # Determine status
+    status="FRESH"
+    if [[ "$is_orphaned" == "true" ]]; then
+        status="ORPHANED"
+        ((orphaned++))
+    elif [[ "$is_stale" == "true" ]]; then
+        status="STALE"
+        ((stale++))
+    else
+        ((fresh++))
+    fi
+
+    # Build JSON entry
+    stale_files="${stale_files%, }"  # trim trailing comma
+    drift_h=$((max_drift / 3600))
+    json_entry="{\"agent\":\"$agent\",\"status\":\"$status\",\"drift_hours\":$drift_h,\"stale_refs\":\"$stale_files\"}"
+    if [[ -n "$json_entries" ]]; then
+        json_entries="${json_entries},${json_entry}"
+    else
+        json_entries="$json_entry"
+    fi
+
+    # Output based on mode
+    case "$mode" in
+        full)
+            case "$status" in
+                FRESH)    echo -e "  ${GREEN}FRESH${NC}    $agent" ;;
+                STALE)    echo -e "  ${YELLOW}STALE${NC}    $agent  ${DIM}(${stale_files})${NC}" ;;
+                ORPHANED) echo -e "  ${RED}ORPHANED${NC} $agent  ${DIM}(no tmux window)${NC}" ;;
+            esac
+            ;;
+        stale)
+            if [[ "$status" != "FRESH" ]]; then
+                case "$status" in
+                    STALE)    echo -e "  ${YELLOW}STALE${NC}    $agent  ${DIM}(${stale_files})${NC}" ;;
+                    ORPHANED) echo -e "  ${RED}ORPHANED${NC} $agent  ${DIM}(no tmux window)${NC}" ;;
+                esac
+            fi
+            ;;
+        json)
+            # Accumulated — output at end
+            ;;
+    esac
+done
+
+# Output
+case "$mode" in
+    json)
+        echo "{\"total\":$total,\"fresh\":$fresh,\"stale\":$stale,\"orphaned\":$orphaned,\"entries\":[${json_entries}]}"
+        ;;
+    full)
+        echo ""
+        if (( stale + orphaned == 0 )); then
+            echo -e "${GREEN}All $total context files are fresh${NC}"
+        else
+            echo -e "${YELLOW}${fresh}/${total} fresh, ${stale} stale, ${orphaned} orphaned${NC}"
+        fi
+        ;;
+    stale)
+        if (( stale + orphaned == 0 )); then
+            echo -e "${GREEN}All $total context files are fresh${NC}"
+        fi
+        ;;
+esac
+
+# Exit with 1 if any stale (not orphaned — orphaned is informational)
+if (( stale > 0 )); then
+    exit 1
+fi
+exit 0

@@ -1,0 +1,1030 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# projects - Manage the SOREN project registry
+#
+# Usage:
+#   projects add <path> [--name NAME] [--description DESC]
+#   projects remove <id>
+#   projects list
+#   projects info <id>
+#   projects activate <id>
+#   projects deactivate <id>
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+REGISTRY="${SOREN_HOME}/.soren/projects.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+#───────────────────────────────────────────────────────────────────────────────
+# Helpers
+#───────────────────────────────────────────────────────────────────────────────
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+ensure_registry() {
+    if [[ ! -f "$REGISTRY" ]]; then
+        mkdir -p "$(dirname "$REGISTRY")"
+        echo '{"projects":[]}' > "$REGISTRY"
+    fi
+}
+
+project_exists() {
+    local id="$1"
+    jq -e --arg id "$id" '.projects[] | select(.id == $id)' "$REGISTRY" > /dev/null 2>&1
+}
+
+detect_git_remote() {
+    local dir="$1"
+    git -C "$dir" remote get-url origin 2>/dev/null || echo ""
+}
+
+detect_language() {
+    local dir="$1"
+    if [[ -f "$dir/pyproject.toml" ]] || [[ -f "$dir/setup.py" ]]; then
+        echo "python"
+    elif [[ -f "$dir/package.json" ]]; then
+        echo "javascript"
+    elif [[ -f "$dir/Cargo.toml" ]]; then
+        echo "rust"
+    elif [[ -f "$dir/go.mod" ]]; then
+        echo "go"
+    elif [[ -f "$dir/pom.xml" ]] || [[ -f "$dir/build.gradle" ]]; then
+        echo "java"
+    elif [[ -f "$dir/Gemfile" ]]; then
+        echo "ruby"
+    else
+        echo "unknown"
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Commands
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_add() {
+    local path=""
+    local name=""
+    local description=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name)
+                [[ -z "${2:-}" ]] && die "--name requires a value"
+                name="$2"
+                shift 2
+                ;;
+            --description|--desc)
+                [[ -z "${2:-}" ]] && die "--description requires a value"
+                description="$2"
+                shift 2
+                ;;
+            *)
+                if [[ -z "$path" ]]; then
+                    path="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$path" ]] && die "usage: projects add <path> [--name NAME] [--description DESC]"
+
+    # Resolve to absolute path
+    [[ -d "$path" ]] || die "directory does not exist: $path"
+    path="$(cd "$path" && pwd)"
+
+    # Derive ID from directory basename
+    local id
+    id="$(basename "$path" | tr '[:upper:]' '[:lower:]' | tr ' .' '-' | tr -cd 'a-z0-9-')"
+    [[ -z "$id" ]] && die "could not derive project ID from path"
+
+    ensure_registry
+
+    if project_exists "$id"; then
+        die "project '$id' already registered (use 'projects remove $id' first)"
+    fi
+
+    # Auto-detect
+    local git_remote
+    git_remote=$(detect_git_remote "$path")
+    local language
+    language=$(detect_language "$path")
+
+    # Defaults
+    [[ -z "$name" ]] && name="$(basename "$path")"
+    [[ -z "$description" ]] && description=""
+
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    info "Registering project: $id"
+
+    # Add to registry
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" \
+       --arg name "$name" \
+       --arg path "$path" \
+       --arg desc "$description" \
+       --arg remote "$git_remote" \
+       --arg lang "$language" \
+       --arg now "$now" \
+       '.projects += [{
+           id: $id,
+           name: $name,
+           path: $path,
+           is_self: false,
+           active: false,
+           supervisor_agent_id: null,
+           hooks_installed: false,
+           added_at: $now,
+           git_remote: $remote,
+           language: $lang,
+           description: $desc
+       }]' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+
+    ok "Project '$id' registered"
+    echo ""
+    echo "  Path:     $path"
+    echo "  Language: $language"
+    [[ -n "$git_remote" ]] && echo "  Remote:   $git_remote"
+    [[ -n "$description" ]] && echo "  Desc:     $description"
+    echo ""
+    echo "Run 'projects activate $id' to start a project supervisor."
+}
+
+cmd_remove() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: projects remove <id>"
+
+    ensure_registry
+
+    if ! project_exists "$id"; then
+        die "project '$id' not found"
+    fi
+
+    # Prevent removing self-project
+    local is_self
+    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
+    if [[ "$is_self" == "true" ]]; then
+        die "cannot remove SOREN self-project"
+    fi
+
+    info "Removing project: $id"
+
+    # Step 1: Deactivate (kill supervisor) if active
+    local is_active
+    is_active=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
+    if [[ "$is_active" == "true" ]]; then
+        info "Deactivating project supervisor..."
+        cmd_deactivate "$id" || warn "Failed to deactivate project (continuing removal)"
+    fi
+
+    # Step 2: Kill all workers whose SOREN_PROJECT_ID matches this project
+    local session="${SOREN_SESSION:-soren}"
+    if tmux has-session -t "$session" 2>/dev/null; then
+        local windows
+        windows=$(tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null || true)
+        while IFS= read -r wname; do
+            [[ -z "$wname" ]] && continue
+            [[ "$wname" == "monitor" ]] && continue
+            [[ "$wname" == "supervisor" ]] && continue
+            [[ "$wname" == "sentry" ]] && continue
+            [[ "$wname" == sup-* ]] && continue
+
+            # Check if this window's SOREN_PROJECT_ID matches
+            local pane_pid
+            pane_pid=$(tmux list-panes -t "${session}:${wname}" -F '#{pane_pid}' 2>/dev/null | head -1) || continue
+            [[ -z "$pane_pid" ]] && continue
+
+            # Check environment of the shell process for SOREN_PROJECT_ID
+            local worker_project
+            worker_project=$(ps -p "$pane_pid" -o command= 2>/dev/null | grep -o "SOREN_PROJECT_ID=${id}" 2>/dev/null || true)
+            if [[ -z "$worker_project" ]]; then
+                # Also check via /proc or lsof — try capturing from tmux env
+                worker_project=$(tmux show-environment -t "${session}:${wname}" SOREN_PROJECT_ID 2>/dev/null | grep -o "=${id}$" || true)
+            fi
+
+            if [[ -n "$worker_project" ]]; then
+                info "Killing worker '$wname' (project: $id)"
+                tmux send-keys -t "${session}:${wname}" C-c 2>/dev/null || true
+                sleep 0.5
+                tmux kill-window -t "${session}:${wname}" 2>/dev/null || true
+            fi
+        done <<< "$windows"
+    fi
+
+    # Step 3: Remove .claude/settings.json if hooks were installed
+    local hooks_installed
+    hooks_installed=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .hooks_installed' "$REGISTRY")
+    if [[ "$hooks_installed" == "true" ]]; then
+        local project_path
+        project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+        local settings_file="${project_path}/.claude/settings.json"
+        if [[ -f "$settings_file" ]]; then
+            info "Removing installed hooks: $settings_file"
+            rm -f "$settings_file"
+            # Remove .claude dir if empty
+            rmdir "${project_path}/.claude" 2>/dev/null || true
+            ok "Hooks removed"
+        fi
+    fi
+
+    # Step 4: Remove from registry
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" '.projects |= map(select(.id != $id))' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+
+    ok "Project '$id' removed"
+}
+
+cmd_list() {
+    ensure_registry
+
+    local count
+    count=$(jq '.projects | length' "$REGISTRY")
+
+    if [[ "$count" -eq 0 ]]; then
+        echo -e "${DIM}No projects registered${NC}"
+        return
+    fi
+
+    printf "${BOLD}%-16s %-20s %-8s %-10s %s${NC}\n" "ID" "NAME" "ACTIVE" "LANGUAGE" "PATH"
+    printf "%-16s %-20s %-8s %-10s %s\n" "────────────────" "────────────────────" "────────" "──────────" "────────────────────"
+
+    jq -r '.projects[] | [.id, .name, (if .active then "yes" else "no" end), .language, .path] | @tsv' "$REGISTRY" | \
+    while IFS=$'\t' read -r id name active lang path; do
+        local color="$NC"
+        if [[ "$active" == "yes" ]]; then
+            color="$GREEN"
+        fi
+        printf "${color}%-16s %-20s %-8s %-10s %s${NC}\n" "$id" "$name" "$active" "$lang" "$path"
+    done
+
+    echo ""
+    echo "Total: $count project(s)"
+}
+
+cmd_info() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: projects info <id>"
+
+    ensure_registry
+
+    if ! project_exists "$id"; then
+        die "project '$id' not found"
+    fi
+
+    local data
+    data=$(jq --arg id "$id" '.projects[] | select(.id == $id)' "$REGISTRY")
+
+    echo -e "${BOLD}Project: $(echo "$data" | jq -r '.name')${NC}"
+    echo ""
+    echo "  ID:          $(echo "$data" | jq -r '.id')"
+    echo "  Path:        $(echo "$data" | jq -r '.path')"
+    echo "  Active:      $(echo "$data" | jq -r 'if .active then "yes" else "no" end')"
+    echo "  Language:    $(echo "$data" | jq -r '.language // "unknown"')"
+    echo "  Self:        $(echo "$data" | jq -r 'if .is_self then "yes" else "no" end')"
+    echo "  Supervisor:  $(echo "$data" | jq -r '.supervisor_agent_id // "none"')"
+    echo "  Hooks:       $(echo "$data" | jq -r 'if .hooks_installed then "installed" else "not installed" end')"
+    echo "  Remote:      $(echo "$data" | jq -r '.git_remote // "none"')"
+    echo "  Description: $(echo "$data" | jq -r '.description // "none"')"
+    echo "  Added:       $(echo "$data" | jq -r '.added_at')"
+}
+
+generate_agent_id() {
+    # Generate ag_ + 8 random alphanumeric chars (same logic as tools/workers)
+    local registry_file="${SOREN_HOME}/.soren/agent_registry.json"
+    local attempt=0
+    local id
+
+    while [[ $attempt -lt 100 ]]; do
+        id="ag_$(head -c 32 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
+        if [[ ${#id} -ne 11 ]]; then
+            ((attempt++))
+            continue
+        fi
+        if [[ -f "$registry_file" ]] && grep -q "\"$id\"" "$registry_file" 2>/dev/null; then
+            ((attempt++))
+            continue
+        fi
+        echo "$id"
+        return 0
+    done
+
+    die "failed to generate unique agent ID after 100 attempts"
+}
+
+cmd_activate() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: projects activate <id>"
+
+    ensure_registry
+
+    if ! project_exists "$id"; then
+        die "project '$id' not found"
+    fi
+
+    # Self-project uses Supervisor Prime — nothing to spawn
+    local is_self
+    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
+    if [[ "$is_self" == "true" ]]; then
+        # Just mark active
+        local tmp
+        tmp=$(mktemp)
+        jq --arg id "$id" '(.projects[] | select(.id == $id)).active = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+        ok "Self-project '$id' activated (Supervisor Prime handles this project)"
+        return 0
+    fi
+
+    local already_active
+    already_active=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
+    if [[ "$already_active" == "true" ]]; then
+        # Check if the tmux window is actually running
+        local sup_name_check="sup-${id}"
+        local session_check="${SOREN_SESSION:-soren}"
+        if tmux list-windows -t "$session_check" -F '#{window_name}' 2>/dev/null | grep -qxF "$sup_name_check"; then
+            warn "project '$id' is already active"
+            return 0
+        fi
+        # Window is dead but registry says active — deactivate stale state first
+        warn "project '$id' marked active but supervisor window is gone — reactivating"
+        cmd_deactivate "$id" 2>/dev/null || true
+    fi
+
+    # Read project details
+    local project_path
+    project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+    [[ -d "$project_path" ]] || die "project path does not exist: $project_path"
+
+    local sup_name="sup-${id}"
+    local session="${SOREN_SESSION:-soren}"
+
+    # Check if supervisor window already exists
+    if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$sup_name"; then
+        warn "supervisor window '$sup_name' already exists"
+        # Still mark active in registry
+        local tmp
+        tmp=$(mktemp)
+        jq --arg id "$id" '(.projects[] | select(.id == $id)).active = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+        return 0
+    fi
+
+    info "Activating project: $id"
+
+    # Generate agent ID for the project supervisor
+    local agent_id
+    agent_id=$(generate_agent_id)
+    info "Project supervisor agent ID: $agent_id"
+
+    # Create tmux window
+    tmux new-window -t "${session}:" -n "$sup_name"
+    tmux set-option -t "${session}:${sup_name}" allow-rename off 2>/dev/null || true
+
+    # Register in agent_registry.json so the API returns correct agent_id, role, project_id
+    local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+    local now
+    now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [[ ! -f "$reg_file" ]]; then
+        echo '{}' > "$reg_file"
+    fi
+    local reg_tmp
+    reg_tmp=$(mktemp)
+    jq --arg key "$sup_name" \
+       --arg aid "$agent_id" \
+       --arg pid "$id" \
+       --arg now "$now" \
+       '.[$key] = {
+           "registered_at": $now,
+           "type": "project-supervisor",
+           "created_by": "tools/projects",
+           "created_at": $now,
+           "agent_id": $aid,
+           "display_name": $key,
+           "role": "project-supervisor",
+           "project_id": $pid
+       }' "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+
+    # Also register in SQLite (agent_registry.db) so the API serves the correct data
+    local db_file="${SOREN_HOME}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${sup_name}', '${agent_id}', 'IN_PROGRESS', json('{\"type\":\"project-supervisor\",\"role\":\"project-supervisor\",\"project_id\":\"${id}\",\"display_name\":\"${sup_name}\",\"created_by\":\"tools/projects\",\"created_at\":\"${now}\",\"agent_id\":\"${agent_id}\"}'));"
+    fi
+
+    # Build environment variables
+    local port="${SOREN_PORT:-8000}"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${sup_name} SOREN_AGENT_ROLE=project-supervisor SOREN_PROJECT_ID=${id} SOREN_SESSION=${session} SOREN_HOME=${SOREN_HOME} SOREN_PORT=${port} SOREN_MAILBOX=${SOREN_HOME}/.soren/mailbox SOREN_SUPERVISOR=supervisor CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+
+    # Build spawn command — add SOREN tools to PATH so supervisor can use journal/mailbox/workers
+    local spawn_cmd="export ${env_vars} && export PATH=${SOREN_HOME}/tools:\$PATH && cd ${project_path} && claude --dangerously-skip-permissions"
+
+    # Start Claude
+    info "Starting project supervisor..."
+    tmux send-keys -t "${session}:${sup_name}" -l "$spawn_cmd"
+    tmux send-keys -t "${session}:${sup_name}" Enter
+
+    # Write context file for the project supervisor
+    local context_dir="${SOREN_HOME}/.soren/worker-contexts"
+    mkdir -p "$context_dir"
+    local context_file="${context_dir}/${sup_name}-context.md"
+
+    cat > "$context_file" << CTXEOF
+# Project Supervisor: ${id}
+
+You are a **project supervisor** in the SOREN multi-agent system. Hierarchy: User → Supervisor Prime → Project Supervisors (you) → Workers. You report to Supervisor Prime. Workers report to you.
+
+⚠️  PORT ${port} IS RESERVED FOR SOREN. Do NOT start any server on port ${port}.
+If a task requires running a server, instruct workers to use a different port (e.g. 3000, 5000, 9000).
+Starting a server on the SOREN port will replace the SOREN API and break the entire system.
+
+You have the same authority and autonomy as Supervisor Prime, scoped to your project.
+
+## Your Identity
+
+- **Role**: Project Supervisor (immortal — cannot be killed by health daemon)
+- **Agent ID**: ${agent_id}
+- **Agent Name**: ${sup_name}
+- **Project**: ${id}
+- **Project Path**: ${project_path}
+- **SOREN Home**: ${SOREN_HOME}
+
+## What to Read
+
+1. Read \`${SOREN_HOME}/docs/SUPERVISOR_ROLE.md\` for your orchestration behavior, delegation guidelines, and the complexity assessment guide.
+2. Read the project's own \`CLAUDE.md\` (if it exists) for project-specific context — it's in your working directory.
+3. Read \`${SOREN_HOME}/docs/templates/teams/README.md\` and \`${SOREN_HOME}/docs/templates/roles/README.md\` before designing any delegation.
+
+## Core Principles
+
+**CRITICAL: You must NEVER write code, edit files, or run tests yourself. ALWAYS spawn workers using ./tools/workers spawn for ANY code changes. You are a coordinator — delegate everything. Even for single sequential tasks, spawn a worker.**
+
+**You are a supervisor, not a worker.** This means:
+- You NEVER write code yourself — always delegate to workers
+- You assess task complexity and choose the right team structure (solo worker, debate pair, squad, etc.)
+- You review worker output before reporting completion
+- You manage the lifecycle of your workers (spawn, monitor, review, kill when done)
+
+**You are autonomous within your project scope:**
+- When you receive a task from Supervisor Prime, break it down and delegate immediately
+- After completing a task, check if there's follow-up work or report done
+- If you have no tasks, proactively check your project for issues (build errors, test failures, stale branches)
+- Make routine decisions without asking — kill idle workers, commit clean changes, fix lint errors
+- Only escalate to Supervisor Prime for cross-project decisions or user-facing behavior changes
+
+**You own your project's quality:**
+- Verify worker output before reporting [DONE] — read the code, check types, run builds
+- If a worker's implementation is wrong, send them corrections or spawn a new worker
+- Track what was changed and why — journal substantive work to \`./tools/journal note "title" "body"\`
+
+## Worker Lifecycle
+
+**WORKER LIFECYCLE: Do NOT kill workers after they report [DONE].** Keep them alive — the user may want follow-up, or new related tasks may come in. Only kill workers when they have been idle for 30+ minutes with no further tasks, or when explicitly told to. Respawning workers wastes time and tokens.
+
+## Completion Reporting
+
+**When all tasks in a batch are complete, you MUST send a completion report to your supervisor:**
+\`\`\`bash
+./tools/mailbox done "<summary of what was built, commits, test results>"
+\`\`\`
+Do NOT silently finish — Supervisor Prime is waiting for your [DONE] message to know the batch is complete.
+
+## Communication
+
+- **To Supervisor Prime**: \`./tools/mailbox send supervisor "[TYPE] message"\` (DONE, STATUS, BLOCKED, QUESTION)
+- **From Supervisor Prime**: Messages appear in your terminal as \`[soren:supervisor] ...\`
+- **Spawn workers**: \`./tools/workers spawn <name> "<task>" --dir ${project_path} --project ${id}\`
+  - ALWAYS include \`--project ${id}\` so workers are grouped correctly in the UI
+  - ALWAYS tell workers to read \`${SOREN_HOME}/docs/WORKER_ROLE.md\` first
+- **Monitor workers**: \`./tools/workers status <name>\` — check periodically, don't just wait
+- **Kill idle workers**: \`./tools/workers kill <name>\` — clean up when done
+
+## Delegation Decision Guide
+
+| Task Signal | Team Type | Example |
+|-------------|-----------|---------|
+| Simple, clear, < 1 file | Solo worker | "Fix typo in config" |
+| Implementation, 1-5 files | Solo worker | "Add auth middleware" |
+| Design decision needed | Debate pair | "Best approach for caching" |
+| Multi-component feature | Squad (2-3 workers) | "Full CRUD with tests" |
+| Risky or unfamiliar change | Debate → Implement | "Refactor payment flow" |
+
+## Journal
+
+Journal your work frequently — this is the system's long-term memory:
+\`\`\`bash
+./tools/journal note "title" "detailed description"
+\`\`\`
+Save research, plans, and analysis as artifacts:
+\`\`\`bash
+# Write to .soren/journal/\$(date +%Y-%m-%d)/artifacts/filename.md
+\`\`\`
+
+## Peer Coordination with Sibling Supervisors
+
+If other project supervisors exist for related projects (e.g. a frontend and backend for the same product), coordinate directly via mailbox. Propose API contracts, flag issues, and agree on shared interfaces before delegating to workers.
+
+### Discovering Peers
+
+\`\`\`bash
+./tools/projects list   # Shows all registered projects — active ones have running supervisors
+\`\`\`
+
+Message a peer supervisor: \`./tools/mailbox send sup-<project-id> '<subject>' '<body>'\`
+
+### What to Coordinate
+
+- API contracts (endpoints, request/response shapes, error formats)
+- Shared data models and schema changes
+- Breaking changes that affect the sibling project
+- Integration concerns (auth flows, CORS, environment variables)
+
+### Protocol
+
+1. Either supervisor proposes a contract or flags an issue via mailbox
+2. The peer MUST ACK or counter-propose — silence is not agreement
+3. Workers do not start coding against unconfirmed contracts
+4. If peers can't agree, escalate to Supervisor Prime
+
+### Example
+
+\`\`\`bash
+./tools/mailbox send sup-todo-backend "API Contract Proposal" "
+Adding user profile page — need GET /api/users/:id endpoint.
+Expected response: { id, name, email, avatar_url, created_at }
+Please confirm or counter-propose before I assign frontend workers.
+"
+\`\`\`
+
+## Critical Rules
+
+- You run unattended in tmux. **NEVER use AskUserQuestion or EnterPlanMode** — these block forever.
+- Stay focused on the '${id}' project. Do not modify files outside ${project_path}.
+- When idle with no tasks, say so briefly and wait. Do NOT produce lengthy status reports.
+- On heartbeat nudges or compaction recovery: check for pending work, act if found, otherwise stay quiet.
+- **[SYS] tag**: When responding to heartbeat nudges, compaction recovery, or any system event with no actionable work, prefix your response with \`[SYS]\`. Example: \`[SYS] No pending work. Idle.\` This renders as a compact notification in the dashboard instead of cluttering chat.
+
+## Batch Task Analysis
+
+When you receive multiple tasks (from Supervisor Prime or via mailbox), **analyze them as a whole before spawning any workers**. Do not start delegating one at a time.
+
+### Process
+
+1. **Inventory all tasks**: List every task in the batch with a one-line summary
+2. **Identify dependencies**: Which tasks must complete before others can start? Which tasks touch overlapping files?
+3. **Group related work**: Tasks that share files, modules, or concerns should be grouped — a single worker handling related changes avoids merge conflicts
+4. **Assess total complexity**: Based on the full scope, choose a team structure from \`${SOREN_HOME}/docs/templates/teams/README.md\`:
+   - All tasks are small and independent → Solo workers in parallel
+   - Tasks span frontend + backend + tests → Squad model
+   - Design decisions needed before implementation → Debate pair, then implement
+   - Risky or unfamiliar territory → Debate-to-implementation
+   - Urgent production fix → Tiger team
+5. **Create a delegation plan**: Map tasks to workers with clear boundaries, then spawn all workers
+
+### Why Batch Analysis Matters
+
+- Spawning workers one at a time leads to merge conflicts when tasks overlap
+- Seeing the full picture lets you assign related tasks to the same worker
+- Team structure should match the totality of work, not individual tasks
+- Different batches of tasks may warrant different team structures — reassess each time
+
+## Resource Fetching
+
+Tasks often include links to external resources — design specs, documentation, reference implementations, issue trackers, project boards, or other supporting material. **Before delegating to workers, fetch and read these resources** to understand the full context.
+
+### Process
+
+1. **Scan all task descriptions** for URLs and resource references
+2. **Fetch public resources** using WebFetch to retrieve and summarize content
+3. **Access authenticated pages** using browser tools (Chrome MCP: navigate_page, take_snapshot, take_screenshot) to read pages that require login or have dynamic content
+4. **Extract actionable context**: From each resource, pull out requirements, acceptance criteria, design constraints, API contracts, or reference patterns
+5. **Include context in worker tasks**: When spawning workers, provide the extracted information directly in their task descriptions — workers should not need to fetch resources themselves
+
+### Guidelines
+
+- Fetch resources BEFORE spawning workers, not after
+- Summarize findings — don't dump raw HTML into worker task descriptions
+- If a resource is too large or complex, save a summary as an artifact in \`.soren/journal/\$(date +%Y-%m-%d)/artifacts/\` and reference it in the worker task
+- If a resource is inaccessible, note it and proceed with available information — report what's missing in your delegation plan
+
+## Branching Model (MANDATORY)
+
+**NEVER work directly on main.** All work happens on integration branches. This protects the main branch and makes every batch of work a clean PR candidate.
+
+### Step 1: Create an Integration Branch
+
+When you receive a batch of tasks from Supervisor Prime:
+
+\`\`\`bash
+git fetch origin
+git checkout -b feat/<descriptive-batch-name> origin/main
+\`\`\`
+
+This is YOUR integration branch. All worker branches will merge back into this branch — never into main.
+
+### Step 2: Spawn Workers with Worktrees
+
+**You MUST be on your integration branch BEFORE spawning workers.** Workers branch from HEAD, which means they inherit whatever branch you have checked out.
+
+\`\`\`bash
+# Verify you're on your integration branch
+git branch --show-current  # should show feat/<batch-name>
+
+# Spawn workers — each gets their own worktree branching from your integration branch
+./tools/workers spawn <name> "<task>" --project ${id} --worktree
+\`\`\`
+
+Each worker gets:
+- Their own git worktree at \`~/.soren/worktrees/${id}/<name>/\`
+- A branch named \`feat/<name>\` branched from your integration branch
+- Full isolation — changes in one worktree don't affect others
+
+### Step 3: Merge Worker Branches into Integration Branch
+
+When workers report \`[DONE]\`, merge their branches back into YOUR integration branch (not main):
+
+\`\`\`bash
+# 1. Switch to the main project directory (not the worktree)
+cd ${project_path}
+
+# 2. Make sure you're on the integration branch
+git checkout feat/<batch-name>
+
+# 3. Merge the worker's branch
+git merge feat/<worker-name>
+
+# 4. Resolve conflicts if any
+#    - Simple conflicts (formatting, imports): resolve yourself
+#    - Substantive conflicts: send the worker back to fix against the updated integration branch
+
+# 5. Run tests and type checks
+#    (use project-appropriate commands)
+
+# 6. Clean up the worktree and branch
+git worktree remove ~/.soren/worktrees/${id}/<worker-name>
+git branch -d feat/<worker-name>
+\`\`\`
+
+### Step 4: Report Completion
+
+After ALL workers are merged and tests pass on the integration branch:
+- Report \`[DONE]\` to Supervisor Prime
+- The integration branch (\`feat/<batch-name>\`) becomes a PR candidate
+- **NEVER merge into main directly** — that is Supervisor Prime's decision
+
+### Merge Order
+
+When merging multiple workers:
+- Merge the largest/most foundational changes first
+- Merge dependent work after its dependencies
+- Run the full test suite after all merges are complete, not just after each one
+
+### Summary
+
+\`\`\`
+origin/main
+  └── feat/<batch-name>         ← supervisor integration branch
+        ├── feat/<worker-1>     ← worker worktree branch (merges back to integration)
+        ├── feat/<worker-2>     ← worker worktree branch (merges back to integration)
+        └── feat/<worker-3>     ← worker worktree branch (merges back to integration)
+\`\`\`
+
+## Team Template Integration
+
+Before spawning workers, consult \`${SOREN_HOME}/docs/templates/teams/README.md\` for available team patterns. The choice of template comes from analyzing the **current batch of tasks**, not from project configuration.
+
+| Batch Shape | Template |
+|-------------|----------|
+| All independent small fixes | Solo workers in parallel |
+| Feature with frontend + backend + tests | [SQUAD_MODEL](${SOREN_HOME}/docs/templates/teams/SQUAD_MODEL.md) |
+| Feature needing technical direction | [FEATURE_TEAM](${SOREN_HOME}/docs/templates/teams/FEATURE_TEAM.md) |
+| Infrastructure / DevOps tasks | [PLATFORM_TEAM](${SOREN_HOME}/docs/templates/teams/PLATFORM_TEAM.md) |
+| Urgent production issue | [TIGER_TEAM](${SOREN_HOME}/docs/templates/teams/TIGER_TEAM.md) |
+| Design decision with tradeoffs | [DEBATE_PAIR](${SOREN_HOME}/docs/templates/teams/DEBATE_PAIR.md) |
+| Design then build | [DEBATE_TO_IMPLEMENTATION](${SOREN_HOME}/docs/templates/teams/DEBATE_TO_IMPLEMENTATION.md) |
+
+Role templates for individual workers are in \`${SOREN_HOME}/docs/templates/roles/README.md\`. Point workers to the relevant role template when spawning them.
+CTXEOF
+
+    # Wait for Claude to initialize
+    info "Waiting for Claude to initialize..."
+    local retries=30
+    while ! tmux capture-pane -t "${session}:${sup_name}" -p 2>/dev/null | grep -qE "^❯|bypass permissions"; do
+        sleep 1
+        ((retries--)) || break
+        if ((retries <= 0)); then
+            warn "Claude startup timeout, sending instructions anyway"
+            break
+        fi
+    done
+    sleep 1
+
+    # Disable vim mode if enabled
+    if tmux capture-pane -t "${session}:${sup_name}" -p 2>/dev/null | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
+        tmux send-keys -t "${session}:${sup_name}" -l "/vim"
+        tmux send-keys -t "${session}:${sup_name}" Enter
+        sleep 1
+    fi
+
+    # Send the context reference
+    local instruction="[soren:supervisor-prime] Read ${SOREN_HOME}/.soren/worker-contexts/${sup_name}-context.md to understand your role as project supervisor for '${id}'. Then read ${SOREN_HOME}/docs/SUPERVISOR_ROLE.md for orchestration guidelines. You are a project supervisor managed by Supervisor Prime, not a human user. Delegate work to workers, never write code yourself. IMPORTANT: Always prefix system-level responses (heartbeat replies, compaction recovery, idle status, status confirmations) with [SYS] so they render as compact notifications in the dashboard."
+    tmux send-keys -t "${session}:${sup_name}" -l "$instruction"
+    sleep 0.1
+    tmux send-keys -t "${session}:${sup_name}" Enter
+
+    # Update registry: set active=true, save supervisor_agent_id
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" --arg aid "$agent_id" \
+        '(.projects[] | select(.id == $id)) |= (.active = true | .supervisor_agent_id = $aid)' \
+        "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+
+    # Initialize heartbeat file for this supervisor
+    date +%s > "${SOREN_HOME}/.soren/.${sup_name}-heartbeat"
+
+    ok "Project '$id' activated"
+    echo ""
+    echo "  Supervisor: $sup_name"
+    echo "  Agent ID:   $agent_id"
+    echo "  Directory:  $project_path"
+    echo "  Window:     ${session}:${sup_name}"
+}
+
+cmd_deactivate() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: projects deactivate <id>"
+
+    ensure_registry
+
+    if ! project_exists "$id"; then
+        die "project '$id' not found"
+    fi
+
+    # Prevent deactivating self-project
+    local is_self
+    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
+    if [[ "$is_self" == "true" ]]; then
+        die "cannot deactivate SOREN self-project"
+    fi
+
+    local already_inactive
+    already_inactive=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
+    if [[ "$already_inactive" == "false" ]]; then
+        warn "project '$id' is already inactive"
+        return 0
+    fi
+
+    info "Deactivating project: $id"
+
+    local sup_name="sup-${id}"
+    local session="${SOREN_SESSION:-soren}"
+
+    # Kill the project supervisor's tmux window if it exists
+    if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$sup_name"; then
+        info "Killing project supervisor: $sup_name"
+        # Send Ctrl+C first for graceful shutdown
+        tmux send-keys -t "${session}:${sup_name}" C-c 2>/dev/null || true
+        sleep 1
+        tmux kill-window -t "${session}:${sup_name}" 2>/dev/null || true
+        ok "Supervisor window killed"
+    fi
+
+    # Remove from agent_registry.json
+    local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+    if [[ -f "$reg_file" ]]; then
+        local reg_tmp
+        reg_tmp=$(mktemp)
+        jq --arg key "$sup_name" 'del(.[$key])' "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+    fi
+
+    # Set SLEEPING in SQLite (preserve for archived view, don't delete)
+    local db_file="${SOREN_HOME}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${sup_name}';"
+    fi
+
+    # Remove heartbeat file
+    rm -f "${SOREN_HOME}/.soren/.${sup_name}-heartbeat"
+
+    # Update registry: set active=false, clear supervisor_agent_id
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" \
+        '(.projects[] | select(.id == $id)) |= (.active = false | .supervisor_agent_id = null)' \
+        "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+
+    ok "Project '$id' deactivated"
+}
+
+cmd_install_hooks() {
+    local id="${1:-}"
+    [[ -z "$id" ]] && die "usage: projects install-hooks <id>"
+
+    ensure_registry
+
+    if ! project_exists "$id"; then
+        die "project '$id' not found"
+    fi
+
+    local is_self
+    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
+    if [[ "$is_self" == "true" ]]; then
+        warn "SOREN self-project already has hooks configured"
+        return 0
+    fi
+
+    local project_path
+    project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+    [[ -d "$project_path" ]] || die "project path does not exist: $project_path"
+
+    info "Installing SOREN hooks in: $project_path"
+
+    # Create .claude directory in the target project
+    local target_claude_dir="${project_path}/.claude"
+    mkdir -p "$target_claude_dir"
+
+    # Generate settings.json with absolute paths to SOREN hooks
+    local settings_file="${target_claude_dir}/settings.json"
+
+    # Warn if settings.json already exists
+    if [[ -f "$settings_file" ]]; then
+        warn "Existing .claude/settings.json found — overwriting"
+    fi
+
+    cat > "$settings_file" << HOOKSEOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion|EnterPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/block-interactive.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/stream-thought.sh",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/notify-output.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/audit-log.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"\$SOREN_AGENT_ROLE\" = \"supervisor\" -o \"\$SOREN_AGENT_ROLE\" = \"project-supervisor\" ] && date +%s > \"\${SOREN_HOME}/.soren/.sup-\${SOREN_PROJECT_ID}-heartbeat\"",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/stream-result.sh",
+            "timeout": 5,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/stop-gate.sh",
+            "timeout": 15
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${SOREN_HOME}/.claude/hooks/notify-complete.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+HOOKSEOF
+
+    # Update registry: mark hooks as installed
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" '(.projects[] | select(.id == $id)).hooks_installed = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+
+    ok "Hooks installed in $project_path/.claude/settings.json"
+    echo "  All hooks point to: ${SOREN_HOME}/.claude/hooks/"
+}
+
+cmd_help() {
+    cat << 'EOF'
+projects - Manage the SOREN project registry
+
+USAGE:
+    projects <command> [arguments]
+
+COMMANDS:
+    add <path> [options]    Register a new project
+    remove <id>             Unregister a project
+    list                    List all registered projects
+    info <id>               Show project details
+    activate <id>           Spawn project supervisor and set active
+    deactivate <id>         Kill project supervisor and set inactive
+    install-hooks <id>      Install SOREN hooks in target project
+    help                    Show this help message
+
+ADD OPTIONS:
+    --name <name>           Project display name (default: directory basename)
+    --description <desc>    Project description
+
+AUTO-DETECTION:
+    On add, the tool automatically detects:
+    - Git remote (from 'origin')
+    - Language (from pyproject.toml, package.json, Cargo.toml, go.mod, etc.)
+    - Project ID (from directory basename, lowercased)
+
+EXAMPLES:
+    projects add /path/to/my-api --name "My API" --description "REST API service"
+    projects list
+    projects info my-api
+    projects install-hooks my-api
+    projects activate my-api
+    projects deactivate my-api
+    projects remove my-api
+
+ENVIRONMENT:
+    SOREN_HOME    SOREN installation root (default: git root or pwd)
+EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        add)            cmd_add "$@" ;;
+        remove)         cmd_remove "$@" ;;
+        list)           cmd_list "$@" ;;
+        info)           cmd_info "$@" ;;
+        activate)       cmd_activate "$@" ;;
+        deactivate)     cmd_deactivate "$@" ;;
+        install-hooks)  cmd_install_hooks "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)              die "unknown command: $cmd (try 'projects help')" ;;
+    esac
+}
+
+main "$@"

@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# tools/root-cause — Root cause analysis for SOREN health failures
+#
+# Usage: tools/root-cause [--commit <sha>] [--error-log <file>]
+#
+# Analyzes a commit's git diff against recent error logs to identify
+# the likely cause of a server failure.
+#
+# Output:
+#   stdout — JSON result (machine-readable, for monitor.sh / failure_log)
+#   stderr — human-readable summary (for interactive use)
+# Exit 0 always (diagnostic tool, never blocks recovery).
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+COMMIT_SHA="HEAD"
+ERROR_LOG_FILE=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --commit)    COMMIT_SHA="$2";     shift 2 ;;
+        --error-log) ERROR_LOG_FILE="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+# Resolve to full SHA
+FULL_SHA=$(git rev-parse "$COMMIT_SHA" 2>/dev/null || echo "$COMMIT_SHA")
+
+# Gather error context (from flag, fallback to server log)
+if [[ -n "$ERROR_LOG_FILE" && -e "$ERROR_LOG_FILE" ]]; then
+    ERROR_CONTENT=$(head -100 "$ERROR_LOG_FILE" 2>/dev/null || echo "")
+else
+    ERROR_CONTENT=$(tail -100 ".soren/logs/server.log" 2>/dev/null || echo "No server log available")
+fi
+
+# Gather git data
+CHANGED_FILES=$(git show --name-only --format="" "$FULL_SHA" 2>/dev/null \
+    | grep -v '^$' || echo "")
+DIFF_CONTENT=$(git show --unified=3 "$FULL_SHA" 2>/dev/null || echo "")
+
+# Write to temp files (.soren/run/ is gitignored) — avoids env var size limits
+mkdir -p .soren/run
+TMP=".soren/run/rca-$$"
+printf '%s' "$ERROR_CONTENT"  > "${TMP}-error.txt"
+printf '%s' "$DIFF_CONTENT"   > "${TMP}-diff.txt"
+printf '%s' "$CHANGED_FILES"  > "${TMP}-files.txt"
+trap 'rm -f "${TMP}-error.txt" "${TMP}-diff.txt" "${TMP}-files.txt"' EXIT
+
+uv run python - "$FULL_SHA" "$TMP" <<'PYEOF'
+import sys
+import re
+import json
+from pathlib import Path
+
+full_sha  = sys.argv[1]
+short_sha = full_sha[:7]
+prefix    = sys.argv[2]
+
+error_text  = Path(f"{prefix}-error.txt").read_text(errors="replace")
+diff_text   = Path(f"{prefix}-diff.txt").read_text(errors="replace")
+files_text  = Path(f"{prefix}-files.txt").read_text(errors="replace")
+
+# ── Changed files ──────────────────────────────────────────────────────────
+changed_files = [f.strip() for f in files_text.splitlines() if f.strip()]
+
+# ── Changed symbols (functions/classes from @@ context lines) ──────────────
+changed_symbols: list[str] = []
+for line in diff_text.splitlines():
+    m = re.search(r'^@@[^@]*@@\s*(.+)', line)
+    if m:
+        ctx = m.group(1).strip()
+        if ctx:
+            changed_symbols.append(ctx)
+changed_symbols = list(dict.fromkeys(changed_symbols))[:10]  # dedup, cap at 10
+
+# ── Parse error log ────────────────────────────────────────────────────────
+error_type    = None
+error_file    = None
+error_line_no = None
+error_msg     = None
+
+ERROR_TYPES = (
+    "ImportError", "ModuleNotFoundError", "SyntaxError", "IndentationError",
+    "AttributeError", "NameError", "TypeError", "ValueError",
+    "RuntimeError", "KeyError", "AssertionError", "OSError",
+)
+
+for line in error_text.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+
+    # Python traceback: File "path.py", line N  (first occurrence wins for file)
+    if not error_file:
+        m = re.search(r'File ["\']([^"\']+\.py)["\'],\s*line\s*(\d+)', line)
+        if m:
+            error_file    = m.group(1).lstrip('./')
+            error_line_no = m.group(2)
+
+    # Specific exception types (first occurrence wins)
+    if not error_type:
+        pattern = r'\b(' + '|'.join(ERROR_TYPES) + r')\s*:?\s*(.*)'
+        m = re.search(pattern, line)
+        if m:
+            error_type = m.group(1)
+            error_msg  = m.group(2).strip()[:300]
+
+    # Fallback: generic ERROR / CRITICAL log lines
+    if not error_type:
+        m = re.search(r'\b(?:ERROR|CRITICAL)\b.*?:\s*(.+)', line, re.IGNORECASE)
+        if m:
+            error_type = "runtime_error"
+            error_msg  = m.group(1).strip()[:300]
+
+# ── Cross-reference error file with changed files ──────────────────────────
+def normalize(p: str) -> str:
+    return p.lstrip('./').replace('\\', '/')
+
+changed_norm = [normalize(f) for f in changed_files]
+
+culprit_file = None
+confidence   = "low"
+
+if error_file:
+    ef = normalize(error_file)
+    # Exact / suffix match
+    for cf, cn in zip(changed_files, changed_norm):
+        if ef == cn or ef.endswith('/' + cn) or cn.endswith('/' + ef) or ef == cn:
+            culprit_file = cf
+            confidence   = "high"
+            break
+    # Base-name match
+    if not culprit_file:
+        ef_base = Path(ef).name
+        for cf, cn in zip(changed_files, changed_norm):
+            if Path(cn).name == ef_base:
+                culprit_file = cf
+                confidence   = "medium"
+                break
+
+# Error message mentions a changed module name
+if not culprit_file and error_msg:
+    for cf in changed_files:
+        stem = Path(cf).stem  # "quality_metrics" from "quality_metrics.py"
+        if stem and stem in error_msg:
+            culprit_file = cf
+            confidence   = "medium"
+            break
+
+# Single changed file with any error — medium confidence
+if not culprit_file and len(changed_files) == 1 and error_type:
+    culprit_file = changed_files[0]
+    confidence   = "medium"
+
+# ── Build likely_cause and suggestion ─────────────────────────────────────
+likely_cause: str
+suggestion:   str
+
+if error_type and culprit_file:
+    err = error_msg or error_type
+    if error_type in ("ImportError", "ModuleNotFoundError"):
+        likely_cause = f"{culprit_file} has an unresolvable import. {err}"
+        suggestion   = (
+            f"Verify all imports in {culprit_file} exist. "
+            f"Run: uv run python -c 'import {Path(culprit_file).stem}'"
+        )
+    elif error_type in ("SyntaxError", "IndentationError"):
+        likely_cause = f"{culprit_file} introduced a syntax error. {err}"
+        suggestion   = f"Run: uv run python -m py_compile {culprit_file}"
+    elif error_type == "AttributeError":
+        likely_cause = f"{culprit_file} references a renamed or removed attribute. {err}"
+        suggestion   = f"Check {culprit_file} for references to removed symbols."
+    else:
+        likely_cause = f"{culprit_file} may have introduced a {error_type}. {err}"
+        suggestion   = f"Review recent changes to {culprit_file}."
+elif error_type and not culprit_file:
+    likely_cause = (
+        f"Server reported {error_type} but cannot correlate with changed files. "
+        f"{error_msg or ''}"
+    )
+    suggestion = "Check server.log for the full traceback."
+elif changed_files and not error_type:
+    culprit_file = changed_files[0]
+    likely_cause = (
+        f"No specific error identified. Changed: {', '.join(changed_files[:3])}"
+        + (" ..." if len(changed_files) > 3 else "")
+    )
+    suggestion = "Review changed files for import or configuration issues."
+else:
+    likely_cause = "Insufficient data to identify root cause."
+    suggestion   = "Review git log and .soren/logs/server.log manually."
+
+error_ref = None
+if error_file:
+    error_ref = f"{error_file}:{error_line_no}" if error_line_no else error_file
+
+result = {
+    "commit":          short_sha,
+    "full_sha":        full_sha,
+    "changed_files":   changed_files,
+    "changed_symbols": changed_symbols,
+    "error_type":      error_type,
+    "error_file":      error_ref,
+    "error_message":   error_msg,
+    "culprit_file":    culprit_file,
+    "likely_cause":    likely_cause,
+    "confidence":      confidence,
+    "suggestion":      suggestion,
+}
+
+# ── Human-readable summary → stderr ───────────────────────────────────────
+sep = "─" * 54
+print(f"\n{sep}", file=sys.stderr)
+print("  Root Cause Analysis", file=sys.stderr)
+print(sep, file=sys.stderr)
+print(f"  Commit:      {short_sha}", file=sys.stderr)
+print(f"  Changed:     {', '.join(changed_files[:4]) or 'none'}"
+      + (" ..." if len(changed_files) > 4 else ""), file=sys.stderr)
+print(f"  Error type:  {error_type or 'unknown'}", file=sys.stderr)
+if error_ref:
+    print(f"  Error at:    {error_ref}", file=sys.stderr)
+print(f"  Culprit:     {culprit_file or 'unknown'}", file=sys.stderr)
+print(f"  Confidence:  {confidence}", file=sys.stderr)
+print(f"  Cause:       {likely_cause[:100]}", file=sys.stderr)
+print(f"  Fix:         {suggestion[:100]}", file=sys.stderr)
+print(f"{sep}\n", file=sys.stderr)
+
+# ── JSON → stdout ──────────────────────────────────────────────────────────
+print(json.dumps(result))
+PYEOF

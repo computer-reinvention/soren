@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+#===============================================================================
+# journal - Quick journal entries for SOREN agents
+#
+# Usage:
+#   journal log "<what you did>"                 - Quick one-liner
+#   journal note "<title>" "<detail>"            - Titled entry with detail
+#   journal decision "<what>" "<why>"            - Record a decision
+#   journal read [date]                          - Read today's (or given date's) journal
+#   journal dates                                - List dates with entries
+#
+# Designed for agents to journal instinctively with minimal friction.
+# Every command is one line - no excuses not to journal.
+#
+# Writes directly to the filesystem — no API dependency.
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+JOURNAL_DIR="${SOREN_HOME}/.soren/journal"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+
+ensure_day_dir() {
+    local target_date="$1"
+    local day_dir="${JOURNAL_DIR}/${target_date}"
+    mkdir -p "${day_dir}/artifacts"
+
+    local journal_file="${day_dir}/journal.md"
+    if [[ ! -f "$journal_file" ]]; then
+        printf '# Journal - %s\n' "$target_date" > "$journal_file"
+    fi
+}
+
+append_entry() {
+    local title="$1"
+    local content="${2:-}"
+    local target_date
+    target_date="$(date +%Y-%m-%d)"
+    local time_str
+    time_str="$(date +%H:%M)"
+
+    ensure_day_dir "$target_date"
+
+    local journal_file="${JOURNAL_DIR}/${target_date}/journal.md"
+
+    # Skip if last entry has identical title (dedup)
+    local last_title
+    last_title=$(grep '^## ' "$journal_file" 2>/dev/null | tail -1 | sed 's/^## [0-9:]* - //' | sed 's/^\[.*\] //' || true)
+    if [[ -n "$last_title" && "$last_title" == "$title" ]]; then
+        ok "Skipped duplicate: $title"
+        return 1
+    fi
+
+    # Include project tag if SOREN_PROJECT_ID is set
+    local header
+    if [[ -n "${SOREN_PROJECT_ID:-}" ]]; then
+        header="## ${time_str} - [${SOREN_PROJECT_ID}] ${title}"
+    else
+        header="## ${time_str} - ${title}"
+    fi
+
+    if [[ -n "$content" ]]; then
+        printf '\n%s\n%s\n' "$header" "$content" >> "$journal_file"
+    else
+        printf '\n%s\n' "$header" >> "$journal_file"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Commands
+#-------------------------------------------------------------------------------
+
+cmd_log() {
+    local entry="${1:-}"
+    [[ -z "$entry" ]] && die "usage: journal log \"<what you did>\""
+
+    if append_entry "$entry" ""; then ok "Logged: ${entry:0:60}"; fi
+}
+
+cmd_note() {
+    local title="${1:-}"
+    local detail="${2:-}"
+    [[ -z "$title" ]] && die "usage: journal note \"<title>\" \"<detail>\""
+    [[ -z "$detail" ]] && die "usage: journal note \"<title>\" \"<detail>\""
+
+    if append_entry "$title" "$detail"; then ok "Noted: $title"; fi
+}
+
+cmd_decision() {
+    local what="${1:-}"
+    local why="${2:-}"
+    [[ -z "$what" ]] && die "usage: journal decision \"<what>\" \"<why>\""
+    [[ -z "$why" ]] && die "usage: journal decision \"<what>\" \"<why>\""
+
+    local content
+    content="$(printf '**Decision:** %s\n\n**Rationale:** %s' "$what" "$why")"
+
+    if append_entry "Decision: $what" "$content"; then ok "Decision recorded: $what"; fi
+}
+
+cmd_read() {
+    local target_date="${1:-$(date +%Y-%m-%d)}"
+    local journal_file="${JOURNAL_DIR}/${target_date}/journal.md"
+
+    if [[ ! -f "$journal_file" ]]; then
+        echo -e "${DIM}No journal entries for ${target_date}${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}Journal - ${target_date}${NC}"
+    echo ""
+    cat "$journal_file"
+}
+
+cmd_dates() {
+    if [[ ! -d "$JOURNAL_DIR" ]]; then
+        echo -e "${DIM}No journal entries found${NC}"
+        return
+    fi
+
+    local found=0
+    # List directories matching YYYY-MM-DD that contain journal.md, sorted reverse
+    for dir in $(ls -1d "${JOURNAL_DIR}"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 2>/dev/null | sort -r); do
+        if [[ -f "${dir}/journal.md" ]]; then
+            if [[ $found -eq 0 ]]; then
+                echo -e "${CYAN}Journal dates:${NC}"
+                found=1
+            fi
+            basename "$dir"
+        fi
+    done
+
+    if [[ $found -eq 0 ]]; then
+        echo -e "${DIM}No journal entries found${NC}"
+    fi
+}
+
+cmd_help() {
+    cat << 'EOF'
+journal - Quick journal entries for SOREN agents
+
+USAGE:
+    journal <command> [arguments]
+
+COMMANDS:
+    log "<entry>"                   Quick one-liner (most common)
+    note "<title>" "<detail>"       Titled entry with body
+    decision "<what>" "<why>"       Record a decision with rationale
+    read [YYYY-MM-DD]               Read journal (default: today)
+    dates                           List dates with entries
+    help                            Show this help
+
+EXAMPLES:
+    # Quick log (use this most often - it's one line!)
+    journal log "Fixed auth bug in token.py, was using wrong timezone"
+    journal log "Spawned worker-frontend for dashboard redesign"
+    journal log "Tests passing after JWT refactor"
+
+    # Detailed note
+    journal note "Auth Investigation" "Found three issues:
+    1. Token expiry uses local time instead of UTC
+    2. Refresh endpoint missing rate limiting
+    3. Session store not cleaned up on logout"
+
+    # Decision record
+    journal decision "Use JSONL for mailbox" "Eliminates parsing ambiguity, keeps file-based resilience"
+
+    # Read today's journal
+    journal read
+
+    # Read a specific day
+    journal read 2026-02-18
+
+ENVIRONMENT:
+    SOREN_HOME          Project root (default: git rev-parse --show-toplevel)
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        log)      cmd_log "$@" ;;
+        note)     cmd_note "$@" ;;
+        decision) cmd_decision "$@" ;;
+        read)     cmd_read "$@" ;;
+        dates)    cmd_dates "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)        die "unknown command: $cmd (try 'journal help')" ;;
+    esac
+}
+
+main "$@"

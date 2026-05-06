@@ -1,0 +1,593 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# soren-run — single command from task description to agents working
+#
+# Usage:
+#   tools/soren-run "<task description>" [--project <id>] [--dry-run] [--workers <n>]
+#
+# Steps:
+#   1. Detect project (from --project or cwd)
+#   2. Decompose task description into typed subtasks using keyword heuristics
+#   3. Create parent task + subtasks in tasks.db with dependency edges
+#   4. Assign to permanent workers or project supervisor
+#   5. Print execution plan
+#   6. Execute (unless --dry-run)
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOREN_HOME="${SOREN_HOME:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR/..")}"
+SOREN_HOME="$(cd "$SOREN_HOME" && pwd)"
+REGISTRY="${SOREN_HOME}/.soren/projects.json"
+AGENT_REG="${SOREN_HOME}/.soren/agent_registry.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+die()  { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok()   { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+# ── Project detection ─────────────────────────────────────────────────────────
+
+detect_project_from_cwd() {
+    # Walk up from cwd, find a directory that matches a registered project path
+    if [[ ! -f "$REGISTRY" ]]; then
+        echo ""
+        return 0
+    fi
+    local cwd
+    cwd="$(pwd)"
+    # Check if cwd or any parent is a registered project
+    local check="$cwd"
+    while [[ "$check" != "/" ]]; do
+        local match
+        match=$(jq -r --arg p "$check" '.projects[] | select(.path == $p) | .id' "$REGISTRY" 2>/dev/null | head -1)
+        if [[ -n "$match" ]]; then
+            echo "$match"
+            return 0
+        fi
+        check="$(dirname "$check")"
+    done
+    echo ""
+}
+
+get_project_path() {
+    local id="$1"
+    if [[ ! -f "$REGISTRY" ]]; then echo ""; return; fi
+    jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY" 2>/dev/null | head -1
+}
+
+project_exists() {
+    local id="$1"
+    [[ -f "$REGISTRY" ]] && jq -e --arg id "$id" '.projects[] | select(.id == $id)' "$REGISTRY" >/dev/null 2>&1
+}
+
+# ── Worker detection ──────────────────────────────────────────────────────────
+
+# Check if a named tmux window is alive
+window_exists() {
+    local name="$1"
+    local session="${SOREN_SESSION:-soren}"
+    tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$name"
+}
+
+# Find the best worker for a given role and project
+find_worker() {
+    local role="$1"     # backend | frontend | database | test | deploy | general
+    local project="$2"
+
+    # 1. Check for permanent worker matching role and project
+    if [[ -f "$AGENT_REG" ]]; then
+        # perm-backend, perm-frontend, perm-<role> convention
+        local perm_name="perm-${role}"
+        local perm_project
+        perm_project=$(jq -r --arg k "$perm_name" '.[$k].project_id // ""' "$AGENT_REG" 2>/dev/null)
+        if [[ -n "$perm_project" && ( "$perm_project" == "$project" || "$perm_project" == "soren" ) ]]; then
+            echo "$perm_name"
+            return 0
+        fi
+    fi
+
+    # 2. Fallback: project supervisor
+    local sup_name="sup-${project}"
+    if [[ -f "$AGENT_REG" ]]; then
+        local sup_exists
+        sup_exists=$(jq -r --arg k "$sup_name" '.[$k] // empty' "$AGENT_REG" 2>/dev/null)
+        if [[ -n "$sup_exists" ]]; then
+            echo "$sup_name"
+            return 0
+        fi
+    fi
+
+    # 3. Final fallback: main supervisor
+    echo "supervisor"
+}
+
+worker_status() {
+    local name="$1"
+    if [[ ! -f "$AGENT_REG" ]]; then echo "unknown"; return; fi
+    local status
+    status=$(jq -r --arg k "$name" '.[$k].status // "unknown"' "$AGENT_REG" 2>/dev/null)
+    echo "$status"
+}
+
+# ── Pattern lookup ───────────────────────────────────────────────────────────
+
+# Search memory store for relevant patterns (score >= 0.7) and journal entries (score >= 0.8).
+# Returns a formatted multi-line string ready to prepend to a task message,
+# or empty string if no qualifying patterns found.
+lookup_patterns() {
+    local query="$1"
+    local min_score="${2:-0.7}"
+    local limit="${3:-3}"
+
+    # Use API endpoint — server already has memory_store loaded (~5x faster than subprocess)
+    local response
+    response=$(curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/memory/search" \
+        -H "Content-Type: application/json" \
+        -d "{\"query\": $(printf '%s' "$query" | jq -Rs .), \"limit\": $((limit * 3))}" 2>/dev/null) || return 0
+
+    echo "$response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+results = data.get('results', [])
+patterns = [r for r in results if (r.get('source_type') == 'pattern' and r.get('score', 0) >= $min_score) or (r.get('source_type') == 'journal' and r.get('score', 0) >= 0.8)][:$limit]
+if not patterns:
+    sys.exit(0)
+print('**Relevant patterns from past work:**')
+for p in patterns:
+    content = p['content'].strip()
+    if len(content) > 200:
+        content = content[:197] + '...'
+    print(f'- {content}')
+" 2>/dev/null || true
+}
+
+# ── Task ID capture ───────────────────────────────────────────────────────────
+
+# Run `tools/tasks add` and capture the generated task ID
+create_task() {
+    local output
+    output=$("${SOREN_HOME}/tools/tasks" add "$@" 2>&1) || die "Failed to create task: $output"
+    local task_id
+    task_id=$(echo "$output" | grep -oP 't_\w+' | head -1)
+    [[ -z "$task_id" ]] && die "Could not extract task ID from: $output"
+    echo "$task_id"
+}
+
+# ── Keyword decomposition ─────────────────────────────────────────────────────
+
+# Output: one line per subtask — "type:title:description"
+# Types: backend, frontend, database, test, deploy, general
+decompose_task() {
+    local description="$1"
+    local desc_lower
+    desc_lower=$(echo "$description" | tr '[:upper:]' '[:lower:]')
+
+    local has_backend=0 has_frontend=0 has_database=0 has_test=0 has_deploy=0
+
+    # Pattern matching
+    echo "$desc_lower" | grep -qE '/api/|endpoint|route|api |server|backend|rest|graphql' && has_backend=1 || true
+    echo "$desc_lower" | grep -qE 'component|page|ui|frontend|dashboard|form|button|modal|view|screen|style|css|design' && has_frontend=1 || true
+    echo "$desc_lower" | grep -qE 'database|schema|migration|model|table|column|index|query|db |sqlite|postgres|mysql' && has_database=1 || true
+    echo "$desc_lower" | grep -qE '\btest\b|tests|spec|verify|coverage|unit|integration|e2e' && has_test=1 || true
+    echo "$desc_lower" | grep -qE 'deploy|release|build|bundle|publish|ci/cd|pipeline|docker|container' && has_deploy=1 || true
+
+    local count=$((has_backend + has_frontend + has_database + has_test + has_deploy))
+
+    if [[ $count -eq 0 ]]; then
+        # Single general task
+        echo "general:${description}:${description}"
+        return 0
+    fi
+
+    # Emit subtasks. Database first (dependency), deploy last (depends on all).
+    if [[ $has_database -eq 1 ]]; then
+        echo "database:Database changes:Schema migrations and data model changes"
+    fi
+    if [[ $has_backend -eq 1 ]]; then
+        echo "backend:Backend implementation:API endpoints, routes, and server-side logic"
+    fi
+    if [[ $has_frontend -eq 1 ]]; then
+        echo "frontend:Frontend implementation:UI components, pages, and client-side logic"
+    fi
+    if [[ $has_test -eq 1 ]]; then
+        echo "test:Tests:Write and verify tests for the implementation"
+    fi
+    if [[ $has_deploy -eq 1 ]]; then
+        echo "deploy:Build and deploy:Build, bundle, and release the changes"
+    fi
+}
+
+# ── Dependency wiring ─────────────────────────────────────────────────────────
+
+# Given a list of "type:id" pairs, add dependency edges according to natural order
+wire_dependencies() {
+    local -a type_ids=("$@")  # array of "type:task_id"
+
+    # Extract IDs by type
+    local db_id="" backend_id="" frontend_id="" test_id="" deploy_id=""
+    for entry in "${type_ids[@]}"; do
+        local t="${entry%%:*}"
+        local tid="${entry##*:}"
+        case "$t" in
+            database) db_id="$tid" ;;
+            backend)  backend_id="$tid" ;;
+            frontend) frontend_id="$tid" ;;
+            test)     test_id="$tid" ;;
+            deploy)   deploy_id="$tid" ;;
+        esac
+    done
+
+    # backend depends on database
+    [[ -n "$backend_id"  && -n "$db_id" ]]       && "${SOREN_HOME}/tools/tasks" depends "$backend_id"  "$db_id"       >/dev/null 2>&1 || true
+    # frontend depends on database
+    [[ -n "$frontend_id" && -n "$db_id" ]]       && "${SOREN_HOME}/tools/tasks" depends "$frontend_id" "$db_id"       >/dev/null 2>&1 || true
+    # test depends on backend
+    [[ -n "$test_id"     && -n "$backend_id" ]]  && "${SOREN_HOME}/tools/tasks" depends "$test_id"     "$backend_id"  >/dev/null 2>&1 || true
+    # test depends on frontend
+    [[ -n "$test_id"     && -n "$frontend_id" ]] && "${SOREN_HOME}/tools/tasks" depends "$test_id"     "$frontend_id" >/dev/null 2>&1 || true
+    # deploy depends on test (or backend/frontend if no test)
+    if [[ -n "$deploy_id" ]]; then
+        if [[ -n "$test_id" ]]; then
+            "${SOREN_HOME}/tools/tasks" depends "$deploy_id" "$test_id" >/dev/null 2>&1 || true
+        else
+            [[ -n "$backend_id" ]]  && "${SOREN_HOME}/tools/tasks" depends "$deploy_id" "$backend_id"  >/dev/null 2>&1 || true
+            [[ -n "$frontend_id" ]] && "${SOREN_HOME}/tools/tasks" depends "$deploy_id" "$frontend_id" >/dev/null 2>&1 || true
+        fi
+    fi
+}
+
+# ── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat << 'EOF'
+soren-run — single command from task description to agents working
+
+USAGE:
+    tools/soren-run "<task description>" [options]
+    soren.sh run "<task description>" [options]
+
+ARGUMENTS:
+    task description        Natural language description of what to build
+
+OPTIONS:
+    --project <id>          Target project (auto-detected from cwd if omitted)
+    --priority <level>      Task priority: critical, high (default), medium, low
+    --workers <n>           Max parallel workers hint (default: 2, informational only)
+    --dry-run               Show decomposition plan without creating tasks or sending messages
+    -h, --help              Show this help
+
+DECOMPOSITION HEURISTICS:
+    Keywords detected in the description trigger subtask creation:
+    - api/endpoint/route/backend  → Backend subtask
+    - component/page/UI/frontend  → Frontend subtask
+    - database/schema/migration   → Database subtask (runs first)
+    - test/spec/verify            → Test subtask (runs after implementation)
+    - deploy/release/build        → Deploy subtask (runs last)
+
+    Multiple keywords → multiple subtasks with automatic dependency edges.
+    No keywords matched → single task sent to project supervisor.
+
+WORKER ASSIGNMENT:
+    - perm-backend  → assigned backend/database/test subtasks
+    - perm-frontend → assigned frontend subtasks
+    - sup-<project> → fallback for any unmatched role
+    - supervisor    → final fallback
+
+EXAMPLES:
+    tools/soren-run "Add user authentication with JWT tokens"
+    tools/soren-run "Build a health dashboard page" --project soren --dry-run
+    tools/soren-run "Add /api/reports endpoint with database schema" --priority critical
+    tools/soren-run "Fix the login button alignment" --project myapp
+EOF
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    local description=""
+    local project_id=""
+    local priority="high"
+    local max_workers=2
+    local dry_run=0
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project)
+                [[ -z "${2:-}" ]] && die "--project requires a value"
+                project_id="$2"; shift 2 ;;
+            --priority)
+                [[ -z "${2:-}" ]] && die "--priority requires a value"
+                priority="$2"; shift 2 ;;
+            --workers)
+                [[ -z "${2:-}" ]] && die "--workers requires a value"
+                max_workers="$2"; shift 2 ;;
+            --dry-run)
+                dry_run=1; shift ;;
+            -h|--help)
+                usage; exit 0 ;;
+            -*)
+                die "unknown option: $1 (try --help)" ;;
+            *)
+                if [[ -z "$description" ]]; then
+                    description="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift ;;
+        esac
+    done
+
+    [[ -z "$description" ]] && { usage; exit 1; }
+
+    # ── Step 1: Detect project ────────────────────────────────────────────────
+
+    if [[ -z "$project_id" ]]; then
+        project_id="$(detect_project_from_cwd)"
+    fi
+
+    if [[ -z "$project_id" ]]; then
+        # Last resort: use "soren" (self-project) if available
+        if project_exists "soren"; then
+            project_id="soren"
+            warn "No project detected from cwd — defaulting to 'soren'. Use --project to specify."
+        else
+            die "Could not detect project from cwd. Use --project <id> to specify.\nRegistered projects: $(jq -r '.projects[].id' "$REGISTRY" 2>/dev/null | tr '\n' ' ')"
+        fi
+    fi
+
+    project_exists "$project_id" || die "Project '$project_id' is not registered. Run: tools/soren-init <path>"
+
+    local project_path
+    project_path="$(get_project_path "$project_id")"
+    info "Project: ${project_id} (${project_path})"
+
+    # ── Step 1b: Pattern lookup ───────────────────────────────────────────────
+
+    local pattern_context=""
+    pattern_context="$(lookup_patterns "$description")"
+    if [[ -n "$pattern_context" ]]; then
+        echo -e "${DIM}Found relevant patterns from memory${NC}"
+    fi
+
+    # ── Step 2: Decompose ─────────────────────────────────────────────────────
+
+    local subtasks_raw
+    subtasks_raw="$(decompose_task "$description")"
+    local subtask_count
+    subtask_count=$(echo "$subtasks_raw" | grep -c '.' || true)
+
+    echo ""
+    echo -e "${BOLD}Task:${NC} $description"
+    echo -e "${BOLD}Project:${NC} $project_id | ${BOLD}Priority:${NC} $priority"
+    echo ""
+
+    # Build plan table
+    declare -a PLAN_TYPES PLAN_TITLES PLAN_DESCS PLAN_WORKERS PLAN_WORKER_STATUS
+
+    local i=0
+    while IFS=':' read -r stype stitle sdesc; do
+        [[ -z "$stype" ]] && continue
+        PLAN_TYPES[$i]="$stype"
+        PLAN_TITLES[$i]="$stitle"
+        PLAN_DESCS[$i]="$sdesc"
+        PLAN_WORKERS[$i]="$(find_worker "$stype" "$project_id")"
+        PLAN_WORKER_STATUS[$i]="$(worker_status "${PLAN_WORKERS[$i]}")"
+        ((i++)) || true
+    done <<< "$subtasks_raw"
+
+    local plan_size=$i
+
+    # Print plan
+    echo -e "${BOLD}Decomposition plan (${plan_size} subtask(s)):${NC}"
+    echo ""
+
+    for ((j=0; j<plan_size; j++)); do
+        local stype="${PLAN_TYPES[$j]}"
+        local stitle="${PLAN_TITLES[$j]}"
+        local worker="${PLAN_WORKERS[$j]}"
+        local wstatus="${PLAN_WORKER_STATUS[$j]}"
+
+        # Icon per type
+        local icon
+        case "$stype" in
+            database) icon="🗄" ;;
+            backend)  icon="⚙" ;;
+            frontend) icon="🖼" ;;
+            test)     icon="✔" ;;
+            deploy)   icon="🚀" ;;
+            general)  icon="◆" ;;
+            *)        icon="○" ;;
+        esac
+
+        # Worker status color
+        local wcolor="$DIM"
+        case "$wstatus" in
+            IN_PROGRESS|IDLE) wcolor="$GREEN" ;;
+            SLEEPING)         wcolor="$YELLOW" ;;
+            FAILED|BLOCKED)   wcolor="$RED" ;;
+        esac
+
+        printf "  %s  %-10s  %-36s  → ${wcolor}%s${NC} [%s]\n" \
+            "$icon" "[$stype]" "$stitle" "$worker" "$wstatus"
+    done
+
+    echo ""
+
+    # Dependency summary
+    if [[ $plan_size -gt 1 ]]; then
+        echo -e "${DIM}Dependencies:${NC}"
+        local has_db=0 has_be=0 has_fe=0 has_test=0 has_dep=0
+        for ((j=0; j<plan_size; j++)); do
+            case "${PLAN_TYPES[$j]}" in
+                database) has_db=1 ;;
+                backend)  has_be=1 ;;
+                frontend) has_fe=1 ;;
+                test)     has_test=1 ;;
+                deploy)   has_dep=1 ;;
+            esac
+        done
+        [[ $has_db -eq 1 && $has_be -eq 1 ]] && echo -e "  ${DIM}database → backend${NC}" || true
+        [[ $has_db -eq 1 && $has_fe -eq 1 ]] && echo -e "  ${DIM}database → frontend${NC}" || true
+        [[ $has_be -eq 1 && $has_test -eq 1 ]] && echo -e "  ${DIM}backend → test${NC}" || true
+        [[ $has_fe -eq 1 && $has_test -eq 1 ]] && echo -e "  ${DIM}frontend → test${NC}" || true
+        [[ $has_test -eq 1 && $has_dep -eq 1 ]] && echo -e "  ${DIM}test → deploy${NC}" || true
+        [[ $has_test -eq 0 && $has_be -eq 1 && $has_dep -eq 1 ]] && echo -e "  ${DIM}backend → deploy${NC}" || true
+        [[ $has_test -eq 0 && $has_fe -eq 1 && $has_dep -eq 1 ]] && echo -e "  ${DIM}frontend → deploy${NC}" || true
+        echo ""
+    fi
+
+    if [[ $dry_run -eq 1 ]]; then
+        if [[ -n "$pattern_context" ]]; then
+            echo -e "${BOLD}Patterns that will be injected:${NC}"
+            echo "$pattern_context" | sed 's/^/  /'
+            echo ""
+        fi
+        echo -e "${BOLD}DRY RUN — no tasks created, no messages sent${NC}"
+        echo ""
+        exit 0
+    fi
+
+    # ── Step 3: Create tasks ──────────────────────────────────────────────────
+
+    echo -e "${BOLD}Creating tasks...${NC}"
+
+    # Create parent task
+    local parent_id
+    parent_id=$(create_task "$description" \
+        --project "$project_id" \
+        --priority "$priority" \
+        --source "user" \
+        --desc "Parent task — decomposed into ${plan_size} subtask(s) by soren-run")
+
+    ok "Parent: $parent_id"
+
+    # Create subtasks and collect IDs
+    declare -a TASK_IDS
+    declare -a TYPE_IDS  # "type:task_id" pairs for dependency wiring
+
+    for ((j=0; j<plan_size; j++)); do
+        local stype="${PLAN_TYPES[$j]}"
+        local stitle="${PLAN_TITLES[$j]}"
+        local sdesc="${PLAN_DESCS[$j]}"
+        local worker="${PLAN_WORKERS[$j]}"
+
+        # Build subtask title: prefix with parent description context
+        local full_title="${description} — ${stitle}"
+
+        local task_id
+        task_id=$(create_task "$full_title" \
+            --project "$project_id" \
+            --priority "$priority" \
+            --source "user" \
+            --parent "$parent_id" \
+            --assign "$worker" \
+            --desc "$sdesc")
+
+        TASK_IDS[$j]="$task_id"
+        TYPE_IDS[$j]="${stype}:${task_id}"
+        ok "  Subtask [$stype]: $task_id → $worker"
+    done
+
+    # ── Step 4: Wire dependencies ─────────────────────────────────────────────
+
+    if [[ $plan_size -gt 1 ]]; then
+        wire_dependencies "${TYPE_IDS[@]}"
+        ok "Dependency edges set"
+    fi
+
+    # ── Step 5: Send to workers ───────────────────────────────────────────────
+
+    echo ""
+    echo -e "${BOLD}Dispatching to workers...${NC}"
+
+    declare -A SENT_WORKERS  # track which workers we've already messaged
+
+    for ((j=0; j<plan_size; j++)); do
+        local task_id="${TASK_IDS[$j]}"
+        local stype="${PLAN_TYPES[$j]}"
+        local worker="${PLAN_WORKERS[$j]}"
+        local wstatus="${PLAN_WORKER_STATUS[$j]}"
+
+        # Skip deployer/test tasks that have unmet deps — they'll be triggered
+        # by the assigned worker when ready. Only send ready tasks now.
+        if [[ "$stype" == "deploy" || "$stype" == "test" ]] && [[ $plan_size -gt 2 ]]; then
+            echo -e "  ${DIM}⏸  $task_id [$stype] — deferred (has dependencies)${NC}"
+            continue
+        fi
+
+        # Don't send the same message to the same worker twice in one run
+        if [[ -n "${SENT_WORKERS[$worker]+_}" ]]; then
+            echo -e "  ${DIM}⏭  $task_id [$stype] → $worker (already messaged this worker)${NC}"
+            continue
+        fi
+
+        local message
+        if [[ -n "$pattern_context" ]]; then
+            message="${pattern_context}
+
+**Your task:**
+[TASK] Task ${task_id}: ${description}
+
+Subtask: ${PLAN_TITLES[$j]}
+Project: ${project_id} (${project_path})
+Priority: ${priority}
+
+${PLAN_DESCS[$j]}
+
+Please work on this task. When complete, run: tools/tasks done ${task_id}"
+        else
+            message="[TASK] Task ${task_id}: ${description}
+
+Subtask: ${PLAN_TITLES[$j]}
+Project: ${project_id} (${project_path})
+Priority: ${priority}
+
+${PLAN_DESCS[$j]}
+
+Please work on this task. When complete, run: tools/tasks done ${task_id}"
+        fi
+
+        # Check if worker window is alive (or sleeping — send will auto-wake)
+        if window_exists "$worker" || [[ "$wstatus" == "SLEEPING" ]]; then
+            if "${SOREN_HOME}/tools/workers" send "$worker" "$message" 2>/dev/null; then
+                ok "  Sent to $worker: $task_id"
+                SENT_WORKERS[$worker]=1
+            else
+                warn "  Could not send to $worker (not running) — task $task_id created and assigned"
+            fi
+        else
+            warn "  Worker '$worker' not running — task $task_id created and assigned (spawn worker to execute)"
+        fi
+    done
+
+    # ── Step 6: Summary ───────────────────────────────────────────────────────
+
+    echo ""
+    echo -e "${BOLD}════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}  Task dispatched${NC}"
+    echo -e "${BOLD}════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "  Parent task:  $parent_id"
+    echo "  Subtasks:     ${plan_size}"
+    echo "  Project:      $project_id"
+    echo ""
+    echo -e "${BOLD}Track progress:${NC}"
+    echo "  tools/tasks tree --project $project_id"
+    echo "  tools/tasks show $parent_id"
+    echo "  tools/tasks order --project $project_id"
+    echo ""
+}
+
+main "$@"

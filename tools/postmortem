@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+#===============================================================================
+# postmortem - Generate a post-mortem PDF report for a reverted/failed commit
+#
+# Usage:
+#   postmortem <commit-hash>                    - Generate PDF report
+#   postmortem <commit-hash> -o /path/to/out.pdf - Custom output path
+#   postmortem help                             - Show help
+#
+# Generates a PDF with:
+#   - Commit metadata (author, date, subject, diff)
+#   - Revert commit detection
+#   - Agent activity trace from events API
+#   - Chronological timeline
+#   - Root cause analysis template
+#
+# Output: .soren/journal/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SOREN_PORT="${SOREN_PORT:-8000}"
+SCRIPT="${SOREN_HOME}/src/server/scripts/generate_postmortem.py"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}done:${NC} $1"; }
+
+cmd_help() {
+    cat << 'EOF'
+postmortem - Generate post-mortem PDF for reverted/failed commits
+
+USAGE:
+    postmortem <commit-hash>                    Generate PDF report
+    postmortem <commit-hash> -o /path/out.pdf   Custom output path
+    postmortem help                             Show this help
+
+EXAMPLES:
+    # Generate report for a specific commit
+    postmortem abc1234
+
+    # Custom output location
+    postmortem abc1234 -o /tmp/report.pdf
+
+OUTPUT:
+    Default: .soren/journal/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
+
+ENVIRONMENT:
+    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+    SOREN_PORT    API port for agent events query (default: 8000)
+EOF
+}
+
+cmd_generate() {
+    local commit="${1:-}"
+    shift || true
+
+    [[ -z "$commit" ]] && die "usage: postmortem <commit-hash>"
+    [[ ! -f "$SCRIPT" ]] && die "script not found: $SCRIPT"
+
+    # Pass remaining args (-o, etc.) through to the Python script
+    cd "$SOREN_HOME"
+    uv run python "$SCRIPT" "$commit" --port "$SOREN_PORT" "$@"
+}
+
+main() {
+    local cmd="${1:-help}"
+
+    case "$cmd" in
+        help|--help|-h)
+            cmd_help
+            ;;
+        *)
+            cmd_generate "$@"
+            ;;
+    esac
+}
+
+main "$@"

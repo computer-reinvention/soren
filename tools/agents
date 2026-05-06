@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# agents - List and lookup agents in the SOREN registry
+#
+# Usage:
+#   agents list                    - Show all registered agents
+#   agents lookup <id-or-name>     - Show details for one agent
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+REGISTRY="${SOREN_HOME}/.soren/agent_registry.json"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+
+ensure_registry() {
+    [[ -f "$REGISTRY" ]] || die "agent registry not found: $REGISTRY"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Commands
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    ensure_registry
+
+    local count
+    count=$(jq 'length' "$REGISTRY")
+
+    if [[ "$count" -eq 0 ]]; then
+        echo -e "${DIM}No agents registered${NC}"
+        return
+    fi
+
+    printf "${BOLD}%-14s %-20s %-20s %s${NC}\n" "AGENT_ID" "NAME" "ROLE" "PROJECT"
+    printf "%-14s %-20s %-20s %s\n" "──────────────" "────────────────────" "────────────────────" "────────────────"
+
+    jq -r 'to_entries[] | [
+        (.value.agent_id // "n/a"),
+        .key,
+        (.value.role // .value.type // "unknown"),
+        (.value.project_id // "n/a")
+    ] | @tsv' "$REGISTRY" | \
+    while IFS=$'\t' read -r agent_id name role project; do
+        printf "%-14s %-20s %-20s %s\n" "$agent_id" "$name" "$role" "$project"
+    done
+
+    echo ""
+    echo "Total: $count agent(s)"
+}
+
+cmd_lookup() {
+    local query="${1:-}"
+    [[ -z "$query" ]] && die "usage: agents lookup <id-or-name>"
+
+    ensure_registry
+
+    # Try lookup by key (name) first, then by agent_id
+    local data
+    data=$(jq --arg q "$query" '
+        (to_entries[] | select(.key == $q) | .value + {name: .key}) //
+        (to_entries[] | select(.value.agent_id == $q) | .value + {name: .key}) //
+        empty
+    ' "$REGISTRY" 2>/dev/null) || true
+
+    if [[ -z "$data" ]]; then
+        die "agent '$query' not found (searched by name and ID)"
+    fi
+
+    echo -e "${BOLD}Agent: $(echo "$data" | jq -r '.name')${NC}"
+    echo ""
+    echo "  Agent ID:    $(echo "$data" | jq -r '.agent_id // "n/a"')"
+    echo "  Display:     $(echo "$data" | jq -r '.display_name // .name')"
+    echo "  Role:        $(echo "$data" | jq -r '.role // .type // "unknown"')"
+    echo "  Project:     $(echo "$data" | jq -r '.project_id // "n/a"')"
+    echo "  Created by:  $(echo "$data" | jq -r '.created_by // "unknown"')"
+    echo "  Created at:  $(echo "$data" | jq -r '.created_at // .registered_at // "unknown"')"
+}
+
+cmd_help() {
+    cat << 'EOF'
+agents - List and lookup agents in the SOREN registry
+
+USAGE:
+    agents <command> [arguments]
+
+COMMANDS:
+    list                    List all registered agents
+    lookup <id-or-name>     Show details for a specific agent (by ID or name)
+    help                    Show this help message
+
+EXAMPLES:
+    agents list
+    agents lookup supervisor
+    agents lookup ag_0000prim
+
+ENVIRONMENT:
+    SOREN_HOME    SOREN installation root (default: git root or pwd)
+EOF
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+main() {
+    local cmd="${1:-list}"
+    shift || true
+
+    case "$cmd" in
+        list)           cmd_list "$@" ;;
+        lookup)         cmd_lookup "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)              die "unknown command: $cmd (try 'agents help')" ;;
+    esac
+}
+
+main "$@"

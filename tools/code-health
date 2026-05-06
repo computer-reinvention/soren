@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+#===============================================================================
+# code-health - Scan SOREN codebase for common code quality issues
+#
+# Usage:
+#   code-health           # Full report
+#   code-health --json    # JSON summary (for system-verify integration)
+#
+# Checks:
+#   1. Unused Python imports in src/server/**/*.py
+#   2. Dead API routes (defined in backend but unused in frontend api.ts)
+#   3. Code smells (hardcoded addresses, bare excepts, long functions, dup literals)
+#   4. Orphaned worker context files (no matching agent in registry)
+#   5. TODO/FIXME/HACK comment inventory
+#
+# Scope: SOREN codebase only (src/server, src/frontend, tools, .soren)
+# Target: runs in <5 seconds
+#===============================================================================
+
+set -uo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SERVER_DIR="${SOREN_HOME}/src/server"
+API_TS="${SOREN_HOME}/src/frontend/src/lib/api.ts"
+CONTEXTS_DIR="${SOREN_HOME}/.soren/worker-contexts"
+REGISTRY="${SOREN_HOME}/.soren/agent_registry.json"
+
+MODE="full"
+[[ "${1:-}" == "--json" ]] && MODE="json"
+
+# Colors (disabled for --json or non-terminal)
+if [[ -t 1 ]] && [[ "$MODE" != "json" ]]; then
+    RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m'
+    BOLD='\033[1m' DIM='\033[2m' NC='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BOLD='' DIM='' NC=''
+fi
+
+issues=0
+section() { [[ "$MODE" == "full" ]] && echo -e "\n${BOLD}$1${NC}"; }
+warn() { [[ "$MODE" == "full" ]] && echo -e "  ${YELLOW}!${NC} $1"; ((issues++)); }
+ok() { [[ "$MODE" == "full" ]] && echo -e "  ${GREEN}✓${NC} $1"; }
+info() { [[ "$MODE" == "full" ]] && echo -e "  ${DIM}-${NC} $1"; }
+
+# Accumulators for JSON
+unused_imports_count=0
+unused_imports_files=""
+dead_routes_count=0
+dead_routes_list=""
+orphaned_contexts_count=0
+orphaned_contexts_list=""
+todo_count=0
+fixme_count=0
+hack_count=0
+hardcoded_localhost_count=0
+hardcoded_localhost_list=""
+bare_except_count=0
+bare_except_list=""
+long_function_count=0
+long_function_list=""
+dup_literal_count=0
+dup_literal_list=""
+
+#───────────────────────────────────────────────────────────────────────────────
+# 1. UNUSED PYTHON IMPORTS
+#───────────────────────────────────────────────────────────────────────────────
+section "Unused Imports (src/server/)"
+
+check_unused_imports() {
+    local file="$1"
+    local basename
+    basename=$(basename "$file")
+    local rel_path="${file#$SOREN_HOME/}"
+
+    # Skip __init__.py (often has re-exports)
+    [[ "$basename" == "__init__.py" ]] && return
+
+    # Extract import names from the file
+    # Handles: import X, from X import Y, from X import Y, Z
+    # Skip lines that are comments
+    local found_unused=false
+
+    while IFS= read -r line; do
+        # Skip comments and empty lines
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// /}" ]] && continue
+
+        # Extract imported names
+        local names=""
+        if [[ "$line" =~ ^[[:space:]]*from[[:space:]]+.*[[:space:]]+import[[:space:]]+(.*) ]]; then
+            names="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^[[:space:]]*import[[:space:]]+(.*) ]]; then
+            names="${BASH_REMATCH[1]}"
+        else
+            continue
+        fi
+
+        # Clean up: remove 'as X' aliases, parentheses, type-checking guards
+        # For 'as X', the used name is X not the original
+        # Split on commas, process each
+        names=$(echo "$names" | sed 's/[()]//g' | tr ',' '\n')
+
+        while IFS= read -r name; do
+            name=$(echo "$name" | xargs)  # trim whitespace
+            [[ -z "$name" ]] && continue
+
+            # Handle 'X as Y' — the used name is Y
+            if [[ "$name" == *" as "* ]]; then
+                name="${name##* as }"
+                name=$(echo "$name" | xargs)
+            fi
+
+            # Skip star imports
+            [[ "$name" == "*" ]] && continue
+            # Skip private imports starting with _
+            [[ "$name" == _* ]] && continue
+
+            # Count occurrences of this name in the file (excluding import lines)
+            local count
+            count=$(grep -c "\b${name}\b" "$file" 2>/dev/null || echo "0")
+
+            # If name appears only once (the import itself), it's unused
+            if (( count <= 1 )); then
+                if ! $found_unused; then
+                    warn "${rel_path}:"
+                    found_unused=true
+                fi
+                info "  unused: ${name}"
+                ((unused_imports_count++))
+            fi
+        done <<< "$names"
+    done < <(grep -E '^\s*(from|import)\s' "$file" 2>/dev/null)
+
+    if $found_unused; then
+        unused_imports_files="${unused_imports_files}${rel_path},"
+    fi
+}
+
+py_files=$(find "${SERVER_DIR}" -name '*.py' -not -path '*__pycache__*' 2>/dev/null)
+while IFS= read -r f; do
+    [[ -f "$f" ]] && check_unused_imports "$f"
+done <<< "$py_files"
+
+if (( unused_imports_count == 0 )); then
+    ok "no unused imports found"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 2. DEAD API ROUTES
+#───────────────────────────────────────────────────────────────────────────────
+section "Dead API Routes"
+
+if [[ -f "$API_TS" ]]; then
+    # Extract API route paths from api.ts (e.g. /api/agents, /api/journal/dates)
+    api_ts_content=$(cat "$API_TS")
+
+    # Known backend-only routes (called by hooks/tools/router, not frontend)
+    backend_only="/api/webhooks /api/heartbeat /api/prefs"
+
+    # Extract route prefixes from main.py
+    while IFS= read -r line; do
+        prefix=$(echo "$line" | grep -oE 'prefix="[^"]+"' | sed 's/prefix="//;s/"//')
+        [[ -z "$prefix" ]] && continue
+
+        # Skip known backend-only routes
+        if echo "$backend_only" | grep -qw "$prefix"; then
+            continue
+        fi
+
+        # Check if this prefix appears anywhere in api.ts
+        route_path="${prefix#/api/}"
+
+        if ! echo "$api_ts_content" | grep -q "/api/${route_path}" 2>/dev/null; then
+            warn "route prefix ${prefix} — not referenced in api.ts"
+            dead_routes_list="${dead_routes_list}${prefix},"
+            ((dead_routes_count++))
+        fi
+    done < <(grep 'prefix="/api/' "${SOREN_HOME}/src/server/main.py" 2>/dev/null)
+
+    if (( dead_routes_count == 0 )); then
+        ok "all route prefixes referenced in frontend"
+    fi
+else
+    info "api.ts not found — skipping dead route check"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 3. CODE SMELLS
+#───────────────────────────────────────────────────────────────────────────────
+section "Code Smells (src/server/)"
+
+# 3a. Hardcoded localhost/port references (skip config.py and tests)
+while IFS= read -r match; do
+    [[ -z "$match" ]] && continue
+    rel="${match#$SOREN_HOME/}"
+    warn "hardcoded address: ${rel}"
+    hardcoded_localhost_list="${hardcoded_localhost_list}${rel%%:*},"
+    ((hardcoded_localhost_count++))
+done < <(grep -rn -E '(localhost|127\.0\.0\.1|0\.0\.0\.0)' "$SERVER_DIR" \
+    --include='*.py' --exclude-dir='__pycache__' 2>/dev/null \
+    | grep -v '/config\.py:' | grep -v '/test_')
+
+if (( hardcoded_localhost_count == 0 )); then
+    ok "no hardcoded localhost/address references"
+fi
+
+# 3b. Bare except clauses (except: or except Exception: with just pass)
+while IFS= read -r pyfile; do
+    [[ -f "$pyfile" ]] || continue
+    rel="${pyfile#$SOREN_HOME/}"
+    while IFS= read -r finding; do
+        [[ -z "$finding" ]] && continue
+        warn "bare except: ${rel}:${finding}"
+        bare_except_list="${bare_except_list}${rel},"
+        ((bare_except_count++))
+    done < <(awk '
+        {
+            if (prev_except) {
+                if ($0 ~ /^[[:space:]]*pass[[:space:]]*$/) {
+                    print prev_num " " prev_text
+                }
+                prev_except = 0
+            }
+            if ($0 ~ /^[[:space:]]*except[[:space:]]*:/) {
+                prev_except = 1; prev_num = NR; prev_text = "except: pass"
+            } else if ($0 ~ /^[[:space:]]*except[[:space:]]+Exception[^a-zA-Z]/) {
+                prev_except = 1; prev_num = NR; prev_text = "except Exception: pass"
+            }
+        }
+    ' "$pyfile" 2>/dev/null)
+done < <(find "$SERVER_DIR" -name '*.py' -not -path '*__pycache__*' 2>/dev/null)
+
+if (( bare_except_count == 0 )); then
+    ok "no bare except clauses"
+fi
+
+# 3c. Functions longer than 50 lines
+while IFS= read -r pyfile; do
+    [[ -f "$pyfile" ]] || continue
+    rel="${pyfile#$SOREN_HOME/}"
+    while IFS= read -r finding; do
+        [[ -z "$finding" ]] && continue
+        warn "long function: ${rel}:${finding}"
+        long_function_list="${long_function_list}${rel},"
+        ((long_function_count++))
+    done < <(awk '
+        /^[[:space:]]*def [a-zA-Z_]/ || /^[[:space:]]*async[[:space:]]+def [a-zA-Z_]/ {
+            match($0, /^[[:space:]]*/);
+            new_indent = RLENGTH;
+            if (func_name != "" && new_indent <= func_indent) {
+                lines = NR - func_start
+                if (lines > 50) {
+                    print func_start " " func_name " (" lines " lines)"
+                }
+            }
+            func_indent = new_indent
+            func_start = NR
+            name = $0
+            sub(/^[[:space:]]*async[[:space:]]+def /, "", name)
+            sub(/^[[:space:]]*def /, "", name)
+            sub(/\(.*/, "", name)
+            func_name = name
+        }
+        END {
+            if (func_name != "") {
+                lines = NR - func_start
+                if (lines > 50) {
+                    print func_start " " func_name " (" lines " lines)"
+                }
+            }
+        }
+    ' "$pyfile" 2>/dev/null)
+done < <(find "$SERVER_DIR" -name '*.py' -not -path '*__pycache__*' 2>/dev/null)
+
+if (( long_function_count == 0 )); then
+    ok "no functions over 50 lines"
+fi
+
+# 3d. Duplicate string literals (3+ occurrences, min 6 chars content)
+if [[ -d "$SERVER_DIR" ]]; then
+    while IFS= read -r dup_line; do
+        [[ -z "$dup_line" ]] && continue
+        count=$(echo "$dup_line" | awk '{print $1}')
+        str=$(echo "$dup_line" | sed 's/^[[:space:]]*[0-9]*[[:space:]]*//')
+        (( count < 3 )) && break  # sorted descending, safe to stop
+
+        # Skip simple identifier-like strings (dict keys, field names)
+        # e.g. "agent_id", "status", "worker" — not real constant candidates
+        if echo "$str" | grep -qE '^"[a-z][a-z0-9_]*"$'; then
+            continue
+        fi
+
+        # Skip common framework/mime/encoding strings
+        case "$str" in
+            '"application/'*|'"text/'*|'"image/'*|'"audio/'*|'"video/'*) continue ;;
+            '"utf-8"'|'"utf8"'|'"ascii"'|'"latin-1"') continue ;;
+        esac
+
+        warn "duplicate literal (${count}x): ${str}"
+        dup_literal_list="${dup_literal_list}${str},"
+        ((dup_literal_count++))
+    done < <(grep -rohE '"[^"]+"' "$SERVER_DIR" --include='*.py' \
+        --exclude-dir='__pycache__' 2>/dev/null \
+        | awk 'length >= 8' | sort | uniq -c | sort -rn)
+
+    if (( dup_literal_count == 0 )); then
+        ok "no duplicate string literals (3+ uses)"
+    fi
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 4. ORPHANED CONTEXT FILES
+#───────────────────────────────────────────────────────────────────────────────
+section "Orphaned Context Files"
+
+if [[ -f "$REGISTRY" ]] && [[ -d "$CONTEXTS_DIR" ]]; then
+    registry_keys=$(jq -r 'keys[]' "$REGISTRY" 2>/dev/null)
+
+    seen_agents=""
+    for ctx_file in "$CONTEXTS_DIR"/*.md; do
+        [[ -f "$ctx_file" ]] || continue
+
+        # Extract agent name from filename
+        fname=$(basename "$ctx_file" .md)
+        fname="${fname%-clone-role}"
+        fname="${fname%-context}"
+        fname="${fname%-role}"
+
+        # Dedup
+        if echo "$seen_agents" | grep -qx "$fname"; then
+            continue
+        fi
+        seen_agents="${seen_agents}${fname}
+"
+
+        # Check if agent exists in registry (exact key match or as a window name)
+        if ! echo "$registry_keys" | grep -qx "$fname"; then
+            # Also check session:name format
+            if ! echo "$registry_keys" | grep -q ":${fname}$"; then
+                # Skip template files
+                [[ "$fname" == *"template"* ]] && continue
+                warn "orphaned: ${fname} (context exists, not in registry)"
+                orphaned_contexts_list="${orphaned_contexts_list}${fname},"
+                ((orphaned_contexts_count++))
+            fi
+        fi
+    done
+
+    if (( orphaned_contexts_count == 0 )); then
+        ok "all context files have registry entries"
+    fi
+else
+    info "registry or contexts dir missing — skipping"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# 5. TODO/FIXME/HACK COMMENTS
+#───────────────────────────────────────────────────────────────────────────────
+section "Code Comments (TODO/FIXME/HACK)"
+
+# Scan only SOREN source, not node_modules or .soren data
+scan_dirs=(
+    "${SOREN_HOME}/src/server"
+    "${SOREN_HOME}/src/frontend/src"
+    "${SOREN_HOME}/src/orchestrator"
+    "${SOREN_HOME}/tools"
+)
+
+for tag in TODO FIXME HACK; do
+    count=0
+    locations=""
+    for dir in "${scan_dirs[@]}"; do
+        [[ -d "$dir" ]] || continue
+        while IFS= read -r match; do
+            [[ -z "$match" ]] && continue
+            ((count++))
+            if (( count <= 5 )); then
+                rel="${match#$SOREN_HOME/}"
+                locations="${locations}    ${rel}\n"
+            fi
+        done < <(grep -rn "\b${tag}\b" "$dir" \
+            --include='*.py' --include='*.ts' --include='*.tsx' \
+            --include='*.sh' --include='*.js' \
+            2>/dev/null)
+    done
+
+    case "$tag" in
+        TODO)  todo_count=$count ;;
+        FIXME) fixme_count=$count ;;
+        HACK)  hack_count=$count ;;
+    esac
+
+    if (( count > 0 )); then
+        info "${tag}: ${count} occurrence(s)"
+        if [[ -n "$locations" ]] && [[ "$MODE" == "full" ]]; then
+            printf "$locations"
+            if (( count > 5 )); then
+                echo -e "    ${DIM}... and $((count - 5)) more${NC}"
+            fi
+        fi
+    fi
+done
+
+comment_total=$((todo_count + fixme_count + hack_count))
+if (( comment_total == 0 )); then
+    ok "no TODO/FIXME/HACK comments"
+else
+    info "total: ${comment_total} comment markers"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# Summary
+#───────────────────────────────────────────────────────────────────────────────
+
+# Trim trailing commas
+unused_imports_files="${unused_imports_files%,}"
+dead_routes_list="${dead_routes_list%,}"
+hardcoded_localhost_list="${hardcoded_localhost_list%,}"
+bare_except_list="${bare_except_list%,}"
+long_function_list="${long_function_list%,}"
+dup_literal_list="${dup_literal_list%,}"
+orphaned_contexts_list="${orphaned_contexts_list%,}"
+
+case "$MODE" in
+    json)
+        cat <<EOF
+{"unused_imports":$unused_imports_count,"dead_routes":$dead_routes_count,"hardcoded_localhost":$hardcoded_localhost_count,"bare_excepts":$bare_except_count,"long_functions":$long_function_count,"dup_literals":$dup_literal_count,"orphaned_contexts":$orphaned_contexts_count,"todo":$todo_count,"fixme":$fixme_count,"hack":$hack_count,"issues":$issues,"unused_import_files":"$unused_imports_files","dead_route_list":"$dead_routes_list","orphaned_context_list":"$orphaned_contexts_list"}
+EOF
+        ;;
+    full)
+        echo ""
+        if (( issues == 0 )); then
+            echo -e "${GREEN}${BOLD}Code health: clean${NC}"
+        else
+            echo -e "${YELLOW}${BOLD}Code health: ${issues} issue(s) found${NC}"
+        fi
+        ;;
+esac
+
+if (( issues > 0 )); then
+    exit 1
+fi
+exit 0
