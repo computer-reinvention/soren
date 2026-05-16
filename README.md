@@ -6,6 +6,8 @@ Soren is not a single agent with tools. It's a swarm: a supervisor delegates to 
 
 This repository is a **public template**. Clone it (or use GitHub's "Use this template" button) to spin up your own hub. The code is public; the runtime data your hub generates (mailbox, journal, tasks, secrets) stays local and private to you.
 
+The template is a cleaned version of the original Soren repository which is in personal use. Since all memories and journals of this agent are extremely personal, it is recommended that soren be installed in a private repository.
+
 ## Quick start
 
 ```bash
@@ -28,15 +30,15 @@ See [docs/QUICKSTART.md](./docs/QUICKSTART.md) for the full walkthrough.
 
 ## What's inside
 
-| Document | Description |
-|----------|-------------|
-| **[Quick Start](./docs/QUICKSTART.md)** | Get running in a few minutes |
-| **[User Guide](./docs/USER_GUIDE.md)** | Complete guide to using Soren |
-| **[Concepts](./docs/CONCEPTS.md)** | Deep dive into how Soren works |
-| **[Supervisor Role](./docs/SUPERVISOR_ROLE.md)** | What the supervisor does and how |
-| **[Worker Role](./docs/WORKER_ROLE.md)** | How workers operate |
-| **[Permanent Worker Guide](./docs/PERMANENT_WORKER_GUIDE.md)** | Long-lived workers with domain expertise |
-| **[Team Templates](./docs/TEAM.md)** | Pre-built team structures for common patterns |
+| Document                                                       | Description                                   |
+| -------------------------------------------------------------- | --------------------------------------------- |
+| **[Quick Start](./docs/QUICKSTART.md)**                        | Get running in a few minutes                  |
+| **[User Guide](./docs/USER_GUIDE.md)**                         | Complete guide to using Soren                 |
+| **[Concepts](./docs/CONCEPTS.md)**                             | Deep dive into how Soren works                |
+| **[Supervisor Role](./docs/SUPERVISOR_ROLE.md)**               | What the supervisor does and how              |
+| **[Worker Role](./docs/WORKER_ROLE.md)**                       | How workers operate                           |
+| **[Permanent Worker Guide](./docs/PERMANENT_WORKER_GUIDE.md)** | Long-lived workers with domain expertise      |
+| **[Team Templates](./docs/TEAM.md)**                           | Pre-built team structures for common patterns |
 
 ## Features
 
