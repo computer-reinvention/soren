@@ -314,7 +314,7 @@ cmd_spawn() {
     # Add permanent worker fields if --permanent was specified
     if [[ -n "${permanent_role_ctx}" ]]; then
         soren_registry_update "$reg_file" --arg k "$name" --arg rctx "$permanent_role_ctx" \
-            '.[$k].permanent = true | .[$k].role = "permanent-worker" | .[$k].role_context = $rctx | .[$k].tasks_since_reset = 0 | .[$k].reset_count = 0'
+            '.[$k].permanent = true | .[$k].role = "permanent-worker" | .[$k].role_context = $rctx | .[$k].tasks_since_reset = 0 | .[$k].reset_count = 0 | .[$k].keep_awake = true'
 
         # Extract given name from role file and set display_name
         # Role files have: # Permanent Role: <Name> — <Specialty>

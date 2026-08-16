@@ -5,6 +5,8 @@
 # Actions:
 #   1. Kill workers with no activity for 30+ min (context file mtime)
 #   2. Remove worker context files for windows that no longer exist
+#   3. Proactively reset IDLE permanent workers after SOREN_RESET_TASKS
+#      completed tasks or SOREN_RESET_HOURS since last reset
 #
 # Safety:
 #   - NEVER touches supervisor, project-supervisor (sup-*), sentry, or monitor
@@ -113,12 +115,84 @@ cleanup_orphaned_contexts() {
 }
 
 #───────────────────────────────────────────────────────────────────────────────
+# 3. Proactive reset of permanent workers (context hygiene)
+#
+# Policy (docs/TEAM.md): reset a permanent worker after N completed tasks or
+# H hours since its last reset — whichever comes first. Only fires when the
+# worker is IDLE (never mid-task) and its window exists (never while sleeping).
+#
+# Tunables: SOREN_RESET_TASKS (default 5, 0 disables)
+#           SOREN_RESET_HOURS (default 3, 0 disables)
+#───────────────────────────────────────────────────────────────────────────────
+
+SOREN_RESET_TASKS=${SOREN_RESET_TASKS:-5}
+SOREN_RESET_HOURS=${SOREN_RESET_HOURS:-3}
+
+reset_stale_permanents() {
+    [[ "$SOREN_RESET_TASKS" == "0" && "$SOREN_RESET_HOURS" == "0" ]] && return 0
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || return 0
+
+    local workers_tool="${SOREN_PROJECT_ROOT}/tools/workers"
+    [[ -x "$workers_tool" ]] || return 0
+
+    local windows
+    windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
+
+    local name
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+
+        # Window must exist (skip sleeping/dead workers) and worker must be IDLE
+        echo "$windows" | grep -qxF "$name" || continue
+        local status
+        status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
+        [[ "$status" == "IDLE" ]] || continue
+
+        local tasks anchor_ts
+        tasks=$(jq -r --arg k "$name" '.[$k].tasks_since_reset // 0' "$reg_file" 2>/dev/null)
+        anchor_ts=$(jq -r --arg k "$name" '.[$k].last_reset_at // .[$k].spawned_at // .[$k].created_at // ""' "$reg_file" 2>/dev/null)
+
+        local reason=""
+        if [[ "$SOREN_RESET_TASKS" != "0" ]] && (( tasks >= SOREN_RESET_TASKS )); then
+            reason="${tasks} tasks since last reset (threshold ${SOREN_RESET_TASKS})"
+        elif [[ "$SOREN_RESET_HOURS" != "0" && -n "$anchor_ts" ]]; then
+            local age_hours
+            age_hours=$(python3 - "$anchor_ts" <<'PYEOF' 2>/dev/null || echo ""
+import sys
+from datetime import datetime, timezone
+try:
+    ts = sys.argv[1].replace("Z", "+00:00")
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int((datetime.now(timezone.utc) - dt).total_seconds() // 3600))
+except Exception:
+    pass
+PYEOF
+)
+            if [[ -n "$age_hours" ]] && (( age_hours >= SOREN_RESET_HOURS )); then
+                reason="${age_hours}h since last reset (threshold ${SOREN_RESET_HOURS}h)"
+            fi
+        fi
+
+        [[ -z "$reason" ]] && continue
+
+        echo "[MAINTENANCE] Resetting permanent worker '${name}': ${reason}"
+        "$workers_tool" reset "$name" || \
+            echo "[MAINTENANCE] Reset of '${name}' failed (will retry next cycle)" >&2
+    done < <(jq -r 'to_entries[] | select(.value.permanent == true) | .key' "$reg_file" 2>/dev/null)
+}
+
+#───────────────────────────────────────────────────────────────────────────────
 # Main
 #───────────────────────────────────────────────────────────────────────────────
 
 main() {
     kill_idle_workers
     cleanup_orphaned_contexts
+    reset_stale_permanents
 }
 
 main
