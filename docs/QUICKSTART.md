@@ -7,12 +7,19 @@ Get SOREN running in 5 minutes.
 ```bash
 # Required
 python --version   # 3.11+
-node --version     # 18+
+node --version     # 18+ (npm included)
 tmux -V            # any recent version
 git --version      # any recent version
+curl --version     # any recent version
+jq --version       # JSON processing (mailbox + shell tools)
+sqlite3 --version  # task database CLI
+bun --version      # required to run the .opencode plugin (soren-bridge)
 
 # Install uv if you don't have it
 curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install opencode if you don't have it
+curl -fsSL https://opencode.ai/install | bash   # or: brew install sst/tap/opencode
 ```
 
 ## Install
@@ -21,7 +28,19 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/yourusername/soren.git
 cd soren
 uv sync
+# For running tests, include dev dependencies:
+uv sync --extra dev
 cd src/frontend && npm install && npm run build && cd ../..
+```
+
+## Authenticate (before first start)
+
+Agents need model-provider credentials:
+
+```bash
+opencode auth login          # interactive login
+# or
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
 ## Run
@@ -35,6 +54,8 @@ cd src/frontend && npm install && npm run build && cd ../..
 - **Dashboard**: http://localhost:8000
 - **tmux session**: `tmux attach -t soren`
 - **Health check**: `curl http://localhost:8000/api/webhooks/health`
+
+The server binds `127.0.0.1` by default. For remote access, set `SOREN_HOST=0.0.0.0` in `.env` (or use Tailscale/another private network).
 
 ## Send Your First Task
 

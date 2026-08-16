@@ -10,12 +10,17 @@ The template is a cleaned version of the original Soren repository which is in p
 
 ## Quick start
 
+Prerequisites: tmux, git, curl, jq, sqlite3, uv, node/npm, [opencode](https://opencode.ai) (`curl -fsSL https://opencode.ai/install | bash` or brew), and bun (required to run the `.opencode` plugin).
+
 ```bash
 git clone <this-repo> my-soren
 cd my-soren
 
+# Authenticate the agent runtime BEFORE first start
+opencode auth login           # or: export ANTHROPIC_API_KEY=sk-ant-...
+
 # Backend
-uv sync                       # install Python deps
+uv sync                       # install Python deps (uv sync --extra dev for tests)
 cp .env.example .env          # create local env file
 
 # Frontend
@@ -109,7 +114,7 @@ The top-level agent. It reads user messages from the mailbox (delivered via the 
 
 ### Permanent workers
 
-Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and stay alive, accumulating context. When idle, they wait for the next task.
+Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and accumulate context across tasks. Idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message — "permanent" means they survive across tasks and context resets, not that they are always resident.
 
 ### Temporary workers
 
@@ -150,7 +155,14 @@ To make your runtime data durable across machines, create a **private** GitHub r
 
 Copy `.env.example` to `.env` and adjust as needed. Key settings:
 
-- `SOREN_HOST` / `SOREN_PORT` — server bind (default `0.0.0.0:8000`)
+**Python server** (pydantic settings, `SOREN_` prefix — see `src/server/config.py`):
+
+- `SOREN_HOST` / `SOREN_PORT` — server bind (default `127.0.0.1:8000`; set `SOREN_HOST=0.0.0.0` for remote access, or use Tailscale)
+- `SOREN_TMUX_SESSION` — tmux session name (default `soren`)
+- `SOREN_MAILBOX_PATH` — mailbox path (default `.soren/mailbox`)
+
+**Shell tools** (read separately from the server):
+
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — mailbox path (default `.soren/mailbox`)
 

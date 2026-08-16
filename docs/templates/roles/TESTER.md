@@ -77,12 +77,14 @@ When you find issues:
 
 ## Browser Testing (Chrome DevTools MCP)
 
-For frontend changes, **you MUST verify in the browser**, not just check that code compiles. Use Chrome DevTools MCP tools to test the actual UI.
+For frontend changes, **you MUST verify in the browser**, not just check that code compiles. Use the chrome-devtools MCP tools (`navigate_page`, `take_snapshot`, `take_screenshot`, `click`, `fill` — available when the chrome-devtools MCP server is enabled in opencode.json; see `opencode.mcp.example.jsonc`) to test the actual UI.
+
+Browser testing requires that MCP server to be enabled; if it is unavailable, verify via curl + build output and note the gap in your [DONE].
 
 ### Setup
 1. Ensure Chrome is running with the dashboard open
-2. Use `mcp__chrome-devtools__list_pages` to find the dashboard page
-3. Use `mcp__chrome-devtools__select_page` to target it
+2. Use `list_pages` to find the dashboard page
+3. Use `select_page` to target it
 
 ### Testing Workflow
 
@@ -98,40 +100,40 @@ For frontend changes, **you MUST verify in the browser**, not just check that co
 
 **Navigate to dashboard:**
 ```
-mcp__chrome-devtools__navigate_page
+navigate_page
   url: "http://localhost:8000"
 ```
 
 **Take accessibility snapshot (verify elements exist):**
 ```
-mcp__chrome-devtools__take_snapshot
+take_snapshot
 # Returns element tree with uid identifiers
 # Look for expected elements: buttons, inputs, text
 ```
 
 **Click elements to test interactions:**
 ```
-mcp__chrome-devtools__click
+click
   uid: "<element-uid-from-snapshot>"
 # Use uid from take_snapshot results
 ```
 
 **Fill form inputs:**
 ```
-mcp__chrome-devtools__fill
+fill
   uid: "<input-uid>"
   value: "test input"
 ```
 
 **Take screenshot as evidence:**
 ```
-mcp__chrome-devtools__take_screenshot
+take_screenshot
   filePath: ".soren/journal/2026-02-01/attachments/test-evidence-login.png"
 ```
 
 **Wait for async operations:**
 ```
-mcp__chrome-devtools__wait_for
+wait_for
   text: "Success"
   timeout: 5000
 ```
@@ -140,26 +142,26 @@ mcp__chrome-devtools__wait_for
 
 ```
 # 1. Navigate to login page
-mcp__chrome-devtools__navigate_page url="http://localhost:8000/login"
+navigate_page url="http://localhost:8000/login"
 
 # 2. Snapshot to find form elements
-mcp__chrome-devtools__take_snapshot
+take_snapshot
 # Look for: email input, password input, submit button
 
 # 3. Fill email
-mcp__chrome-devtools__fill uid="email-input-uid" value="test@example.com"
+fill uid="email-input-uid" value="test@example.com"
 
 # 4. Fill password
-mcp__chrome-devtools__fill uid="password-input-uid" value="password123"
+fill uid="password-input-uid" value="password123"
 
 # 5. Click submit
-mcp__chrome-devtools__click uid="submit-button-uid"
+click uid="submit-button-uid"
 
 # 6. Wait for redirect/success
-mcp__chrome-devtools__wait_for text="Dashboard" timeout=5000
+wait_for text="Dashboard" timeout=5000
 
 # 7. Screenshot as evidence
-mcp__chrome-devtools__take_screenshot filePath=".soren/journal/2026-02-01/attachments/login-success.png"
+take_screenshot filePath=".soren/journal/2026-02-01/attachments/login-success.png"
 ```
 
 ### Evidence Requirements
@@ -183,6 +185,7 @@ When reporting [DONE], include:
 
 ```
 [DONE] <feature> tested
+Commit: <sha of the commit you verified>
 Tests run:
 - pytest tests/test_auth.py: 12 passed
 - npm run typecheck: passed
@@ -194,6 +197,8 @@ Evidence:
 - .soren/journal/YYYY-MM-DD/attachments/test-results.txt
 - .soren/journal/YYYY-MM-DD/attachments/screenshot-login.png
 ```
+
+Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. Test-only completions must include the hash of the commit they verified — you are only exempt if your agent name/role contains "research".
 
 ## CLI/Tool Testing Protocol
 

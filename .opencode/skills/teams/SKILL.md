@@ -45,7 +45,7 @@ The `--name` prefix is used for worker naming (e.g., `auth-squad-lead`, `auth-ba
 | Template | Workers | Use Case |
 |----------|---------|----------|
 | `SOLO_WORKER` | 1 | Simple, focused tasks |
-| `SQUAD_MODEL` | 4 (lead + backend + frontend + tester) | Medium-large features |
+| `SQUAD_MODEL` | 5 (lead + backend + frontend + tester + researcher) | Medium-large features |
 | `FEATURE_TEAM` | 3 (tech lead + backend + frontend) | Features needing strong tech direction |
 | `PLATFORM_TEAM` | 3 (platform lead + infra + devops) | Infrastructure and DevOps work |
 | `TIGER_TEAM` | 3 (flat peers, no lead) | Urgent fixes, production incidents |
@@ -56,7 +56,7 @@ The `--name` prefix is used for worker naming (e.g., `auth-squad-lead`, `auth-ba
 ### Spawn a squad for a feature
 ```bash
 ./tools/teams setup SQUAD_MODEL "Implement user authentication with JWT" --name auth
-# Spawns: auth-squad-lead, auth-backend, auth-frontend, auth-tester
+# Spawns: auth-squad-lead, auth-backend, auth-frontend, auth-tester, auth-researcher
 # Then send task breakdown to the lead:
 ./tools/workers send "auth-squad-lead" "[TASK] Backend: JWT token creation. Frontend: login UI. Tester: end-to-end validation."
 ```

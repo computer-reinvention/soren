@@ -90,6 +90,7 @@ function spawnHook(script: string, payload: unknown): void {
 
 type MessageEnvelope = {
   info?: {
+    id?: string
     role?: string
     parentID?: string
     tokens?: { input?: number; output?: number; reasoning?: number; cache?: { read?: number; write?: number } }
@@ -153,7 +154,7 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       if (!allowed) {
         throw new Error(
           `[SOREN] Supervisor must not edit code files directly (${filePath || "unknown path"}). ` +
-            `Delegate the change to a worker via ./tools/workers spawn or ./tools/tasks create.`,
+            `Delegate the change to a worker via ./tools/workers spawn or ./tools/tasks add.`,
         )
       }
     },
@@ -184,7 +185,7 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       // Verification pipeline triggers on mailbox done reports via bash
       if (input.tool === "bash") {
         const command: string = input.args?.command ?? ""
-        if (/tools\/mailbox +done /.test(command)) {
+        if (/(^|[\s;&|])(\.\/)?(tools\/)?mailbox +done\b/.test(command)) {
           const payload = {
             session_id: input.sessionID,
             tool_name: "Bash",
@@ -205,6 +206,15 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
         if (part?.type === "reasoning" && typeof part.text === "string" && part.text.length > 0) {
           const key = `${part.messageID}:${part.id}`
           reasoningText.set(key, part.text)
+          // Cap maps at 100 entries: evict the oldest key if a part never completes.
+          if (reasoningText.size > 100) {
+            const oldest = reasoningText.keys().next().value
+            if (oldest !== undefined && oldest !== key) {
+              clearTimeout(reasoningTimers.get(oldest))
+              reasoningTimers.delete(oldest)
+              reasoningText.delete(oldest)
+            }
+          }
           clearTimeout(reasoningTimers.get(key))
           reasoningTimers.set(
             key,
@@ -232,21 +242,30 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
 
       const messages = await fetchMessages(sessionID)
 
-      // Sum token usage across assistant messages (Claude-hook usage shape)
-      const usage = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }
+      // Sort by message id ascending (ULIDs sort lexicographically) so that
+      // responseContent / toolCallsSinceUser / last-assistant selection are
+      // correct regardless of endpoint ordering. Fall back to the original
+      // order if any message lacks an id.
+      if (messages.length > 1 && messages.every((m) => typeof m.info?.id === "string" && m.info.id.length > 0)) {
+        messages.sort((a, b) => {
+          const ai = a.info!.id!
+          const bi = b.info!.id!
+          return ai < bi ? -1 : ai > bi ? 1 : 0
+        })
+      }
+
+      // Report usage from the LAST assistant message only (Claude-hook usage
+      // shape). Context size ≈ input + cache.read of the final message —
+      // that's what the server's compaction-threshold math needs. Summing
+      // across messages caused compaction storms.
+      let lastAssistant: MessageEnvelope | undefined
       let responseContent = ""
       let toolCallsSinceUser = 0
       let hygieneSeen = false
 
       for (const msg of messages) {
         const role = msg.info?.role
-        if (role === "assistant") {
-          const t = msg.info?.tokens
-          usage.input_tokens += t?.input ?? 0
-          usage.output_tokens += t?.output ?? 0
-          usage.cache_read_input_tokens += t?.cache?.read ?? 0
-          usage.cache_creation_input_tokens += t?.cache?.write ?? 0
-        }
+        if (role === "assistant") lastAssistant = msg
         for (const part of msg.parts ?? []) {
           if (role === "assistant" && part.type === "text" && part.text) responseContent = part.text
           if (role === "user" && part.type === "text") {
@@ -259,6 +278,14 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
             if (/git commit|tools\/journal|tools\/mailbox/.test(cmd)) hygieneSeen = true
           }
         }
+      }
+
+      const lastTokens = lastAssistant?.info?.tokens
+      const usage = {
+        input_tokens: lastTokens?.input ?? 0,
+        output_tokens: lastTokens?.output ?? 0,
+        cache_read_input_tokens: lastTokens?.cache?.read ?? 0,
+        cache_creation_input_tokens: lastTokens?.cache?.write ?? 0,
       }
 
       await post(EVENTS_URL, {
@@ -274,6 +301,11 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       // workers are exempt (matches stop-gate.sh).
       if (!isSupervisor && !isPermanent && toolCallsSinceUser >= 5 && !hygieneSeen && !nudgedSessions.has(sessionID)) {
         nudgedSessions.add(sessionID)
+        // Cap at 200 entries — evict the oldest (first) value when exceeded.
+        if (nudgedSessions.size > 200) {
+          const oldest = nudgedSessions.values().next().value
+          if (oldest !== undefined) nudgedSessions.delete(oldest)
+        }
         if (instance) {
           void fetch(`${instance}/session/${sessionID}/prompt_async`, {
             method: "POST",

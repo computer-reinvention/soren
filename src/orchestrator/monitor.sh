@@ -192,10 +192,8 @@ launch_supervisor() {
     # Record the port in the agent registry (create "supervisor" entry if missing)
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     [[ -f "$reg_file" ]] || echo '{}' > "$reg_file"
-    local reg_tmp
-    reg_tmp=$(mktemp)
-    jq --argjson p "$oc_port" '.["supervisor"] = ((.["supervisor"] // {}) + {oc_port: $p})' \
-        "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+    soren_registry_update "$reg_file" --argjson p "$oc_port" \
+        '.["supervisor"] = ((.["supervisor"] // {}) + {oc_port: $p})'
 
     tmux_create_window "$SOREN_SESSION" "supervisor"
     local oc_cmd
@@ -1183,10 +1181,8 @@ SENTRY_EOF
     # Record the port in the agent registry (create "sentry" entry if missing)
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     [[ -f "$reg_file" ]] || echo '{}' > "$reg_file"
-    local reg_tmp
-    reg_tmp=$(mktemp)
-    jq --argjson p "$oc_port" '.["sentry"] = ((.["sentry"] // {}) + {oc_port: $p})' \
-        "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+    soren_registry_update "$reg_file" --argjson p "$oc_port" \
+        '.["sentry"] = ((.["sentry"] // {}) + {oc_port: $p})'
 
     # Create sentry tmux window and start opencode
     tmux_create_window "$SOREN_SESSION" "sentry"

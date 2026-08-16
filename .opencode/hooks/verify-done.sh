@@ -17,10 +17,10 @@
 
 set -euo pipefail
 
-PROJECT_ROOT="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-# Fallback: if detected root isn't the SOREN repo, try the known SOREN path
-if [[ ! -f "$PROJECT_ROOT/.soren/projects.json" && -f "/home/soren/soren/.soren/projects.json" ]]; then
-    PROJECT_ROOT="/home/soren/soren"
+PROJECT_ROOT="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+if [[ -z "$PROJECT_ROOT" ]]; then
+    echo "verify-done.sh: cannot resolve project root (SOREN_HOME unset and not in a git repo)" >&2
+    exit 0
 fi
 STATUS_LOG="$PROJECT_ROOT/.soren/status.log"
 MAILBOX_TOOL="$PROJECT_ROOT/tools/mailbox"
@@ -229,10 +229,11 @@ extract_lesson() {
 
     if [[ -z "$commit_hash" ]]; then
         # Skip verification for research-only DONE messages (no code changes expected)
-        local is_research=false
+        # NOTE: plain assignments here — `local` is illegal outside a function
+        # (this runs in a backgrounded subshell, not a function body).
+        is_research=false
         if [[ "$agent" == *"research"* ]]; then
             # Check for research-answer keywords in the DONE message
-            local msg_lower
             msg_lower=$(echo "$done_msg" | tr '[:upper:]' '[:lower:]')
             case "$msg_lower" in
                 *"answer:"*|*"answer -"*|*"findings:"*|*"analysis"*|*"investigation"*|*"plan"*|*"saved to"*|*"research"*|*"no "*" found"*|*"does not exist"*)

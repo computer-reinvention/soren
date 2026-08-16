@@ -37,13 +37,11 @@ curl -X POST http://localhost:8000/api/journal/entry \
 
 ### 2. Create Workers for Tasks
 
-Use the `/workers` skill to manage workers. This handles all tmux complexity for you.
+Load the `workers` skill (via the opencode skill tool) or run `./tools/workers` directly. This handles all tmux complexity for you.
 
 ```bash
 # Spawn a worker for a specific task
 ./tools/workers spawn "worker-{task-name}" "Read docs/WORKER_ROLE.md, then: [Clear, specific instructions]"
-
-# Or just describe what you need and /workers will auto-load
 ```
 
 ### 3. Monitor Progress
@@ -77,30 +75,22 @@ When the feature is complete:
 3. Notify main supervisor via mailbox:
 
 ```bash
-cat >> .soren/mailbox << 'EOF'
---- MESSAGE ---
-timestamp: $(date -Iseconds)
-from: supervisor-{feature-name}
-to: supervisor
-type: response
-id: feature-complete-$(date +%s)
----
-Feature [Feature Name] is complete.
-
+./tools/mailbox send supervisor "Feature complete: [Feature Name]" "
 ## Summary
 [What was implemented]
 
 ## Changes
-[List of files changed]
+[List of files changed, commit hashes]
 
 ## Testing
 [What was tested]
 
 ## Notes
 [Any important notes for review]
----
-EOF
+"
 ```
+
+(Always use `./tools/mailbox` — the router only parses the JSONL lines it writes; hand-appended text blocks are ignored.)
 
 ## Communication
 
@@ -161,7 +151,7 @@ Your task: [Brief description]
 - [Any constraints]
 
 ## When Done
-Let me know by outputting "TASK COMPLETE: [summary]"
+Report via: ./tools/mailbox done "[summary + commit hash]"
 ```
 
 ## Example Session
@@ -181,21 +171,23 @@ Let me know by outputting "TASK COMPLETE: [summary]"
 9. Run tests
 10. Journal: "User settings feature complete"
 11. Notify main supervisor
-12. Clean up workers: send /exit, then kill-window
+12. Keep workers alive until their work is [VERIFIED]; clean up only after
 ```
 
 ## Cleanup
 
-When session work is complete:
+**Cleanup happens only after work is `[VERIFIED]`.** Do not kill workers immediately after `[DONE]` — keep them alive through verification and review; follow-up fixes are common. Sleep or reassign idle workers instead.
+
+When all work is verified and no follow-up remains:
 
 ```bash
-# List and gracefully exit workers
+# List workers
 ./tools/workers list
 
-# Kill specific worker
+# Kill a specific worker whose work is verified
 ./tools/workers kill "worker-{task-name}"
 
-# Or kill all workers (they will receive /exit first)
+# Or kill all remaining workers (they will receive /exit first)
 for worker in $(./tools/workers list --quiet); do
   ./tools/workers kill "$worker"
 done

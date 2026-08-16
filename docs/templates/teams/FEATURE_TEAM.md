@@ -113,7 +113,7 @@ The Tech Lead MUST NOT approve completion until all testing is verified:
 ### Requirements
 
 1. **Backend workers**: pytest passes AND endpoints verified with curl
-2. **Frontend workers**: Browser tested via Chrome MCP — snapshot and screenshot evidence REQUIRED
+2. **Frontend workers**: Browser tested via chrome-devtools MCP — snapshot and screenshot evidence REQUIRED
 3. **All workers**: Include testing evidence in their completion reports
 4. **Tech Lead**: Reviews testing evidence before approving — rejects if evidence is missing
 
@@ -121,7 +121,7 @@ The Tech Lead MUST NOT approve completion until all testing is verified:
 
 - [ ] All workers reported completion with testing evidence
 - [ ] Backend tests pass (`uv run pytest`)
-- [ ] Frontend verified in browser (Chrome MCP screenshots exist)
+- [ ] Frontend verified in browser (chrome-devtools MCP screenshots exist)
 - [ ] End-to-end flow tested
 - [ ] No workers reported [BLOCKED] on testing
 

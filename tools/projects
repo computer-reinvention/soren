@@ -321,11 +321,11 @@ generate_agent_id() {
     while [[ $attempt -lt 100 ]]; do
         id="ag_$(head -c 32 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
         if [[ ${#id} -ne 11 ]]; then
-            ((attempt++))
+            attempt=$((attempt+1))
             continue
         fi
         if [[ -f "$registry_file" ]] && grep -q "\"$id\"" "$registry_file" 2>/dev/null; then
-            ((attempt++))
+            attempt=$((attempt+1))
             continue
         fi
         echo "$id"
@@ -408,9 +408,8 @@ cmd_activate() {
     if [[ ! -f "$reg_file" ]]; then
         echo '{}' > "$reg_file"
     fi
-    local reg_tmp
-    reg_tmp=$(mktemp)
-    jq --arg key "$sup_name" \
+    soren_registry_update "$reg_file" \
+       --arg key "$sup_name" \
        --arg aid "$agent_id" \
        --arg pid "$id" \
        --arg now "$now" \
@@ -423,7 +422,7 @@ cmd_activate() {
            "display_name": $key,
            "role": "project-supervisor",
            "project_id": $pid
-       }' "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+       }'
 
     # Also register in SQLite (agent_registry.db) so the API serves the correct data
     local db_file="${SOREN_HOME}/.soren/agent_registry.db"
@@ -434,10 +433,7 @@ cmd_activate() {
     # Allocate a dedicated port for the supervisor's embedded opencode server
     local oc_port
     oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
-    local port_tmp
-    port_tmp=$(mktemp)
-    jq --arg key "$sup_name" --argjson p "$oc_port" '.[$key].oc_port = $p' \
-        "$reg_file" > "$port_tmp" && mv "$port_tmp" "$reg_file"
+    soren_registry_update "$reg_file" --arg key "$sup_name" --argjson p "$oc_port" '.[$key].oc_port = $p'
 
     # Build environment variables
     local port="${SOREN_PORT:-8000}"
@@ -806,12 +802,15 @@ cmd_deactivate() {
         ok "Supervisor window killed"
     fi
 
-    # Remove from agent_registry.json
+    # Remove from agent_registry.json (release its port reservation first)
     local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
     if [[ -f "$reg_file" ]]; then
-        local reg_tmp
-        reg_tmp=$(mktemp)
-        jq --arg key "$sup_name" 'del(.[$key])' "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+        local dead_port=""
+        dead_port=$(jq -r --arg key "$sup_name" '.[$key].oc_port // empty' "$reg_file" 2>/dev/null) || dead_port=""
+        if [[ -n "$dead_port" ]]; then
+            soren_oc_release_port "$dead_port"
+        fi
+        soren_registry_update "$reg_file" --arg key "$sup_name" 'del(.[$key])'
     fi
 
     # Set SLEEPING in SQLite (preserve for archived view, don't delete)

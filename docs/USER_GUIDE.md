@@ -156,8 +156,12 @@ Before installing SOREN, make sure you have:
 - **Node.js 18+** - The dashboard uses React
 - **tmux** - Terminal multiplexing for agent isolation
 - **git** - Version control and auto-rollback
+- **jq** - JSON processing (used by the mailbox and shell tools)
+- **sqlite3** - Task database CLI (used by the tasks/backlog tools)
 - **[uv](https://github.com/astral-sh/uv)** - Fast Python package manager
 - **[opencode](https://opencode.ai)** - The agent runtime; agents are powered by Claude models
+
+**Authenticate opencode before first start:** run `opencode auth login` (or export `ANTHROPIC_API_KEY`) so agents can reach the model provider.
 
 ### Installation
 
@@ -242,13 +246,16 @@ Feature Session (soren-auth) - Created for complex features
 
 ### Worker Lifecycle
 
+Agent statuses:
+
 ```
-1. CREATED    - Worker window created in tmux
-2. PENDING    - Task assigned, waiting to start
-3. IN_PROGRESS - Actively working
-4. TESTING    - Running tests/validation
-5. COMPLETE   - Task finished successfully
-6. IDLE       - Ready for next task or cleanup
+1. PENDING     - Task assigned, waiting to start
+2. IN_PROGRESS - Actively working
+3. BLOCKED     - Waiting on a dependency or help
+4. TESTING     - Running tests/validation
+5. COMPLETE    - Task finished successfully
+6. FAILED      - Task failed
+7. IDLE        - Ready for next task or cleanup
 ```
 
 ### Communication
@@ -281,8 +288,8 @@ The most important aspect of SOREN is its safety model. Since agents can modify 
 │                                                                 │
 │  Line 2: HEALTH MONITORING                                      │
 │  ─────────────────────────                                      │
-│  Health daemon checks /api/webhooks/health every 10 seconds.    │
-│  After 3 failures: attempt restart.                             │
+│  Health daemon checks /api/webhooks/health every 5 seconds.     │
+│  After 3 consecutive failures (~15s): attempt restart.          │
 │  If restart fails: trigger rollback.                            │
 │                                                                 │
 ├─────────────────────────────────────────────────────────────────┤
@@ -315,16 +322,16 @@ The most important aspect of SOREN is its safety model. Since agents can modify 
 Health Check Fails
         │
         ▼
-   (Wait 10 sec)
+   (Wait 5 sec)
         │
         ▼
 Health Check Fails Again (2/3)
         │
         ▼
-   (Wait 10 sec)
+   (Wait 5 sec)
         │
         ▼
-Health Check Fails (3/3)
+Health Check Fails (3/3)  ≈ 15 seconds total
         │
         ▼
 ┌───────────────────┐
@@ -435,18 +442,12 @@ curl -X POST http://localhost:8000/api/agents/supervisor/message \
   -H "Content-Type: application/json" \
   -d '{"content": "Add a logout button to the dashboard header"}'
 
-# Via the mailbox
-cat >> .soren/mailbox << 'EOF'
---- MESSAGE ---
-timestamp: 2026-01-29T10:00:00Z
-from: user
-to: supervisor
-type: task
-id: task-001
----
-Add a logout button to the dashboard header
----
-EOF
+# Via the mailbox tool (ALWAYS use ./tools/mailbox — the router only parses
+# the JSONL lines it writes; hand-appended text blocks are ignored)
+./tools/mailbox send supervisor "New task" "Add a logout button to the dashboard header"
+
+# Reference: each mailbox line is one JSON object like
+# {"id":"<uuid>","ts":"2026-01-29T10:00:00Z","from":"soren:user","to":"soren:supervisor","subject":"New task","body":"...","status":"submitted"}
 ```
 
 ### Checking System Health

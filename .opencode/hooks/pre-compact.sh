@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# .claude/hooks/pre-compact.sh
+# .opencode/hooks/pre-compact.sh
 # Captures agent state before compaction for post-compact recovery.
 # Called by compact.sh with window name as $1.
 # Outputs the artifact file path on stdout.
@@ -21,10 +21,22 @@ mkdir -p "$ARTIFACT_DIR"
 # Capture terminal output
 terminal_output=$(tmux capture-pane -t "${SOREN_SESSION}:${WINDOW}" -p -S -50 2>/dev/null || echo "")
 
-# Capture git state
-git_branch=$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || echo "unknown")
-uncommitted=$(git -C "$PROJECT_ROOT" diff --name-only 2>/dev/null || echo "")
-staged=$(git -C "$PROJECT_ROOT" diff --cached --name-only 2>/dev/null || echo "")
+# Capture git state from the agent's actual working dir: prefer the
+# registry's worktree_path, then worker_dir, then the project root.
+GIT_TARGET="$PROJECT_ROOT"
+REGISTRY="${PROJECT_ROOT}/.soren/agent_registry.json"
+if [[ -f "$REGISTRY" ]]; then
+    agent_dir=$(jq -r --arg k "$WINDOW" \
+        '.[$k] | (.worktree_path // "") as $wt | (.worker_dir // "") as $wd | if $wt != "" then $wt elif $wd != "" then $wd else "" end' \
+        "$REGISTRY" 2>/dev/null) || agent_dir=""
+    if [[ -n "$agent_dir" && -d "$agent_dir" ]]; then
+        GIT_TARGET="$agent_dir"
+    fi
+fi
+
+git_branch=$(git -C "$GIT_TARGET" branch --show-current 2>/dev/null || echo "unknown")
+uncommitted=$(git -C "$GIT_TARGET" diff --name-only 2>/dev/null || echo "")
+staged=$(git -C "$GIT_TARGET" diff --cached --name-only 2>/dev/null || echo "")
 
 # Capture current task from tasks.db
 current_task=""

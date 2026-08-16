@@ -442,7 +442,7 @@ After spawning each worker, verify:
 ./tools/workers status {worker-name}
 
 # 3. Worker has permanent flag and correct project_id
-./tools/agents get {worker-name}
+./tools/agents lookup {worker-name}
 ```
 
 ### Listing Your Team

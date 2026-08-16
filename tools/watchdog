@@ -184,7 +184,7 @@ cmd_scan() {
         [[ "$wname" == "monitor" ]] && continue
         [[ "$wname" == "supervisor" ]] && continue
 
-        ((total_checked++))
+        total_checked=$((total_checked+1))
 
         if check_agent "$wname" "$auto_fix"; then
             found_issues=true
@@ -195,8 +195,8 @@ cmd_scan() {
                 local sev
                 sev=$(echo "$result_line" | cut -d'|' -f1)
                 case "$sev" in
-                    critical) ((critical_count++)) ;;
-                    warning)  ((warning_count++)) ;;
+                    critical) critical_count=$((critical_count+1)) ;;
+                    warning)  warning_count=$((warning_count+1)) ;;
                 esac
             fi
         else

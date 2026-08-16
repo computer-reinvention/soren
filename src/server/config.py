@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 class Settings(BaseSettings):
-    host: str = "0.0.0.0"
+    host: str = "127.0.0.1"  # hosted deployments opt in via SOREN_HOST
     port: int = 8000
     log_level: str = "INFO"
     tmux_session: str = "soren"

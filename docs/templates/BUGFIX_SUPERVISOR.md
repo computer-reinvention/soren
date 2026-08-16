@@ -60,7 +60,7 @@ git log --oneline -10 -- path/to/file.py
 
 ### 4. Create Worker if Needed
 
-For complex fixes or parallel investigation, use the `/workers` skill:
+For complex fixes or parallel investigation, load the `workers` skill (via the opencode skill tool) or run `./tools/workers` directly:
 
 ```bash
 # Spawn a worker for the fix
@@ -100,21 +100,12 @@ curl http://localhost:8000/api/webhooks/health
 ### 7. Report Resolution
 
 ```bash
-cat >> .soren/mailbox << 'EOF'
---- MESSAGE ---
-timestamp: $(date -Iseconds)
-from: supervisor-{bug-name}
-to: supervisor
-type: response
-id: bugfix-complete-$(date +%s)
----
-Bug [Bug Title] has been fixed.
-
+./tools/mailbox send supervisor "Bug fixed: [Bug Title]" "
 ## Root Cause
 [What caused the bug]
 
 ## Fix Applied
-[What was changed]
+[What was changed, commit hash]
 
 ## Files Modified
 - path/to/file.py
@@ -126,9 +117,10 @@ Bug [Bug Title] has been fixed.
 
 ## Notes
 [Any caveats or related issues]
----
-EOF
+"
 ```
+
+(Always use `./tools/mailbox` — the router only parses the JSONL lines it writes; hand-appended text blocks are ignored.)
 
 ## Investigation Techniques
 
@@ -243,7 +235,7 @@ After fixing:
 
 ## Cleanup
 
-When bug is fixed:
+When the fix is **verified** (not merely reported `[DONE]`) and no follow-up remains:
 
 ```bash
 # List workers

@@ -13,8 +13,8 @@ PREFS_FILE = Path(".soren/prefs.json")
 
 # Default heartbeat config (mirrors monitor.sh defaults)
 DEFAULT_PREFS = {
-    "heartbeat_warn_threshold": 600,
-    "heartbeat_nudge_interval": 120,
+    "heartbeat_warn_threshold": 900,
+    "heartbeat_nudge_interval": 180,
     "heartbeat_max_nudges": 3,
     "heartbeat_observe_timeout": 1200,
 }

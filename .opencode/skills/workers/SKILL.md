@@ -45,7 +45,7 @@ When spawning a worker, **always include role instructions** by referencing the 
 For specialized tasks, point to relevant documentation:
 - `docs/WORKER_ROLE.md` - General worker instructions
 - `docs/SUPERVISOR_ROLE.md` - If spawning a sub-supervisor
-- `CLAUDE.md` - Project conventions and commands
+- `AGENTS.md` - Project conventions and commands
 
 ## Communication Protocol
 
@@ -75,9 +75,9 @@ Types:
 ./tools/workers send "auth-worker" "[QUESTION] What's your current progress? Any blockers?"
 ```
 
-**Marking complete:**
+**Marking complete (only after the work is verified):**
 ```bash
-./tools/workers send "auth-worker" "[COMPLETE] Task verified. Please commit your changes and exit."
+./tools/workers send "auth-worker" "[COMPLETE] Task verified. No follow-up needed."
 ```
 
 ### Worker Responses
@@ -95,4 +95,4 @@ Workers should send:
 2. **Reference templates**: Always tell workers to read their role docs first
 3. **Give clear tasks**: Include file paths, specific requirements, and success criteria
 4. **Check status regularly**: Use `workers status <name>` to monitor progress
-5. **Clean up**: Kill workers when they complete their tasks
+5. **Lifecycle**: Keep workers alive through verification of their work — sleep (`workers sleep <name>`) or reassign idle workers; kill only after the work is verified and no follow-up remains

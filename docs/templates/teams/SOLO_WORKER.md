@@ -64,7 +64,7 @@ Before reporting `[DONE]`, the worker MUST complete the testing checkpoint:
 
 1. **Detect project type** (see `docs/WORKER_ROLE.md` — Mandatory Testing section)
 2. **Run appropriate tests**:
-   - Web project → Browser test via Chrome MCP (navigate, snapshot, screenshot)
+   - Web project → Browser test via chrome-devtools MCP (navigate, snapshot, screenshot)
    - API project → Run pytest AND curl endpoints
    - CLI project → Run the tool and show output
 3. **Include evidence** in the `[DONE]` message (screenshot path, test output, or demo script)
