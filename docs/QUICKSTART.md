@@ -94,7 +94,7 @@ curl -X POST http://localhost:8000/api/agents/supervisor/message \
 | `./soren.sh start`  | Start SOREN (with pre-flight checks) |
 | `./soren.sh stop`   | Stop SOREN         |
 | `./soren.sh status` | Check status      |
-| `./src/orchestrator/soren.sh logs`   | View logs         |
+| `./soren.sh logs`   | View logs         |
 | `tmux attach -t soren`               | Watch agents work |
 
 ## What Just Happened?
