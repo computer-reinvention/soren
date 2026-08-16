@@ -25,13 +25,19 @@ curl -fsSL https://opencode.ai/install | bash   # or: brew install sst/tap/openc
 ## Install
 
 ```bash
-git clone https://github.com/yourusername/soren.git
+git clone https://github.com/computer-reinvention/soren.git
 cd soren
-uv sync
-# For running tests, include dev dependencies:
+./soren.sh setup     # checks prerequisites, installs Python deps (incl. dev), builds frontend
+```
+
+<details>
+<summary>Manual equivalent</summary>
+
+```bash
 uv sync --extra dev
 cd src/frontend && npm install && npm run build && cd ../..
 ```
+</details>
 
 ## Authenticate (before first start)
 
@@ -46,8 +52,10 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ## Run
 
 ```bash
-./src/orchestrator/soren.sh start
+./soren.sh start          # pre-flight checks, then boots the system
 ```
+
+Other commands: `./soren.sh stop | restart | status | logs | attach | dash | health | doctor | test | smoke`
 
 ## Access
 
@@ -76,16 +84,16 @@ curl -X POST http://localhost:8000/api/agents/supervisor/message \
 ## Stop
 
 ```bash
-./src/orchestrator/soren.sh stop
+./soren.sh stop
 ```
 
 ## Key Commands
 
 | Command                             | Description       |
 | ----------------------------------- | ----------------- |
-| `./src/orchestrator/soren.sh start`  | Start SOREN        |
-| `./src/orchestrator/soren.sh stop`   | Stop SOREN         |
-| `./src/orchestrator/soren.sh status` | Check status      |
+| `./soren.sh start`  | Start SOREN (with pre-flight checks) |
+| `./soren.sh stop`   | Stop SOREN         |
+| `./soren.sh status` | Check status      |
 | `./src/orchestrator/soren.sh logs`   | View logs         |
 | `tmux attach -t soren`               | Watch agents work |
 

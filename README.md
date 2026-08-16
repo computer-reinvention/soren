@@ -27,7 +27,7 @@ cp .env.example .env          # create local env file
 cd src/frontend && npm install && npm run build && cd ../..
 
 # Start the system
-./src/orchestrator/soren.sh start
+./soren.sh start
 tmux attach -t soren          # observe agents working
 ```
 

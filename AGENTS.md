@@ -79,10 +79,10 @@ npm run typecheck             # typescript check
 ### System orchestration
 
 ```bash
-./src/orchestrator/soren.sh start    # start the system
-./src/orchestrator/soren.sh stop     # stop everything
-./src/orchestrator/soren.sh status   # status
-./src/orchestrator/soren.sh logs     # view logs
+./soren.sh start    # start the system
+./soren.sh stop     # stop everything
+./soren.sh status   # status
+./soren.sh logs     # view logs
 tmux attach -t soren                 # attach to the tmux session
 ```
 
