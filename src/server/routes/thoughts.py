@@ -48,7 +48,7 @@ def _cleanup_expired():
 @router.post("")
 async def receive_thought(event: ThoughtEvent):
     """
-    Receive a live thought/reasoning event from a Claude Code hook.
+    Receive a live thought/reasoning event from the soren-bridge opencode plugin.
 
     Persists to SQLite and broadcasts via WebSocket.
     Deduplicates identical thoughts from the same agent within a 30s window.

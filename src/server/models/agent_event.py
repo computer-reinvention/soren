@@ -11,7 +11,7 @@ class AgentEventType(str, Enum):
 
 
 class AgentEvent(BaseModel):
-    """Event received from Claude Code hooks."""
+    """Event received from the soren-bridge opencode plugin."""
 
     event_type: AgentEventType
     session_id: str

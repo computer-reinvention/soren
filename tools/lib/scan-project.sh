@@ -51,9 +51,11 @@ scan_project() {
     SCAN_git_summary=""
     SCAN_claude_md_notes=""
 
-    # --- CLAUDE.md ---
-    if [[ -f "$dir/CLAUDE.md" ]]; then
-        SCAN_claude_md_notes="CLAUDE.md present — contains project-specific instructions for Claude agents."
+    # --- AGENTS.md / CLAUDE.md ---
+    if [[ -f "$dir/AGENTS.md" ]]; then
+        SCAN_claude_md_notes="AGENTS.md present — contains project-specific instructions for agents."
+    elif [[ -f "$dir/CLAUDE.md" ]]; then
+        SCAN_claude_md_notes="CLAUDE.md present (legacy) — contains project-specific instructions for agents."
     fi
 
     # --- Package manager & dependencies ---

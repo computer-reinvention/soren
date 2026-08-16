@@ -14,7 +14,7 @@ set -uo pipefail
 # With set -e, any non-zero exit in the dashboard loop (e.g., a daemon restart
 # failing, a tmux command returning 1 when the session flickers) kills the
 # entire monitor script. The EXIT trap then fires cleanup(), which kills the
-# tmux session and destroys all 26+ Claude agents. This was the root cause of
+# tmux session and destroys all 26+ opencode agents. This was the root cause of
 # sessions dying after running for a while.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,6 +40,9 @@ SOREN_HOST="${SOREN_HOST:-0.0.0.0}"
 SOREN_MAILBOX="${SOREN_MAILBOX:-.soren/mailbox}"
 SOREN_PROJECT_ROOT="${SOREN_PROJECT_ROOT:-$(pwd)}"
 ROUTER_LOG=".soren/router.log"
+
+# Shared opencode helpers (model mapping, ports, health, HTTP send)
+source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
 # Colors
 CYAN='\033[0;36m'
@@ -179,35 +182,35 @@ launch_supervisor() {
     log_step "Launching supervisor agent..."
     log_status "STARTUP" "Launching supervisor agent in session ${SOREN_SESSION}"
 
+    # Allocate a dedicated port for the supervisor's embedded opencode server
+    local oc_port
+    oc_port=$(soren_oc_free_port) || {
+        log_fail "Could not allocate an opencode port for supervisor"
+        return 1
+    }
+
+    # Record the port in the agent registry (create "supervisor" entry if missing)
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || echo '{}' > "$reg_file"
+    soren_registry_update "$reg_file" --argjson p "$oc_port" \
+        '.["supervisor"] = ((.["supervisor"] // {}) + {oc_port: $p})'
+
     tmux_create_window "$SOREN_SESSION" "supervisor"
-    tmux_send_keys "$SOREN_SESSION" "supervisor" "export SOREN_AGENT=true SOREN_AGENT_NAME=supervisor CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && cd ${SOREN_PROJECT_ROOT} && claude --dangerously-skip-permissions"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port")
+    tmux_send_keys "$SOREN_SESSION" "supervisor" "export SOREN_AGENT=true SOREN_AGENT_NAME=supervisor SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}' && cd ${SOREN_PROJECT_ROOT} && ${oc_cmd}"
 
     # Lock window name
     tmux set-option -t "${SOREN_SESSION}:supervisor" allow-rename off 2>/dev/null || true
 
-    # Wait for Claude to initialize (look for the prompt indicator)
-    log_step "Waiting for Claude to initialize..."
-    local retries=30
-    while [[ "$(tmux_pane_state "$SOREN_SESSION" "supervisor")" != "PROMPT" ]]; do
-        sleep 1
-        ((retries--)) || break
-        if ((retries <= 0)); then
-            log_warn "Claude startup timeout after 30s, sending instructions anyway"
-            log_status "STARTUP" "WARN: Supervisor Claude startup timeout (30s), proceeding anyway"
-            break
-        fi
-    done
-    sleep 1  # Extra buffer after prompt appears
-
-    # Disable vim mode if enabled (for reliable message delivery)
-    local pane_state
-    pane_state=$(tmux_pane_state "$SOREN_SESSION" "supervisor")
-    _orch_log "[STARTUP] Supervisor pane state after init: ${pane_state}"
-    if [[ "$pane_state" == "VIM" ]]; then
-        log_step "Disabling vim mode..."
-        tmux_send_keys "$SOREN_SESSION" "supervisor" "/vim"
-        sleep 1
+    # Wait for the embedded opencode server to come up
+    log_step "Waiting for opencode to initialize (port ${oc_port})..."
+    if ! soren_oc_wait_ready "$oc_port" 30; then
+        log_warn "opencode startup timeout after 30s, sending instructions anyway"
+        log_status "STARTUP" "WARN: Supervisor opencode startup timeout (30s), proceeding anyway"
+        sleep 8
     fi
+    sleep 1  # Extra buffer after readiness
 
     # Register supervisor via API
     if curl -sf -X POST "http://localhost:${SOREN_PORT}/api/agents/register" \
@@ -836,7 +839,7 @@ check_supervisor_heartbeat() {
             tmux_safe_send "$SOREN_SESSION" "supervisor" "$idle_nudge" --retry 2 || true
 
             # Delay between sends — back-to-back messages trigger paste buffer
-            # issues in Claude Code when the first is still being processed
+            # issues in opencode when the first is still being processed
             sleep 3
 
             # Second message: reference AMBITION.md for self-improvement work
@@ -903,27 +906,37 @@ check_supervisor_heartbeat() {
 # Supervisor Hybrid Liveness Helpers
 #───────────────────────────────────────────────────────────────────────────────
 
-# Check if a claude process is running inside the supervisor tmux pane.
-# Gets the pane's shell PID, then walks its process tree for a claude process.
+# Check if the supervisor's opencode instance is alive.
+# Prefers the embedded server health endpoint (registry oc_port); falls back
+# to walking the supervisor pane's process tree for an opencode process.
 # Returns 0 if alive, 1 if dead.
 is_supervisor_process_alive() {
+    # Preferred: health check on the supervisor's embedded opencode server
+    local oc_port
+    if oc_port=$(soren_oc_port_for "supervisor" "${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"); then
+        if curl -sf -m 2 "http://127.0.0.1:${oc_port}/global/health" >/dev/null 2>&1; then
+            return 0
+        fi
+    fi
+
+    # Fallback: process-tree walk for an opencode process in the pane
     local pane_pid
     pane_pid=$(tmux list-panes -t "${SOREN_SESSION}:supervisor" -F '#{pane_pid}' 2>/dev/null) || return 1
     [[ -z "$pane_pid" ]] && return 1
 
-    # Check if the pane PID or any descendant is a claude process
+    # Check if the pane PID or any descendant is an opencode process
     # pgrep -P walks child processes; we also check the pane PID itself
-    if pgrep -a "claude" -P "$pane_pid" >/dev/null 2>&1; then
+    if pgrep -a "opencode" -P "$pane_pid" >/dev/null 2>&1; then
         return 0
     fi
 
-    # Also check grandchildren (claude may be a child of the shell which is
+    # Also check grandchildren (opencode may be a child of the shell which is
     # a child of the pane pid)
     local child_pids
     child_pids=$(pgrep -P "$pane_pid" 2>/dev/null) || return 1
     local cpid
     for cpid in $child_pids; do
-        if pgrep -a "claude" -P "$cpid" >/dev/null 2>&1; then
+        if pgrep -a "opencode" -P "$cpid" >/dev/null 2>&1; then
             return 0
         fi
     done
@@ -1158,23 +1171,33 @@ tmux kill-window -t "${SOREN_SESSION}:sentry"
 **IMPORTANT**: Execute all steps using the Bash tool. Do NOT skip the self-terminate step.
 SENTRY_EOF
 
-    # Create sentry tmux window and start Claude
+    # Allocate a dedicated port for the sentry's embedded opencode server
+    local oc_port
+    oc_port=$(soren_oc_free_port) || {
+        log_fail "Could not allocate an opencode port for sentry"
+        return 1
+    }
+
+    # Record the port in the agent registry (create "sentry" entry if missing)
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || echo '{}' > "$reg_file"
+    soren_registry_update "$reg_file" --argjson p "$oc_port" \
+        '.["sentry"] = ((.["sentry"] // {}) + {oc_port: $p})'
+
+    # Create sentry tmux window and start opencode
     tmux_create_window "$SOREN_SESSION" "sentry"
-    tmux_send_keys "$SOREN_SESSION" "sentry" "export SOREN_AGENT=true SOREN_AGENT_NAME=sentry CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false && cd ${SOREN_PROJECT_ROOT} && claude --model sonnet --dangerously-skip-permissions"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port" "sonnet")
+    tmux_send_keys "$SOREN_SESSION" "sentry" "export SOREN_AGENT=true SOREN_AGENT_NAME=sentry SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}' && cd ${SOREN_PROJECT_ROOT} && ${oc_cmd}"
 
     # Lock window name
     tmux set-option -t "${SOREN_SESSION}:sentry" allow-rename off 2>/dev/null || true
 
-    # Wait for Claude to initialize
-    local retries=30
-    while [[ "$(tmux_pane_state "$SOREN_SESSION" "sentry")" != "PROMPT" ]]; do
-        sleep 1
-        ((retries--)) || break
-        if ((retries <= 0)); then
-            log_warn "Sentry Claude startup timeout, sending instructions anyway"
-            break
-        fi
-    done
+    # Wait for the embedded opencode server to come up
+    if ! soren_oc_wait_ready "$oc_port" 30; then
+        log_warn "Sentry opencode startup timeout, sending instructions anyway"
+        sleep 8
+    fi
     sleep 1
 
     # Send the context reference (--force since this is a fresh sentry window)
@@ -2171,7 +2194,7 @@ main() {
     _orch_log "[STARTUP] Git HEAD: $(git rev-parse --short HEAD 2>/dev/null || echo 'unknown')"
     _orch_log "[STARTUP] Git branch: $(git branch --show-current 2>/dev/null || echo 'unknown')"
     _orch_log "[STARTUP] tmux version: $(tmux -V 2>/dev/null || echo 'unknown')"
-    _orch_log "[STARTUP] claude version: $(claude --version 2>/dev/null || echo 'unknown')"
+    _orch_log "[STARTUP] opencode version: $(opencode --version 2>/dev/null || echo 'unknown')"
     _orch_log "[STARTUP] uv version: $(uv --version 2>/dev/null || echo 'unknown')"
     _orch_log "[STARTUP] node version: $(node --version 2>/dev/null || echo 'unknown')"
     _orch_log "============================================================"

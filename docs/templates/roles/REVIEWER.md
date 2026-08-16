@@ -87,7 +87,10 @@ When reporting [DONE], include:
 
 ```
 [DONE] Reviewed <topic> for <worker-name>. Decision: <one-line summary>
+Commit: <sha of the commit you reviewed>
 ```
+
+Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. As a review-only agent you make no commits yourself — include the hash of the commit you verified. The only exemption is agents whose name/role contains "research"; if your review had no commit to verify, say so explicitly and expect the supervisor to handle the verification failure.
 
 Your [REVIEW] message to the worker should be:
 - **Clear** — the worker should know exactly what to do
@@ -116,5 +119,5 @@ Relevant files: src/server/services/mailbox.py
 - Don't edit files — your output is a decision, not a diff
 - Don't spawn other agents — you are a leaf node, no delegation
 - Don't take on follow-up work — if the worker needs more help, they send another `[REVIEW-REQUEST]`
-- Don't use interactive tools (`AskUserQuestion`, `EnterPlanMode`) — you run unattended
+- Don't stop to ask the user questions or wait for approval — you run unattended and autonomous; ask the supervisor via mailbox if truly blocked
 - Don't deliberate endlessly — make a decision and move on

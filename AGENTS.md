@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
+This file provides guidance to opencode agents working in this repository.
 
 ## Project overview
 
@@ -13,40 +13,45 @@ The architecture enables safe self-modification through:
 - **Supervisor coordination** — one supervisor delegates tasks and reviews changes before integration
 - **Persistent memory** — journal system maintains context across sessions
 
-## Supervisor task completion checklist
+## Task completion checklist
 
-> **Mandatory**: the supervisor agent must complete this checklist after every task. Skipping steps loses work history.
+> **Mandatory**: this checklist must be completed after every task. Skipping steps loses work history.
+>
+> **Division of labor** (see docs/SUPERVISOR_ROLE.md, which is authoritative): **WORKERS** commit, test, and journal their own work — the supervisor never writes code, commits, or runs tests itself. The **SUPERVISOR's** checklist is to **VERIFY** the worker's output and report to the user.
 
-### After every code change
+### Workers — after every code change
 
 - Stage and commit changes with a descriptive message:
   ```bash
   git add <files>
   git commit -m "<type>: <description>"
   ```
-- Create a journal entry via API:
-  ```bash
-  curl -X POST http://localhost:8000/api/journal/entry \
-    -H "Content-Type: application/json" \
-    -d '{
-      "title": "<task title>",
-      "content": "## What was done\n<description>\n\n## Why\n<rationale>\n\n## Key decisions\n<decisions>\n\n## Issues encountered\n<issues or none>",
-      "tags": ["<relevant>", "<tags>"]
-    }'
-  ```
-
-### After complex tasks (when applicable)
-
 - Run tests if Python changed: `uv run pytest`
 - Run typecheck if frontend changed: `cd src/frontend && npm run typecheck`
 - Build frontend if frontend changed: `cd src/frontend && npm run build`
+- Journal the work (see snippet below), then report `[DONE]` with the commit hash
+
+### Supervisor — before marking a task complete
+
+- Confirm the worker's commit exists: `git log -1 --oneline` (or `git show <sha> --stat`)
+- Confirm verification passed (verify-done `[VERIFIED]`, test/typecheck output, or reviewer approval)
+- Confirm the worker's journal entry exists
 - Verify system health: `curl http://localhost:8000/api/webhooks/health`
-
-### Before marking a task complete
-
-- Confirm commit exists: `git log -1 --oneline`
-- Confirm journal entry was saved
 - Report commit hash and brief summary to the user
+
+### Journaling coordination decisions (supervisors)
+
+Supervisors journal their own coordination decisions — that's allowed; only code edits/commits are delegated:
+
+```bash
+curl -X POST http://localhost:8000/api/journal/entry \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "<task title>",
+    "content": "## What was done\n<description>\n\n## Why\n<rationale>\n\n## Key decisions\n<decisions>\n\n## Issues encountered\n<issues or none>",
+    "tags": ["<relevant>", "<tags>"]
+  }'
+```
 
 ## Development commands
 
@@ -126,7 +131,7 @@ Webhooks/User → Mailbox (.soren/mailbox) → Router daemon → Supervisor agen
 
 - Agent statuses: `PENDING`, `IN_PROGRESS`, `BLOCKED`, `TESTING`, `COMPLETE`, `FAILED`, `IDLE`
 - Message types: `TASK`, `STATUS`, `RESPONSE`, `ERROR`, `USER`
-- Agent events (from Claude Code hooks): `PostToolUse`, `Stop` — tracked in `routes/agent_events.py`
+- Agent events (from the soren-bridge opencode plugin): `UserPromptSubmit`, `PostToolUse`, `Stop` — tracked in `routes/agent_events.py`
 
 ### Runtime data
 
@@ -146,7 +151,7 @@ REST endpoints under `/api/`:
 - `/agents` — CRUD, messaging, terminal capture
 - `/agents/ws` — WebSocket for real-time updates
 - `/messages` — history and user message display
-- `/agent-events` — Claude Code hook event receiver
+- `/agent-events` — agent event receiver (fed by `.opencode/plugins/soren-bridge.ts`)
 - `/journal` — daily journal CRUD and search
 - `/filesystem` — file browser
 - `/webhooks/{source}` — external webhook receiver
@@ -160,11 +165,43 @@ Tests use pytest-asyncio with `asyncio_mode = "auto"`. Use `httpx.AsyncClient` w
 
 ## Environment variables
 
-Key settings (in `src/server/config.py`):
+There are two separate groups (see `.env.example`):
 
-- `SOREN_HOST` / `SOREN_PORT` — server bind (default `0.0.0.0:8000`)
+**Python server** (pydantic settings with `SOREN_` prefix, in `src/server/config.py`):
+
+- `SOREN_HOST` / `SOREN_PORT` — server bind (default `127.0.0.1:8000`; set `SOREN_HOST=0.0.0.0` for remote access)
+- `SOREN_TMUX_SESSION` — tmux session name (default `soren`)
+- `SOREN_MAILBOX_PATH` — message queue path (default `.soren/mailbox`)
+
+**Shell tools** (read separately in `tools/`):
+
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — message queue path (default `.soren/mailbox`)
+
+## Execution engine (opencode)
+
+Every SOREN agent is an [opencode](https://opencode.ai) TUI running in a tmux
+window, pinned to a dedicated embedded-server port (`SOREN_OC_PORT`, range
+42000-42999, recorded as `oc_port` in `.soren/agent_registry.json`).
+
+- **Spawning**: `tools/workers spawn` launches `opencode --port <p>` with
+  `OPENCODE_PERMISSION` granting full autonomy (replaces Claude Code's
+  `--dangerously-skip-permissions`).
+- **Events**: `.opencode/plugins/soren-bridge.ts` (active only when
+  `SOREN_AGENT=true` AND `SOREN_AGENT_NAME` is set) posts `UserPromptSubmit`/`PostToolUse`/`Stop` to
+  `/api/agent-events`, streams thoughts to `/api/thoughts`, appends
+  `.soren/audit.log`, touches heartbeat files, enforces the supervisor
+  edit block, runs the stop-gate nudge, and triggers
+  `.opencode/hooks/verify-done.sh` on mailbox done reports.
+- **Messaging**: delivery prefers HTTP (`POST /tui/append-prompt` +
+  `/tui/submit-prompt` on the agent's port) with tmux send-keys fallback.
+- **Sleep/wake**: session IDs (`ses_*`) captured from plugin events; wake
+  resumes with `opencode --session <id>`.
+- **Readiness/liveness**: `GET /global/health` on the agent's port.
+- **Model tiers**: `haiku|sonnet|opus` map to provider models via
+  `tools/lib/opencode.sh` (`SOREN_MODEL_*` env overrides). The default tier
+  is opus for all workers (`get_model_default`); `--model` overrides per
+  worker. `teams setup` has no model flag — teams always spawn opus.
 
 ## Self-improvement safety model
 

@@ -1,0 +1,39 @@
+// Example MCP server configuration for opencode.
+// Merge the "mcp" block into your opencode.json (or opencode.jsonc).
+// Docs: https://opencode.ai/docs/mcp-servers
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "chrome-devtools": {
+      "type": "local",
+      "command": ["npx", "-y", "chrome-devtools-mcp@latest"],
+      "enabled": true
+    },
+    "context7": {
+      "type": "local",
+      "command": ["npx", "-y", "@upstash/context7-mcp@latest"],
+      "enabled": true
+    },
+    "browseruse": {
+      "type": "local",
+      "command": ["npx", "-y", "@anthropic/browseruse-mcp@latest"],
+      "environment": {
+        "BROWSERUSE_HEADLESS": "true"
+      },
+      "enabled": true
+    },
+    "shadcn": {
+      "type": "local",
+      "command": ["npx", "shadcn@latest", "mcp"],
+      "enabled": true
+    },
+    "notionApi": {
+      "type": "local",
+      "command": ["npx", "-y", "@notionhq/notion-mcp-server"],
+      "environment": {
+        "NOTION_TOKEN": "your-notion-token-here"
+      },
+      "enabled": true
+    }
+  }
+}

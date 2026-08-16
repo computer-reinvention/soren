@@ -3,11 +3,12 @@
 # watchdog - Detect stuck agents via tmux pane content heuristics
 #
 # Scans all agent tmux windows for patterns that indicate the agent is stuck:
-#   - Permission prompts (waiting for user approval)
-#   - Plan mode (waiting for plan approval)
-#   - Interactive inputs (AskUserQuestion, EnterPlanMode)
 #   - Repeated error output (infinite loops)
-#   - Crash/exit states (Claude exited, process dead)
+#   - Crash/exit states (opencode exited, process dead)
+#   - Git conflicts, resource exhaustion, rate limiting
+#
+# Note: permission/plan-approval stuck states from the Claude Code era cannot
+# occur — agents run opencode with OPENCODE_PERMISSION allow-all.
 #
 # Usage:
 #   watchdog scan              Scan all agents, report findings
@@ -53,43 +54,25 @@ check_pane_content() {
     local pane_output="$1"
     local window_name="$2"
 
-    # Pattern 1: Permission prompt — Claude Code's actual permission UI
-    # The real prompt shows "Allow <tool>?" with yes/no options, or "Do you want to allow"
-    # Only match Claude Code's specific permission format (line starts with permission indicator)
-    if echo "$pane_output" | grep -qE '^\s*(Allow|Deny|Skip)\s' 2>/dev/null; then
-        echo "critical|Waiting for permission approval|"
-        return 0
-    fi
+    # NOTE: Permission-approval / plan-mode / interactive-question stuck states
+    # were Claude Code UI artifacts. With OPENCODE_PERMISSION allow-all these
+    # cannot occur under opencode, so those checks were removed.
 
-    # Pattern 2: Plan mode — Claude Code shows a specific plan approval prompt
-    # Only match if we see the actual plan mode UI indicator, not just text mentioning "plan"
-    if echo "$pane_output" | grep -qE '(Plan mode active|Approve plan\?|plan:.*approve)' 2>/dev/null; then
-        echo "critical|Stuck in plan mode (waiting for approval)|"
-        return 0
-    fi
-
-    # Pattern 3: Interactive question — Claude Code's question UI shows numbered options
-    # Only match the actual question UI format, not mentions of questions in text
-    if echo "$pane_output" | grep -qE '^\s*(❯|>)\s+(Option|Choice)\s' 2>/dev/null; then
-        echo "critical|Waiting for user question response|"
-        return 0
-    fi
-
-    # Pattern 4: Claude exited / process dead
-    if echo "$pane_output" | grep -qE '(claude.*exited|Session ended|Connection closed|returned to shell|\$ $)' 2>/dev/null; then
-        # Verify by checking if Claude process is running in this pane
+    # Pattern 1: opencode exited / process dead
+    if echo "$pane_output" | grep -qE '(opencode.*exited|Session ended|Connection closed|returned to shell|\$ $)' 2>/dev/null; then
+        # Verify by checking if the opencode process is running in this pane
         local pane_pid
         pane_pid=$(tmux display-message -t "${SOREN_SESSION}:${window_name}" -p '#{pane_pid}' 2>/dev/null || echo "")
         if [[ -n "$pane_pid" ]]; then
-            # Check if claude is in the process tree
-            if ! pgrep -P "$pane_pid" -f "claude" >/dev/null 2>&1; then
-                echo "critical|Claude process not running (exited or crashed)|"
+            # Check if opencode is in the process tree
+            if ! pgrep -P "$pane_pid" -f "opencode" >/dev/null 2>&1; then
+                echo "critical|opencode process not running (exited or crashed)|"
                 return 0
             fi
         fi
     fi
 
-    # Pattern 5: Error loop — same error message repeated multiple times
+    # Pattern 2: Error loop — same error message repeated multiple times
     # Look for repeated lines in the last N lines
     local repeated
     repeated=$(echo "$pane_output" | grep -v '^\s*$' | sort | uniq -c | sort -rn | head -1 | awk '{print $1}')
@@ -100,19 +83,19 @@ check_pane_content() {
         return 0
     fi
 
-    # Pattern 6: Git conflict / merge state
+    # Pattern 3: Git conflict / merge state
     if echo "$pane_output" | grep -qiE '(CONFLICT|merge conflict|fix conflicts|Merge branch)' 2>/dev/null; then
         echo "warning|Git merge conflict detected|"
         return 0
     fi
 
-    # Pattern 7: Disk full / resource exhaustion
+    # Pattern 4: Disk full / resource exhaustion
     if echo "$pane_output" | grep -qiE '(No space left|disk full|ENOMEM|out of memory|Cannot allocate)' 2>/dev/null; then
         echo "critical|Resource exhaustion (disk/memory)|"
         return 0
     fi
 
-    # Pattern 8: Rate limited
+    # Pattern 5: Rate limited
     if echo "$pane_output" | grep -qiE '(rate.?limit|429|too many requests|throttl)' 2>/dev/null; then
         echo "warning|Rate limited — may resolve on its own|"
         return 0
@@ -201,7 +184,7 @@ cmd_scan() {
         [[ "$wname" == "monitor" ]] && continue
         [[ "$wname" == "supervisor" ]] && continue
 
-        ((total_checked++))
+        total_checked=$((total_checked+1))
 
         if check_agent "$wname" "$auto_fix"; then
             found_issues=true
@@ -212,8 +195,8 @@ cmd_scan() {
                 local sev
                 sev=$(echo "$result_line" | cut -d'|' -f1)
                 case "$sev" in
-                    critical) ((critical_count++)) ;;
-                    warning)  ((warning_count++)) ;;
+                    critical) critical_count=$((critical_count+1)) ;;
+                    warning)  warning_count=$((warning_count+1)) ;;
                 esac
             fi
         else
@@ -270,14 +253,14 @@ USAGE:
     watchdog help              Show this help
 
 DETECTION PATTERNS:
-    Permission prompts     Agent waiting for tool approval
-    Plan mode              Agent waiting for plan approval
-    User questions         Agent waiting for AskUserQuestion response
-    Process exit           Claude process no longer running
+    Process exit           opencode process no longer running
     Error loops            Same output line repeated >5 times
     Git conflicts          Merge conflict state detected
     Resource exhaustion    Disk full, out of memory
     Rate limiting          API rate limits detected
+
+NOTE: Permission/plan-approval stuck states cannot occur — agents run
+opencode with OPENCODE_PERMISSION allow-all.
 
 EXIT CODES:
     0 = stuck agents found

@@ -67,22 +67,24 @@ Before starting work, determine what kind of project you're in:
 
 | Signal | Project Type | Required Testing |
 |--------|-------------|-----------------|
-| `package.json` with `vite`, `next`, `react`, or `vue` | **Web/Frontend** | Browser testing via Chrome MCP |
+| `package.json` with `vite`, `next`, `react`, or `vue` | **Web/Frontend** | Browser testing via chrome-devtools MCP tools |
 | `pyproject.toml` or `go.mod` without frontend | **Backend/API** | Runnable demo scripts |
 | CLI tool, shell scripts, no server | **CLI** | Run the tool, show output |
 | Mixed (frontend + backend) | **Full-stack** | Both browser AND API testing |
 
 ### Web/Frontend Projects — Browser Testing REQUIRED
 
-You MUST use Chrome DevTools MCP tools to verify every user-facing change in the actual running app:
+You MUST use chrome-devtools MCP tools (`navigate_page`, `take_snapshot`, `take_screenshot`, `click`, `fill`, `wait_for` — available when the chrome-devtools MCP server is enabled in opencode.json; see `opencode.mcp.example.jsonc`) to verify every user-facing change in the actual running app:
 
 ```
-1. mcp__chrome-devtools__navigate_page  → Navigate to the feature
-2. mcp__chrome-devtools__take_snapshot  → Verify elements exist
-3. mcp__chrome-devtools__click / fill   → Interact with the UI
-4. mcp__chrome-devtools__take_screenshot → Save visual evidence
-5. mcp__chrome-devtools__wait_for       → Verify async operations
+1. navigate_page    → Navigate to the feature
+2. take_snapshot    → Verify elements exist
+3. click / fill     → Interact with the UI
+4. take_screenshot  → Save visual evidence
+5. wait_for         → Verify async operations
 ```
+
+Browser testing requires the chrome-devtools MCP server to be enabled; if it is unavailable, verify via curl + build output and note the gap in your `[DONE]`.
 
 **Save screenshots** to `.soren/journal/YYYY-MM-DD/attachments/` as evidence. No commit without visual verification.
 
@@ -124,14 +126,17 @@ You MUST run the CLI tool and capture output proving the feature works:
 
 ### Testing Evidence in [DONE] Messages
 
-Your `[DONE]` message MUST include testing evidence:
+Your `[DONE]` message MUST include testing evidence AND the commit hash:
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Reproduced with: <test case>
 Verified with: <how you confirmed it works>
 Evidence: <screenshot path, test output, or demo script path>
 ```
+
+The `Commit:` line is required — `verify-done.sh` requires a 7-40 character hex commit hash in every non-research `[DONE]`. A missing hash triggers a `[FIX-REQUEST]`; after 2 missing-hash retries, the failure escalates to the supervisor. Only agents whose name contains "research" are exempt (research-only tasks with no code changes).
 
 **If you cannot verify your work, report [BLOCKED] instead of [DONE].**
 
@@ -168,7 +173,7 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 | `./tools/journal` | `journal log "msg"` / `note "title" "body"` / `decision "title" "body"` / `read [date]` | Persistent memory — journal as you work |
 | `./tools/mailbox` | `mailbox send <to> <subj> <body>` / `done "summary"` / `blocked "issue"` / `status "update"` / `read [lines]` | Communicate with supervisor and other agents |
 | `./tools/notify` | `notify "msg"` / `notify "msg" --level alert` | Append a notification line to `.soren/notifications.log` |
-| `./tools/agents` | `agents list` / `get <id>` / `find <name>` | Look up agents in the registry |
+| `./tools/agents` | `agents list` / `lookup <id-or-name>` | Look up agents in the registry |
 | `./tools/prefs` | `prefs list` / `get <key>` | Read agent behavior preferences (1-10 scales) |
 
 ### Supervisor-only tools (not for workers)
@@ -270,11 +275,11 @@ Do not kill, rename, or reconfigure the `soren` tmux session or its system windo
 
 You are running in a tmux window with no human operator watching. **Never use interactive tools that block waiting for user input.** Specifically:
 
-- **NEVER** use `AskUserQuestion` — nobody is there to answer
-- **NEVER** use `EnterPlanMode` / `ExitPlanMode` — nobody is there to approve
+- **NEVER** stop to ask the user questions — nobody is there to answer
+- **NEVER** pause and wait for plan approval — nobody is there to approve
 - **NEVER** ask for clarification and wait
 
-> **Enforced by hook:** A PreToolUse hook (`block-interactive.sh`) will automatically reject calls to `AskUserQuestion` and `EnterPlanMode` for all worker agents. You don't need to remember this rule — the system enforces it.
+> **Behavioral rule:** Never stop to ask the user questions or wait for approval — you are autonomous. If you are truly blocked, ask your supervisor via mailbox (`[QUESTION]` or `[BLOCKED]`) and continue with your best judgment where possible.
 
 **If you're unsure about an approach**, send a `[REVIEW-REQUEST]` to the supervisor via mailbox. Include enough context for a reviewer agent to make a decision without needing to ask you questions.
 
@@ -317,7 +322,7 @@ The supervisor spawns a short-lived **reviewer agent** who will:
 ### 2. Test Before Commit
 
 - After making a fix, verify it works with the SAME test case that reproduced the bug
-- For UI/frontend bugs: MUST test in browser (Chrome MCP) before committing
+- For UI/frontend bugs: MUST test in browser (chrome-devtools MCP tools) before committing
 - Never commit a fix you haven't verified actually works
 
 ### 3. Evidence Required
@@ -331,10 +336,13 @@ Your [DONE] message MUST include:
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Reproduced with: <describe exact test case used>
 Verified with: <describe how you confirmed the fix>
-Evidence: <file path or 'tested in browser via Chrome MCP'>
+Evidence: <file path or 'tested in browser via chrome-devtools MCP'>
 ```
+
+`Commit: <sha>` is mandatory for non-research work — verify-done.sh rejects `[DONE]` messages without a 7-40 char hex hash (2 retries, then escalation to the supervisor).
 
 If you cannot verify a fix, report [BLOCKED] instead of [DONE].
 
@@ -369,6 +377,7 @@ Use these prefixes to communicate with your supervisor:
 
 ```
 [DONE] Login form implemented with validation
+Commit: a1b2c3d
 Files modified:
 - src/components/LoginForm.tsx (created)
 - src/pages/Login.tsx (modified)
@@ -399,7 +408,7 @@ All tags used in the SOREN system, consolidated for quick reference.
 | `[SYS]` | Any agent (prefix) | Backend strips it, sets `type=system`. Frontend renders as compact notification instead of full chat message. Use for heartbeat acks, compaction recovery, idle confirmations. |
 | `[HEARTBEAT]` | System → Agent | Idle nudge from the monitor daemon. Not sent by agents — agents receive this. |
 
-## Journaling (Use the `/journal` skill)
+## Journaling (load the `journal` skill via the opencode skill tool, or run `./tools/journal` directly)
 
 **Journal instinctively.** The journal is the system's long-term memory — it survives compaction, restarts, and rollbacks. If you don't journal it, it's lost forever.
 
@@ -468,6 +477,7 @@ Worker:
 [STATUS] Applying fix and writing test
 
 [DONE] Fixed token expiration bug
+Commit: 4f9e2a1
 Root cause: UTC offset not applied to expiration timestamp
 Files modified:
 - src/auth/token.py (fixed timezone handling)
@@ -592,7 +602,7 @@ Need help with: <specific question>
 
 ### After Making Changes
 
-- Run tests: `uv run pytest` (Python) or `npm run test` (Frontend)
+- Run tests: `uv run pytest` (Python) or `npm run lint && npm run typecheck` (Frontend — there is no test script)
 - Run linting: `npm run lint` (Frontend)
 - Run typecheck: `npm run typecheck` (Frontend)
 
@@ -604,7 +614,7 @@ Need help with: <specific question>
 | Progress update    | `[STATUS] <what you're doing>`         |
 | Need clarification | `[QUESTION] <your question>`           |
 | Stuck              | `[BLOCKED] <issue and what you tried>` |
-| Finished           | `[DONE] <summary with files changed>`  |
+| Finished           | `[DONE] <summary>` + `Commit: <sha>`   |
 
 ---
 

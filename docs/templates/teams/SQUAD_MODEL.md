@@ -151,9 +151,9 @@ The squad CANNOT report `[DONE]` until ALL of the following are verified:
 | Component | Required Verification |
 |-----------|----------------------|
 | Backend | pytest passes AND endpoints respond correctly to curl |
-| Frontend | Browser test via Chrome MCP (snapshot + screenshot evidence) |
+| Frontend | Browser test via chrome-devtools MCP (snapshot + screenshot evidence) |
 | Integration | End-to-end flow tested in the browser |
 
 **Squad Lead**: Do NOT approve completion without testing evidence from the Tester. If the Tester reports issues, send workers back to fix before reporting [DONE].
 
-**Tester**: Your `[DONE]` message MUST include screenshot paths and test output. See `docs/templates/roles/TESTER.md` for Chrome MCP and CLI testing protocols.
+**Tester**: Your `[DONE]` message MUST include screenshot paths and test output. See `docs/templates/roles/TESTER.md` for chrome-devtools MCP and CLI testing protocols.

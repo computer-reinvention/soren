@@ -44,9 +44,9 @@ router = APIRouter()
 @router.post("", response_model=AgentEventResponse)
 async def receive_agent_event(event: AgentEvent):
     """
-    Receive events from Claude Code hooks.
+    Receive events from the soren-bridge opencode plugin.
 
-    This endpoint is called by the hook scripts when:
+    This endpoint is called by the plugin when:
     - PostToolUse: After a tool (Bash, Write, Edit, Read) is executed
     - Stop: When the agent completes a response
 
@@ -283,9 +283,13 @@ async def _maybe_compact_agent(event: AgentEvent, display_agent_id: str):
     if not usage or not isinstance(usage, dict):
         return
 
+    # Context size = fresh input + cached prefix + output of the final turn.
+    # (The soren-bridge plugin reports the last assistant message's tokens;
+    # with prompt caching most of the context sits in cache_read.)
     input_tokens = int(usage.get("input_tokens", 0) or 0)
+    cache_read_tokens = int(usage.get("cache_read_input_tokens", 0) or 0)
     output_tokens = int(usage.get("output_tokens", 0) or 0)
-    total_tokens = input_tokens + output_tokens
+    total_tokens = input_tokens + cache_read_tokens + output_tokens
     if total_tokens == 0:
         return
 

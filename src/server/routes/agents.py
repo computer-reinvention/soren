@@ -212,7 +212,7 @@ async def send_message_to_agent(agent_id: str, message: AgentMessage, request: R
 
     # Prefix with [username] so the message starts with an alphabetic character.
     # This prevents tmux send-keys content (e.g. markdown like "- [ ] task")
-    # from being interpreted as Claude Code autocomplete suggestions.
+    # from being interpreted as opencode autocomplete suggestions.
     prefixed_content = f"[{username}] {message.content}"
     await tmux_service.send_input(agent.tmux_window, prefixed_content)
     await ws_manager.broadcast("message_sent", {

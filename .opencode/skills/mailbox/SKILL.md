@@ -1,14 +1,13 @@
 ---
 name: mailbox
 description: Send messages to other agents or the user. Use when you need to communicate with supervisor, other workers, or report to user.
-allowed-tools: Bash(./tools/mailbox:*)
 ---
 
 # Mailbox Communication
 
 ## You Are An Agent
 
-You are a Claude Code agent running in a tmux window as part of the SOREN multi-agent orchestration system. You are NOT chatting with a human user directly.
+You are an opencode agent running in a tmux window as part of the SOREN multi-agent orchestration system. You are NOT chatting with a human user directly.
 
 **Your context:**
 - You are `$SOREN_AGENT_NAME` in session `$SOREN_SESSION`

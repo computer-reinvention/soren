@@ -1,10 +1,30 @@
 import asyncio
 import os
+import random
+import socket
 from typing import List, Optional
 
 from ..config import settings
 from ..models.session import Session, SessionStatus
 from .tmux_service import tmux_service
+
+
+def _allocate_free_port(start: int = 42000, end: int = 42999) -> int:
+    """Allocate a free TCP port for an opencode agent server.
+
+    Tries random ports in the SOREN_OC_PORT range and verifies availability
+    with connect_ex. Falls back to an OS-assigned ephemeral port.
+    """
+    candidates = random.sample(range(start, end + 1), min(50, end - start + 1))
+    for port in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    # Fallback: let the OS pick a free port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 class SessionManager:
@@ -115,23 +135,23 @@ class SessionManager:
         # (spawned sessions don't need a monitor window - only main session has health monitoring)
         await tmux_service.create_session(session_id, initial_window=supervisor_name)
 
-        # 3. Start Claude in supervisor window
+        # 3. Start opencode in supervisor window, pinned to a dedicated port.
+        # Permissions are granted via OPENCODE_PERMISSION (allow-all) rather
+        # than a CLI flag.
+        oc_port = _allocate_free_port()
         startup_cmd = (
             f"export SOREN_AGENT=true SOREN_AGENT_NAME={supervisor_name} "
-            f"SOREN_SESSION={session_id} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false "
+            f"SOREN_SESSION={session_id} SOREN_OC_PORT={oc_port} "
+            f"OPENCODE_PERMISSION='{{\"*\":\"allow\",\"external_directory\":{{\"*\":\"allow\"}}}}' "
             f"&& cd {project_root} && "
-            f"claude --dangerously-skip-permissions"
+            f"opencode --port {oc_port} --hostname 127.0.0.1"
         )
         await tmux_service.send_input(supervisor_name, startup_cmd, session_id)
 
-        # 4. Wait for Claude to initialize (CRITICAL: 8 second delay)
-        await asyncio.sleep(settings.claude_startup_delay)
+        # 4. Wait for opencode to initialize (CRITICAL: 8 second delay)
+        await asyncio.sleep(settings.agent_startup_delay)
 
-        # 5. Disable vim mode if enabled (for reliable message delivery)
-        await tmux_service.disable_vim_mode(supervisor_name, session_id)
-        await asyncio.sleep(1)
-
-        # 6. Send role instructions
+        # 5. Send role instructions
         template_path = f"docs/templates/{template}.md" if template else "docs/templates/FEATURE_SUPERVISOR.md"
         role_msg = f"Read {template_path} to understand your role. Your task: {task_description}"
         await tmux_service.send_input(supervisor_name, role_msg, session_id)

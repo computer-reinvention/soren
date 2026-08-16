@@ -1,7 +1,6 @@
 ---
 name: projects
 description: Manage the project registry for multi-project support. Use when you need to register, list, or manage external projects.
-allowed-tools: Bash(./tools/projects:*)
 ---
 
 # Project Registry

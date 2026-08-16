@@ -381,7 +381,7 @@ cmd_teardown() {
     while IFS= read -r window; do
         if [[ "$window" == ${prefix}-* ]]; then
             info "Killing $window..."
-            "$WORKERS_TOOL" kill "$window" 2>/dev/null && ((killed++)) || warn "Failed to kill $window"
+            "$WORKERS_TOOL" kill "$window" 2>/dev/null && killed=$((killed+1)) || warn "Failed to kill $window"
         fi
     done <<< "$windows"
 
@@ -421,7 +421,7 @@ cmd_status() {
     local found=0
     while IFS= read -r window; do
         if [[ "$window" == ${prefix}-* ]]; then
-            ((found++))
+            found=$((found+1))
             echo "━━━ ${window} ━━━"
             tmux capture-pane -t "${SOREN_SESSION}:${window}" -p -S "-${lines}" 2>/dev/null || echo "(could not capture)"
             echo ""
@@ -834,7 +834,7 @@ cmd_setup_permanent() {
             echo -e "  ${CYAN}●${NC} ${wname}  (${rlabel})"
             echo -e "    ${DIM}Role file: ${role_files[$idx]}${NC}"
             echo -e "    ${DIM}Command: workers spawn ${wname} <task> --permanent ${role_files[$idx]} --project ${project_id}${NC}"
-            ((idx++))
+            idx=$((idx+1))
         done <<< "$roles"
         echo ""
 
@@ -878,7 +878,7 @@ cmd_setup_permanent() {
         fi
 
         echo ""
-        ((idx++))
+        idx=$((idx+1))
     done <<< "$roles"
 
     # --- Step 5: Record team in teams.json ---

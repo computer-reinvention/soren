@@ -180,7 +180,7 @@ function shortenPath(path: string, maxLen = 45): string {
   // Try to show the last 2-3 meaningful path segments
   if (parts.length <= 2) return truncate(path, maxLen);
   // Remove common prefixes like /Users/name/Desktop/code/...
-  const srcIdx = parts.findIndex(p => p === 'src' || p === 'tools' || p === 'docs' || p === 'tests' || p === '.claude');
+  const srcIdx = parts.findIndex(p => p === 'src' || p === 'tools' || p === 'docs' || p === 'tests' || p === '.opencode');
   if (srcIdx >= 0) {
     const shortened = parts.slice(srcIdx).join('/');
     if (shortened.length <= maxLen) return shortened;

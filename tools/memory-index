@@ -127,14 +127,21 @@ def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
 def index_docs(project_path: Path, pid: str) -> int:
     """Index key documentation files when no journal exists.
 
-    Looks for: README.md, CLAUDE.md, docs/**/*.md
+    Looks for: README.md, AGENTS.md (falling back to CLAUDE.md), docs/**/*.md
     Returns count added.
     """
     candidates = []
-    for name in ("README.md", "CLAUDE.md"):
-        f = project_path / name
-        if f.exists():
-            candidates.append(f)
+    readme = project_path / "README.md"
+    if readme.exists():
+        candidates.append(readme)
+    # Prefer AGENTS.md; fall back to legacy CLAUDE.md if AGENTS.md is missing
+    agents_md = project_path / "AGENTS.md"
+    if agents_md.exists():
+        candidates.append(agents_md)
+    else:
+        claude_md = project_path / "CLAUDE.md"
+        if claude_md.exists():
+            candidates.append(claude_md)
     docs_dir = project_path / "docs"
     if docs_dir.exists():
         candidates.extend(sorted(docs_dir.glob("**/*.md")))

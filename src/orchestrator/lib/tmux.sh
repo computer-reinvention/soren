@@ -30,9 +30,11 @@ tmux_create_window() {
 }
 
 # Send keys to a tmux window (low-level primitive)
-# For long messages (>4KB), uses tmux load-buffer/paste-buffer for reliability
-# WARNING: Multiline content may cause "[Pasted text]" buffer issues in Claude Code
-# For worker tasks, prefer writing to a file and sending a read instruction
+# Delivery order:
+#   1. HTTP injection via the agent's embedded opencode server (reliable,
+#      immune to paste/prompt-state issues) when a port is registered.
+#   2. tmux send-keys / paste-buffer fallback for plain shells or when the
+#      opencode server is unreachable.
 #
 # Callers SHOULD use tmux_safe_send() instead — it checks pane state first.
 # Only use tmux_send_keys() directly for fresh windows or when state is known.
@@ -42,6 +44,20 @@ tmux_send_keys() {
     shift 2
     local keys="$*"
     local msg_len=${#keys}
+
+    # HTTP-first: inject via the opencode TUI's embedded server if available
+    local oc_port
+    if oc_port=$(_tmux_oc_port "$window") 2>/dev/null; then
+        local payload
+        if payload=$(jq -cn --arg t "$keys" '{text: $t}' 2>/dev/null); then
+            if curl -sf -m 5 -X POST "http://127.0.0.1:${oc_port}/tui/append-prompt" \
+                    -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
+                sleep 0.2
+                curl -sf -m 5 -X POST "http://127.0.0.1:${oc_port}/tui/submit-prompt" \
+                    -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 && return 0
+            fi
+        fi
+    fi
 
     # For long messages (>4KB), use buffer-based approach
     # This avoids issues with send-keys -l on large text
@@ -55,13 +71,13 @@ tmux_send_keys() {
         tmux paste-buffer -t "${session}:${window}" -b soren-msg -d
         rm -f "$tmpfile"
 
-        # Longer delay for large messages - Claude needs time to process
+        # Longer delay for large messages - the TUI needs time to process
         sleep 0.5
     else
         # Send text literally for shorter messages
         tmux send-keys -t "${session}:${window}" -l "$keys"
 
-        # Delay for paste to be processed by Claude Code
+        # Delay for paste to be processed by the TUI
         # Long single-line messages (>200 chars) trigger paste detection too
         if [[ "$keys" == *$'\n'* ]]; then
             sleep 0.3
@@ -107,9 +123,9 @@ tmux_list_windows() {
 }
 
 # Detect and submit stuck paste buffers in a tmux pane.
-# After tmux send-keys delivers multiline text, Claude Code may show
-# "[Pasted text #N +M lines]" without submitting. This checks for that
-# pattern and presses Enter to unstick it.
+# After tmux send-keys delivers multiline text, the TUI may show a collapsed
+# paste placeholder without submitting. This checks for that pattern and
+# presses Enter to unstick it.
 #
 # Usage: tmux_unstick_paste session window
 # Returns: 0 if unstick was needed and performed, 1 if no stuck paste found
@@ -121,7 +137,7 @@ tmux_unstick_paste() {
     local tail_output
     tail_output=$(tmux capture-pane -t "${session}:${window}" -p -S -5 2>/dev/null) || return 1
 
-    if echo "$tail_output" | grep -qE '\[Pasted text'; then
+    if echo "$tail_output" | grep -qiE '\[(Pasted text|paste #)'; then
         tmux send-keys -t "${session}:${window}" Enter
         sleep 0.2
         return 0
@@ -146,7 +162,7 @@ tmux_sweep_stuck_pastes() {
         local tail_output
         tail_output=$(tmux capture-pane -t "${session}:${window}" -p -S -5 2>/dev/null) || continue
 
-        if echo "$tail_output" | grep -qE '\[Pasted text'; then
+        if echo "$tail_output" | grep -qiE '\[(Pasted text|paste #)'; then
             tmux send-keys -t "${session}:${window}" Enter
             echo "[tmux_sweep] Unstuck paste buffer in ${session}:${window}" >&2
         fi
@@ -160,7 +176,7 @@ tmux_clear_input() {
     local window="$2"
     # Send Ctrl+U to clear the current line
     tmux send-keys -t "${session}:${window}" C-u
-    # Send Escape to exit any special mode (like vim mode in Claude)
+    # Send Escape to exit any special mode / dismiss dialogs
     tmux send-keys -t "${session}:${window}" Escape
     sleep 0.1
 }
@@ -172,9 +188,26 @@ tmux_clear_input() {
 # Queue directory for deferred messages
 SOREN_SEND_QUEUE_DIR="${SOREN_SEND_QUEUE_DIR:-.soren/send-queue}"
 
-# Detect the current state of a tmux pane.
-# Returns one of: PROMPT, PERMISSION, CONFIRMATION, PLAN_APPROVAL, SELECTION, VIM, BUSY, UNKNOWN
+# Look up the opencode embedded-server port for a window (agent) name.
+# Internal helper for HTTP-based state checks and message delivery.
+_tmux_oc_port() {
+    local window="$1"
+    local reg="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-.}}/.soren/agent_registry.json"
+    [[ -f "$reg" ]] || return 1
+    local port
+    port=$(jq -r --arg k "$window" '.[$k].oc_port // empty' "$reg" 2>/dev/null)
+    [[ -n "$port" && "$port" != "null" ]] || return 1
+    echo "$port"
+}
+
+# Detect the current state of a tmux pane running an opencode TUI.
+# Returns one of: PROMPT, CONFIRMATION, SELECTION, BUSY, UNKNOWN
 # Only PROMPT is safe for sending input.
+#
+# Detection strategy:
+#   1. If the agent's embedded opencode server responds, the TUI is up.
+#      Busy vs idle is inferred from the pane's status line.
+#   2. If no port is registered (e.g. plain shell), fall back to text patterns.
 #
 # Usage: state=$(tmux_pane_state "$session" "$window")
 tmux_pane_state() {
@@ -197,42 +230,44 @@ tmux_pane_state() {
     local last_lines
     last_lines=$(echo "$output" | grep -v '^$' | tail -5)
 
-    # VIM mode — check first (highest priority, very specific pattern)
-    if echo "$last_lines" | grep -qE '\-\- (INSERT|NORMAL|VISUAL) \-\-'; then
-        echo "VIM"
-        return 0
-    fi
-
-    # PERMISSION — Allow/Deny prompts from Claude Code
-    if echo "$last_lines" | grep -qiE 'allow once|allow always|allow|deny'; then
-        # Make sure it's actually a permission prompt, not just the word in output
-        if echo "$last_lines" | grep -qiE '(Allow|Deny|allow once|allow always)'; then
-            echo "PERMISSION"
-            return 0
-        fi
-    fi
-
-    # PLAN_APPROVAL — plan mode approval prompts
-    if echo "$last_lines" | grep -qiE '(approve|reject).*plan|plan.*(approve|reject)'; then
-        echo "PLAN_APPROVAL"
-        return 0
-    fi
-
-    # CONFIRMATION — y/n prompts
+    # CONFIRMATION — y/n prompts (shell tools, git hooks, etc.)
     if echo "$last_lines" | grep -qE '\(y/n\)|\(Y/N\)|\[y/N\]|\[Y/n\]|\(yes/no\)|\(Yes/No\)'; then
         echo "CONFIRMATION"
         return 0
     fi
 
-    # SELECTION — numbered option lists near end of output
+    # SELECTION — numbered option lists near end of output (dialogs)
     if echo "$last_lines" | grep -qE '^[[:space:]]*[1-4][).] '; then
         echo "SELECTION"
         return 0
     fi
 
-    # PROMPT — Claude Code is at prompt, safe to send
-    # Check for: ❯ prompt, "bypass permissions" text, ^> at start of line
-    if echo "$last_lines" | grep -qE '❯|bypass permissions|^> '; then
+    # HTTP health check — authoritative when the agent has a registered port
+    local port
+    if port=$(_tmux_oc_port "$window"); then
+        if curl -sf -m 2 "http://127.0.0.1:${port}/global/health" >/dev/null 2>&1; then
+            # TUI is up. Busy if the status line shows generation in progress.
+            if echo "$last_lines" | grep -qiE 'esc.{0,8}interrupt|working|thinking\.\.\.'; then
+                echo "BUSY"
+            else
+                echo "PROMPT"
+            fi
+            return 0
+        fi
+        # Port registered but server down — agent dead or still starting
+        echo "UNKNOWN"
+        return 0
+    fi
+
+    # No registered port — fall back to text heuristics.
+    # opencode busy indicators
+    if echo "$last_lines" | grep -qiE 'esc.{0,8}interrupt|working\.\.\.|thinking\.\.\.'; then
+        echo "BUSY"
+        return 0
+    fi
+
+    # Generic prompt indicators (opencode input box, shell prompts)
+    if echo "$last_lines" | grep -qE '❯|^> |^\$ |^% '; then
         echo "PROMPT"
         return 0
     fi

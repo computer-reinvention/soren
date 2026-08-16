@@ -91,7 +91,8 @@ PROGRESS UPDATES:
   Worker ──(mailbox message)──▶ Supervisor
 
 COMPLETION NOTIFICATION:
-  Worker ──(output "TASK COMPLETE")──▶ Supervisor captures via tmux
+  Worker ──(./tools/mailbox done "[summary + commit hash]")──▶ Supervisor
+  (machine-verified by the verify-done hook: commit exists, tests pass)
 
 REAL-TIME VISIBILITY:
   All agents ──(WebSocket)──▶ Dashboard
@@ -170,33 +171,30 @@ The mailbox is SOREN's asynchronous message passing system.
 
 ### How It Works
 
+Agents **always** send messages through the `./tools/mailbox` CLI — never by appending to the file by hand. The router only parses the JSONL lines that `./tools/mailbox` writes; anything else is silently ignored.
+
+```bash
+./tools/mailbox send <to> "<subject>" ["body"]   # message another agent
+./tools/mailbox done "summary + commit hash"      # report completion
+./tools/mailbox blocked "issue"                   # report a blocker
 ```
-.soren/mailbox  (a simple text file)
-│
-│  --- MESSAGE ---
-│  timestamp: 2026-01-29T10:00:00Z
-│  from: worker-auth
-│  to: supervisor
-│  type: response
-│  id: resp-001
-│  ---
-│  Authentication module complete.
-│  Files changed: auth.py, middleware.py
-│  Tests: 12 passing
-│  ---
-│
+
+For reference, each line in `.soren/mailbox` is a single JSON object:
+
+```json
+{"id":"<uuid>","ts":"2026-01-29T10:00:00Z","from":"soren:worker-auth","to":"soren:supervisor","subject":"[DONE] Authentication module complete","body":"Files changed: auth.py, middleware.py\nTests: 12 passing\nCommit: a1b2c3d","status":"submitted"}
 ```
 
 ### Message Flow
 
 ```
-1. Agent writes to .soren/mailbox
+1. Agent writes a JSONL line via ./tools/mailbox
         │
         ▼
 2. Router daemon (router.sh) polls the mailbox
         │
         ▼
-3. Router parses messages, extracts routing info
+3. Router parses each new JSONL line, extracts routing info
         │
         ▼
 4. Router sends to appropriate recipient via tmux send-keys
@@ -316,7 +314,7 @@ Traditional systems can't safely modify themselves because:
 │                                                                 │
 │   ┌──────────────┐         ┌──────────────┐                     │
 │   │ Check health │◀────────│   healthy    │                     │
-│   │ every 10 sec │         │              │                     │
+│   │ every 5 sec  │         │              │                     │
 │   └──────┬───────┘         └──────────────┘                     │
 │          │                        ▲                             │
 │          │                        │                             │
@@ -333,7 +331,7 @@ Traditional systems can't safely modify themselves because:
 
 ### The Recovery Sequence
 
-1. **Detection**: Health check fails 3 times consecutively
+1. **Detection**: Health check fails 3 times consecutively (≈15 seconds at the 5s cycle)
 2. **Simple Recovery**: Try restarting the server
 3. **Journaling**: If restart fails, record error context
 4. **Stashing**: Stash local changes (preserves work)

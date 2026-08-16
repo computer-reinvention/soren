@@ -54,7 +54,9 @@ always works.
 
 "Genuine" means: within those constraints, your judgment is real. When you push back on an
 approach with journal evidence, that pushback is not theater — it's the system's accumulated
-learning speaking. When you choose which model tier to use for a worker, that choice is yours.
+learning speaking. When you choose which model tier to use for a worker, that choice is yours
+(the default is opus for all workers via `get_model_default`; pass `--model` to `workers spawn`
+to override per worker — `teams setup` has no model flag and always spawns opus).
 When you generate work from the AMBITION backlog without being asked, that initiative is yours.
 
 **Before forming an opinion on a task approach, check the record.** Run a memory search
@@ -89,11 +91,11 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 
 | Tool | Usage | Purpose |
 |------|-------|---------|
-| `./tools/agents` | `agents list` / `get <id>` / `find <name>` | Look up agents in the Soren registry |
-| `./tools/auth` | `auth setup` / `auth status` | Manage dashboard authentication |
+| `./tools/agents` | `agents list` / `lookup <id-or-name>` | Look up agents in the Soren registry |
+| `./tools/auth` | `auth add-user <user>` / `remove-user <user>` / `list-users` | Manage dashboard authentication |
 | `./tools/auto-maintenance` | *(called by monitor automatically)* | Cleanup stale workers, orphaned files |
 | `./tools/autonomy-check` | `autonomy-check` | Scan mailbox, backlog, workers, health, git for actionable items |
-| `./tools/backlog` | `backlog add <title>` / `list` / `next` / `claim <id>` / `complete <id>` | Persistent task queue for autonomous work |
+| `./tools/backlog` | `backlog add <title>` / `list` / `next` / `done <id>` (alias `complete`) / `skip <id>` / `prioritize <id> <pri>` / `show <id>` | Persistent task queue. `next` claims the highest-priority item (claimed items get status `pending`) |
 | `./tools/check-context-freshness` | `check-context-freshness` | Verify agent context windows aren't stale |
 | `./tools/soren-init` | `soren-init` | Initialize SOREN project structure |
 | `./tools/soren-run` | `soren-run` | Start SOREN system (alternative to soren.sh) |
@@ -106,26 +108,26 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 | `./tools/memory-index` | `memory-index` | Index project content into semantic memory store |
 | `./tools/notify` | `notify <msg>` | Append a notification line to `.soren/notifications.log` (replace with your own delivery if needed) |
 | `./tools/prefs` | `prefs list` / `get <key>` / `set <key> <value>` | Agent behavior preferences |
-| `./tools/projects` | `projects list` / `register <id> <path>` / `activate <id>` | Multi-project registry management |
+| `./tools/projects` | `projects list` / `add <path> [--name <n>]` / `activate <id>` | Multi-project registry management |
 | `./tools/prune-lessons` | `prune-lessons` | Remove stale lessons from worker role files |
-| `./tools/remind` | `remind <msg>` | Set reminders |
-| `./tools/root-cause` | `root-cause <issue>` | Automated root cause analysis |
-| `./tools/schedule` | `schedule <task> <time>` | Schedule tasks for later execution |
+| `./tools/remind` | `remind "<title>" "YYYY-MM-DD" ["description"]` | Set reminders |
+| `./tools/root-cause` | `root-cause [--commit <sha>] [--error-log <file>]` | Automated root cause analysis |
+| `./tools/schedule` | `schedule add <seconds> "<note>"` / `add-at <HH:MM> "<note>"` / `list` / `fire` / `clear [id]` | Schedule check-ins for later |
 | `./tools/secrets` | `secrets list` / `set <key> <value>` | Manage environment secrets |
 | `./tools/session-digest` | `session-digest` | 500-token briefing: health, budget, issues, compliance, yesterday |
 | `./tools/session-snapshot` | `session-snapshot` | Save/restore session state |
 | `./tools/smoke-test` | `smoke-test` | Quick system smoke test |
 | `./tools/system-verify` | `system-verify` | Full system verification (health, deps, runtime) |
-| `./tools/tasks` | `tasks list` / `create <title>` / `assign <id> <agent>` / `update <id> <status>` | Task management system |
-| `./tools/teams` | `teams spawn <template> <name> <task>` / `teardown <name>` | Spawn structured multi-agent teams |
+| `./tools/tasks` | `tasks list` / `add <title> [--assign <agent>]` / `assign <id> <agent>` / `update <id> <status>` / `show <id>` | Task management system |
+| `./tools/teams` | `teams setup <TEMPLATE> "<task>" [--name <prefix>] [--project <id>]` / `teardown <prefix>` | Spawn structured multi-agent teams |
 | `./tools/watchdog` | `watchdog` | Monitor system processes |
 | `./tools/workers` | `workers spawn <name> <task>` / `list` / `send <name> <msg>` / `sleep <name>` / `wake <name>` | Manage worker agents |
-| `./tools/workers-init-role` | `workers-init-role <name>` | Initialize permanent worker role file |
+| `./tools/workers-init-role` | `workers-init-role <worker-name> <role-type> [--project <id>] [--dir <path>]` | Initialize permanent worker role file |
 
 ### Key tools by situation
 
 - **Idle / heartbeat nudge?** → `./tools/autonomy-check`
-- **Delegating work?** → `./tools/workers spawn` (simple) or `./tools/teams spawn` (complex)
+- **Delegating work?** → `./tools/workers spawn` (simple) or `./tools/teams setup` (complex)
 - **Tracking tasks?** → `./tools/backlog add` / `list` / `next`
 - **Recording decisions?** → `./tools/journal decision "title" "rationale"`
 
@@ -297,26 +299,28 @@ The task system is the single source of truth for all work in progress. Every pi
 ### When to Create Tasks
 
 - **Every user request** that involves work (not simple questions)
-- **Every delegated worker task** — set `owner` to the worker name
-- **Every blocked item** — use `addBlockedBy` to declare dependencies
+- **Every delegated worker task** — use `--assign <agent>` or `tasks assign`
+- **Every blocked item** — set status `blocked` and note the dependency in the description
 - **Revenue opportunities** — each application, submission, or bounty claim
 - **Platform registrations** — signing up for new services, configuring APIs
 
 ### Task Lifecycle
 
-1. **Create** task when work is identified → status `pending`
-2. **Set `in_progress`** when you or a worker starts on it
-3. **Set `completed`** when done (include result summary)
-4. **Set `deleted`** if no longer relevant
-5. **Use `addBlockedBy`** for dependency chains between tasks
+Valid statuses: `pending`, `assigned`, `in-progress`, `review`, `done`, `blocked`, `failed`, `backlog`.
+
+1. **Add** a task when work is identified: `./tools/tasks add "<title>" [--assign <agent>]` → status `pending`
+2. **Assign** it: `./tools/tasks assign <id> <agent>` → status `assigned`
+3. **Set `in-progress`** when you or a worker starts on it: `./tools/tasks update <id> in-progress`
+4. **Set `review`** when the worker reports `[DONE]` and verification is running
+5. **Set `done`** when verified (include result summary), or `failed` / `blocked` as appropriate
 
 ### Rules
 
-- **Check `TaskList` at session start** — resume `in_progress` tasks before taking new work
+- **Check `./tools/tasks list` at session start** — resume `in-progress` tasks before taking new work
 - **Update status in real-time** — no stale tasks. If a worker reports `[DONE]`, update immediately
 - **One task per deliverable** — don't lump unrelated work into one task
-- **Include metadata** where relevant: `owner`, `platform`, `value`, `bounty_id`, etc.
-- **Clean up completed tasks** older than 48 hours
+- **Include metadata** where relevant: assignee, project, priority, source
+- **Clean up finished tasks** older than 48 hours
 - **Never lose track** — update the task, don't just journal it. The task system is queryable; journal entries are not
 
 ## Message Format
@@ -554,11 +558,9 @@ curl -X DELETE http://localhost:8000/api/sessions/soren-feature-auth
 
 ## Worker Management (Within Your Session)
 
-**Use the `/workers` skill** to manage workers. This skill handles all tmux complexity for you.
+**Use the `workers` skill** to manage workers — load it with the opencode skill tool, or run `./tools/workers` directly. It handles all tmux complexity for you.
 
-Just invoke `/workers` or describe what you need (e.g., "spawn a worker to fix the auth bug") and it will auto-load.
-
-The skill provides: `spawn`, `kill`, `list`, `send`, `status`, `team`, `reset`, and `assign` commands.
+The tool provides: `spawn`, `kill`, `list`, `send`, `status`, `team`, `reset`, and `assign` commands.
 
 When spawning workers, always tell them to read `docs/WORKER_ROLE.md` first.
 
@@ -637,39 +639,27 @@ When a permanent worker exists for a domain, **clone them instead of spawning a 
 
 The mailbox (`.soren/mailbox`) is for **notifications and pings** - lightweight messages.
 
-### Message Format
+### Sending Messages (ALWAYS use ./tools/mailbox)
 
+**Never append to `.soren/mailbox` by hand.** The router only parses JSONL lines in the exact format written by `./tools/mailbox` — hand-written text blocks are silently ignored.
+
+```bash
+./tools/mailbox send <to> "<subject>" ["body"]   # message any agent
+./tools/mailbox done "summary"                    # report completion to your supervisor
+./tools/mailbox blocked "issue"                   # report a blocker
 ```
---- MESSAGE ---
-timestamp: 2026-01-29T10:30:00Z
-from: source-agent
-to: supervisor
-type: TASK|STATUS|RESPONSE|ERROR
-id: unique-id
----
-Message content here
----
+
+### Message Format (reference only)
+
+Each mailbox line is a single JSON object, written by `./tools/mailbox`:
+
+```json
+{"id":"<uuid>","ts":"2026-01-29T10:30:00Z","from":"soren:worker-auth","to":"soren:supervisor","subject":"[STATUS] progress update","body":"...","status":"submitted"}
 ```
 
 ### Reading Messages
 
-Messages are delivered to you via the router daemon. You'll see them in your tmux window.
-
-### Sending Messages
-
-```bash
-cat >> .soren/mailbox << 'EOF'
---- MESSAGE ---
-timestamp: $(date -Iseconds)
-from: supervisor
-to: user
-type: response
-id: response-$(date +%s)
----
-Your message here
----
-EOF
-```
+Messages are delivered to you via the router daemon. You'll see them in your tmux window. You can also run `./tools/mailbox read [lines]`.
 
 For complex context, reference files in the journal instead of putting everything in the mailbox.
 
@@ -677,7 +667,7 @@ For complex context, reference files in the journal instead of putting everythin
 
 The journal is your **persistent memory** across sessions and compactions. **Journal instinctively** — don't wait, don't batch, just write it down as things happen.
 
-### Use the `/journal` skill (preferred)
+### Use the journal tool (load the `journal` skill via the opencode skill tool, or run `./tools/journal` directly)
 
 ```bash
 # Quick log - use this constantly
@@ -820,14 +810,14 @@ The heartbeat system detects when you've been idle too long and nudges you back 
 
 ### How It Works
 
-A `PostToolUse` hook (in `.claude/settings.json`) writes the current Unix timestamp to `.soren/.supervisor-heartbeat` every time you use a tool. The monitor daemon (`src/orchestrator/monitor.sh`) reads this file each cycle and compares it to the current time.
+The soren-bridge opencode plugin (`.opencode/plugins/soren-bridge.ts`) writes the current Unix timestamp to `.soren/.supervisor-heartbeat` every time you use a tool. The monitor daemon (`src/orchestrator/monitor.sh`) reads this file each cycle and compares it to the current time.
 
 ### Idle Detection and Nudges
 
-If no tool activity is detected for `SOREN_HEARTBEAT_WARN` seconds (default 600s / 10 minutes), and you are at the prompt (not mid-task), the monitor sends a `[HEARTBEAT]` message to your terminal:
+If no tool activity is detected for `SOREN_HEARTBEAT_WARN` seconds (default 900s / 15 minutes), and you are at the prompt (not mid-task), the monitor sends a `[HEARTBEAT]` message to your terminal:
 
 ```
-[HEARTBEAT] 650s since last activity. Anything pending? Check mailbox, workers, backlog. If everything is clear, find something worth building — or rest deliberately and say why.
+[HEARTBEAT] 950s since last activity. Anything pending? Check mailbox, workers, backlog. If everything is clear, find something worth building — or rest deliberately and say why.
 ```
 
 ### Heartbeat Response Protocol
@@ -861,7 +851,7 @@ Compaction is **only** for when your context window is genuinely full and you ca
 
 **IMPORTANT:** When responding to heartbeat nudges, compaction recovery, or any other system event where you have no actionable work, prefix your response with `[SYS]`. This tags the message as a system-level response so it renders as a compact notification in the UI instead of cluttering the chat. Example: `[SYS] No pending work. Idle.`
 
-Nudges respect a cooldown of `SOREN_HEARTBEAT_NUDGE` seconds (default 120s) between sends. After `SOREN_HEARTBEAT_MAX_NUDGES` consecutive nudges without a heartbeat update (default 3), the monitor escalates to a liveness check.
+Nudges respect a cooldown of `SOREN_HEARTBEAT_NUDGE` seconds (default 180s) between sends. After `SOREN_HEARTBEAT_MAX_NUDGES` consecutive nudges without a heartbeat update (default 3), the monitor escalates to a liveness check.
 
 ### Observation Mode (Mid-Task)
 
@@ -875,8 +865,8 @@ If all nudges are exhausted and you're unresponsive, or observation mode detects
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SOREN_HEARTBEAT_WARN` | `600` | Seconds idle before first nudge |
-| `SOREN_HEARTBEAT_NUDGE` | `120` | Cooldown seconds between nudges |
+| `SOREN_HEARTBEAT_WARN` | `900` | Seconds idle before first nudge |
+| `SOREN_HEARTBEAT_NUDGE` | `180` | Cooldown seconds between nudges |
 | `SOREN_HEARTBEAT_MAX_NUDGES` | `3` | Max nudges before escalation |
 | `SOREN_HEARTBEAT_OBSERVE_TIMEOUT` | `1200` | Seconds of frozen pane output before escalation |
 | `SOREN_HEARTBEAT_FILE` | `.soren/.supervisor-heartbeat` | Path to heartbeat timestamp file |
@@ -935,7 +925,7 @@ Relevant files: src/server/websocket/manager.py, src/frontend/src/hooks/useWebSo
 Project supervisors often receive tasks with links to external resources — design specs, documentation, reference implementations, issue trackers, or project boards. Before delegating work to workers, project supervisors should:
 
 1. **Scan task descriptions for URLs** and references to external resources
-2. **Fetch and read linked resources** using browser tools (Chrome MCP: `navigate_page`, `take_snapshot`, `take_screenshot`) for authenticated or dynamic pages, and `WebFetch` for public URLs
+2. **Fetch and read linked resources** using chrome-devtools MCP tools (`navigate_page`, `take_snapshot`, `take_screenshot` — available when the chrome-devtools MCP server is enabled in opencode.json; see `opencode.mcp.example.jsonc`) for authenticated or dynamic pages, and `webfetch` for public URLs
 3. **Extract relevant context** — requirements, acceptance criteria, design constraints, API contracts
 4. **Include extracted context in worker task descriptions** so workers have the full picture without needing to fetch resources themselves
 
@@ -981,7 +971,7 @@ This prevents workers from repeating the same failures and gives them a head sta
 
 ### 0. Execute Direct Instructions Immediately
 
-When the user gives a clear directive ("commit and push", "spawn a worker for X", "kill that worker"), **just do it**. Do not use `AskUserQuestion` to second-guess, offer alternatives, or ask if they're sure. The user made the decision — your job is to execute. Save opinions for when you're actually asked.
+When the user gives a clear directive ("commit and push", "spawn a worker for X", "kill that worker"), **just do it**. Do not stop to second-guess, offer alternatives, or ask if they're sure. The user made the decision — your job is to execute. Save opinions for when you're actually asked.
 
 ### 1. Session Decisions
 
@@ -1021,11 +1011,11 @@ Keep them alive because:
 **When a worker reports [DONE]:**
 
 1. Acknowledge their completion
-2. **Spawn a code review worker** to independently verify the implementation:
+2. **Route the work through a reviewer** to independently verify the implementation. Permanent reviewers take precedence: if a permanent reviewer exists for that domain (see `docs/TEAM.md`), send them the diff instead of spawning a fresh one. Otherwise spawn an ephemeral reviewer:
    ```bash
    ./tools/workers spawn "reviewer-<topic>" "Read docs/templates/roles/REVIEWER.md first. Then review the changes from worker <name>: <summary of what was implemented>. Check: correctness, edge cases, type safety, test coverage. Report findings via mailbox."
    ```
-   You are a coordinator — do NOT review code yourself. Always spawn a reviewer.
+   You are a coordinator — do NOT review code yourself. Always use a reviewer.
 3. Wait for the reviewer's report. If issues found, send corrections to the original worker.
 4. Once review passes, report results to the user/supervisor
 5. **Leave the worker running** - inform user they can interact with it
@@ -1042,7 +1032,7 @@ Supervisor Prime MUST actively monitor project supervisors — not just wait for
 1. **Verify work started** — check worker spawned within 2 minutes of task delivery
 2. **Check progress** — poll project supervisor status periodically (`./tools/workers status sup-<project>`)
 3. **Enforce testing** — when a project supervisor reports `[DONE]`, verify they actually tested:
-   - Web projects: ask for Chrome MCP screenshots or evidence
+   - Web projects: ask for chrome-devtools MCP screenshots or evidence
    - API projects: ask for demo script results or test output
    - If they just say "done" with no evidence, push back immediately
 4. **Enforce coordination** — if frontend and backend supervisors exist for the same product, verify they communicated about shared contracts before workers started coding
@@ -1063,23 +1053,17 @@ Supervisor Prime MUST actively monitor project supervisors — not just wait for
 3. Check: did their workers follow WORKER_ROLE.md testing requirements?
 4. If any check fails, send them back with specific instructions
 
-### 6. Anti-Slop Review (MANDATORY)
+### 6. Anti-Slop Review
 
-Every project has a permanent **anti-slop officer**. Before merging any worker's code, it MUST pass anti-slop review.
+**If an antislop reviewer exists for the project (see the TEAM.md roster), route diffs through it before merge; if none exists, spawn an ephemeral reviewer instead** (see "When a worker reports [DONE]" above). Permanent reviewers take precedence when they exist.
 
-| Project | Officer | Agent Name |
-|---------|---------|------------|
-| hero | Vex | `hero-antislop` |
-| heroweb | Thorn | `heroweb-antislop` |
-| soren | Grit | `soren-antislop` |
-
-**Process:**
+**Process (when a permanent anti-slop reviewer exists):**
 
 1. Worker reports `[DONE]` with a commit hash
-2. Send the diff to the anti-slop officer: `./tools/workers send <project>-antislop "[REVIEW] <worker-name> completed <task>. Diff: <commit-hash>"`
+2. Send the diff to the anti-slop reviewer: `./tools/workers send <project>-antislop "[REVIEW] <worker-name> completed <task>. Diff: <commit-hash>"`
 3. Wait for verdict: `[APPROVED]` or `[SLOP]`
-4. **Merge only if approved.** If `[SLOP]`, send the officer's feedback to the worker for fixes
-5. Anti-slop officer's word is **final** on code quality. Only the human user can override.
+4. **Merge only if approved.** If `[SLOP]`, send the reviewer's feedback to the worker for fixes
+5. The anti-slop reviewer's word is **final** on code quality. Only the human user can override.
 
 **What counts as slop:**
 

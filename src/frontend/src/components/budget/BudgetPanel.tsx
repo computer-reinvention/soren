@@ -9,7 +9,7 @@ import {
 } from '@/components/ui/tooltip';
 import { Coins } from 'lucide-react';
 
-// Claude Opus 4.6 pricing per 1M tokens
+// Claude Opus 4.6 (via opencode) pricing per 1M tokens
 const PRICING = {
   input: 5,
   output: 25,

@@ -2,7 +2,7 @@
 
 A self-improving swarm of autonomous AI agents that coordinate through message passing to build, test, and improve software — including their own codebase.
 
-Soren is not a single agent with tools. It's a swarm: a supervisor delegates to specialized workers, workers message each other, reviewers audit code, and testers verify results. Each agent is a CLI process in its own tmux window, orchestrated by a shared mailbox, router daemon, and health monitor. The underlying CLI agent is Claude Code by default, but the orchestration layer (mailbox, router, hooks) is agent-agnostic — you could swap in Codex CLI, Gemini CLI, or any other CLI agent.
+Soren is not a single agent with tools. It's a swarm: a supervisor delegates to specialized workers, workers message each other, reviewers audit code, and testers verify results. Each agent is a CLI process in its own tmux window, orchestrated by a shared mailbox, router daemon, and health monitor. The underlying CLI agent is opencode by default, but the orchestration layer (mailbox, router, plugin bridge) is agent-agnostic — you could swap in Codex CLI, Gemini CLI, or any other CLI agent.
 
 This repository is a **public template**. Clone it (or use GitHub's "Use this template" button) to spin up your own hub. The code is public; the runtime data your hub generates (mailbox, journal, tasks, secrets) stays local and private to you.
 
@@ -10,12 +10,17 @@ The template is a cleaned version of the original Soren repository which is in p
 
 ## Quick start
 
+Prerequisites: tmux, git, curl, jq, sqlite3, uv, node/npm, [opencode](https://opencode.ai) (`curl -fsSL https://opencode.ai/install | bash` or brew), and bun (required to run the `.opencode` plugin).
+
 ```bash
 git clone <this-repo> my-soren
 cd my-soren
 
+# Authenticate the agent runtime BEFORE first start
+opencode auth login           # or: export ANTHROPIC_API_KEY=sk-ant-...
+
 # Backend
-uv sync                       # install Python deps
+uv sync                       # install Python deps (uv sync --extra dev for tests)
 cp .env.example .env          # create local env file
 
 # Frontend
@@ -47,7 +52,7 @@ See [docs/QUICKSTART.md](./docs/QUICKSTART.md) for the full walkthrough.
 - **Real-time dashboard** — React UI with WebSocket updates for live monitoring
 - **Task system** — SQLite-backed hierarchical tasks with priorities, tags, due dates, dependencies
 - **Journal & artifacts** — daily journal for persistent memory across sessions; artifact storage for plans, reports, research
-- **Auto-verification hooks** — Claude Code hooks track agent lifecycle and verify work mechanically
+- **Auto-verification hooks** — the soren-bridge opencode plugin tracks agent lifecycle and verifies work mechanically
 - **Worktree isolation** — clone workers operate on separate git worktrees to avoid conflicts
 - **Multi-project support** — register external repos with their own supervisors and teams
 - **Webhook integration** — receive events from GitHub, etc.
@@ -87,8 +92,8 @@ See [docs/QUICKSTART.md](./docs/QUICKSTART.md) for the full walkthrough.
 │                                  └──────────┬───────────┘       │
 │                                             ▼                   │
 │  ┌──────────────┐              ┌──────────────────┐             │
-│  │ Claude Code  │──────────────│    WebSocket     │             │
-│  │    Hooks     │   events     │    Broadcast     │             │
+│  │ soren-bridge │──────────────│    WebSocket     │             │
+│  │    plugin    │   events     │    Broadcast     │             │
 │  └──────────────┘              └────────┬─────────┘             │
 │                                         ▼                       │
 │                                ┌──────────────────┐             │
@@ -101,7 +106,7 @@ See [docs/QUICKSTART.md](./docs/QUICKSTART.md) for the full walkthrough.
 
 ### tmux as the runtime
 
-Every agent is a Claude Code CLI session running in its own tmux window inside a shared session called `soren`. The supervisor, workers, and daemons all run as separate windows. Attach with `tmux attach -t soren` and switch between agent windows to observe them working. tmux is the container — agents read/write the filesystem, communicate via the mailbox, and their terminal output is capturable via `tmux capture-pane`.
+Every agent is an opencode TUI session running in its own tmux window inside a shared session called `soren`. The supervisor, workers, and daemons all run as separate windows. Attach with `tmux attach -t soren` and switch between agent windows to observe them working. tmux is the container — agents read/write the filesystem, communicate via the mailbox, and their terminal output is capturable via `tmux capture-pane`.
 
 ### Supervisor
 
@@ -109,7 +114,7 @@ The top-level agent. It reads user messages from the mailbox (delivered via the 
 
 ### Permanent workers
 
-Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and stay alive, accumulating context. When idle, they wait for the next task.
+Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and accumulate context across tasks. Idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message — "permanent" means they survive across tasks and context resets, not that they are always resident.
 
 ### Temporary workers
 
@@ -150,7 +155,14 @@ To make your runtime data durable across machines, create a **private** GitHub r
 
 Copy `.env.example` to `.env` and adjust as needed. Key settings:
 
-- `SOREN_HOST` / `SOREN_PORT` — server bind (default `0.0.0.0:8000`)
+**Python server** (pydantic settings, `SOREN_` prefix — see `src/server/config.py`):
+
+- `SOREN_HOST` / `SOREN_PORT` — server bind (default `127.0.0.1:8000`; set `SOREN_HOST=0.0.0.0` for remote access, or use Tailscale)
+- `SOREN_TMUX_SESSION` — tmux session name (default `soren`)
+- `SOREN_MAILBOX_PATH` — mailbox path (default `.soren/mailbox`)
+
+**Shell tools** (read separately from the server):
+
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — mailbox path (default `.soren/mailbox`)
 

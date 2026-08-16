@@ -104,7 +104,7 @@ async def activate_project(project_id: str):
         return {"success": True, "project_id": project_id, "project": updated}
 
     # For external projects, delegate to the CLI tool which handles
-    # tmux window creation, Claude startup, and context injection
+    # tmux window creation, opencode startup, and context injection
     try:
         proc = await asyncio.create_subprocess_exec(
             "./tools/projects", "activate", project_id,

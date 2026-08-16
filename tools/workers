@@ -23,7 +23,10 @@ set -euo pipefail
 
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
-STARTUP_DELAY=8
+STARTUP_DELAY=8  # fallback wait when the opencode health endpoint is unreachable
+
+# Shared opencode helpers (model mapping, ports, health, HTTP send)
+source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -70,12 +73,12 @@ generate_agent_id() {
         id="ag_$(head -c 32 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
         # Ensure we got 8 chars (base64 filtering can sometimes produce fewer)
         if [[ ${#id} -ne 11 ]]; then
-            ((attempt++))
+            attempt=$((attempt+1))
             continue
         fi
         # Check for collision in registry
         if [[ -f "$registry_file" ]] && grep -q "\"$id\"" "$registry_file" 2>/dev/null; then
-            ((attempt++))
+            attempt=$((attempt+1))
             continue
         fi
         echo "$id"
@@ -167,6 +170,7 @@ cmd_spawn() {
 
     # Sanitize name
     name=$(echo "$name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9-_')
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     # Apply model default if --model was not explicitly passed
     if [[ -z "$model_flag" ]]; then
@@ -256,11 +260,18 @@ cmd_spawn() {
     if [[ ! -f "$reg_file" ]]; then
         echo '{}' > "$reg_file"
     fi
-    local reg_tmp
-    reg_tmp=$(mktemp)
+    # Release any stale port reservation from a previous incarnation of this name
+    local old_oc_port=""
+    old_oc_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_oc_port=""
+    if [[ -n "$old_oc_port" ]]; then
+        soren_oc_release_port "$old_oc_port"
+    fi
+
     local now
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     local reg_project="${project_id:-soren}"
+    # worker_dir / worktree_path are persisted (empty string if unset) so
+    # cmd_wake can restore the agent's actual working directory.
     local jq_filter='.[$key] = {
            "registered_at": $now,
            "type": "worker",
@@ -269,28 +280,19 @@ cmd_spawn() {
            "agent_id": $aid,
            "display_name": $key,
            "role": "worker",
-           "project_id": $pid
-       }'
-    local jq_args=(--arg key "$name" --arg aid "$agent_id" --arg pid "$reg_project" --arg now "$now")
-
-    # Add worktree fields if applicable
-    if [[ -n "$worktree_path" ]]; then
-        jq_filter='.[$key] = {
-           "registered_at": $now,
-           "type": "worker",
-           "created_by": "tools/workers",
-           "created_at": $now,
-           "agent_id": $aid,
-           "display_name": $key,
-           "role": "worker",
            "project_id": $pid,
-           "worktree_path": $wpath,
-           "worktree_branch": $wbranch
+           "worker_dir": $wdir,
+           "worktree_path": $wpath
        }'
-        jq_args+=(--arg wpath "$worktree_path" --arg wbranch "$worktree_branch")
+    local jq_args=(--arg key "$name" --arg aid "$agent_id" --arg pid "$reg_project" --arg now "$now" --arg wdir "$worker_dir" --arg wpath "$worktree_path")
+
+    # Add worktree branch if applicable
+    if [[ -n "$worktree_path" ]]; then
+        jq_filter="${jq_filter}"' | .[$key].worktree_branch = $wbranch'
+        jq_args+=(--arg wbranch "$worktree_branch")
     fi
 
-    jq "${jq_args[@]}" "$jq_filter" "$reg_file" > "$reg_tmp" && mv "$reg_tmp" "$reg_file"
+    soren_registry_update "$reg_file" "${jq_args[@]}" "$jq_filter"
 
     # Also register in SQLite (agent_registry.db) so the API serves correct metadata immediately
     local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
@@ -298,6 +300,7 @@ cmd_spawn() {
         local db_data
         db_data=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
         if [[ -n "$db_data" && "$db_data" != "null" ]]; then
+            db_data="${db_data//\'/\'\'}"  # escape single quotes for SQLite
             sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${name}', '${agent_id}', 'IDLE', '${db_data}');" 2>/dev/null || \
                 warn "Failed to register in SQLite (non-fatal)"
         fi
@@ -305,18 +308,13 @@ cmd_spawn() {
 
     # Store model preference in registry if specified
     if [[ -n "$model_flag" ]]; then
-        local mtmp
-        mtmp=$(mktemp)
-        jq --arg k "$name" --arg m "$model_flag" '.[$k].model = $m' "$reg_file" > "$mtmp" && mv "$mtmp" "$reg_file"
+        soren_registry_update "$reg_file" --arg k "$name" --arg m "$model_flag" '.[$k].model = $m'
     fi
 
     # Add permanent worker fields if --permanent was specified
     if [[ -n "${permanent_role_ctx}" ]]; then
-        local ptmp
-        ptmp=$(mktemp)
-        jq --arg k "$name" --arg rctx "$permanent_role_ctx" \
-            '.[$k].permanent = true | .[$k].role = "permanent-worker" | .[$k].role_context = $rctx | .[$k].tasks_since_reset = 0 | .[$k].reset_count = 0' \
-            "$reg_file" > "$ptmp" && mv "$ptmp" "$reg_file"
+        soren_registry_update "$reg_file" --arg k "$name" --arg rctx "$permanent_role_ctx" \
+            '.[$k].permanent = true | .[$k].role = "permanent-worker" | .[$k].role_context = $rctx | .[$k].tasks_since_reset = 0 | .[$k].reset_count = 0'
 
         # Extract given name from role file and set display_name
         # Role files have: # Permanent Role: <Name> — <Specialty>
@@ -326,10 +324,7 @@ cmd_spawn() {
             local given_name
             given_name=$(head -1 "$role_file_path" | sed -n 's/^# Permanent Role: \([^ ]*\).*/\1/p')
             if [[ -n "$given_name" && "$given_name" != "$name" ]]; then
-                local ntmp
-                ntmp=$(mktemp)
-                jq --arg k "$name" --arg dn "$given_name" '.[$k].display_name = $dn' \
-                    "$reg_file" > "$ntmp" && mv "$ntmp" "$reg_file"
+                soren_registry_update "$reg_file" --arg k "$name" --arg dn "$given_name" '.[$k].display_name = $dn'
             fi
         fi
     fi
@@ -339,13 +334,21 @@ cmd_spawn() {
         local db_data_final
         db_data_final=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
         if [[ -n "$db_data_final" && "$db_data_final" != "null" ]]; then
+            db_data_final="${db_data_final//\'/\'\'}"  # escape single quotes for SQLite
             sqlite3 "$db_file" "UPDATE agents SET data = '${db_data_final}' WHERE key = '${name}';" 2>/dev/null || true
         fi
     fi
 
+    # Allocate a dedicated port for this worker's embedded opencode server
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    if [[ -f "$reg_file" ]]; then
+        soren_registry_update "$reg_file" --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p'
+    fi
+
     # Build environment variable exports
     local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     if [[ -n "$project_id" ]]; then
         env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
     fi
@@ -355,26 +358,20 @@ cmd_spawn() {
     if [[ -n "$worker_dir" ]] || [[ -n "$worktree_path" ]]; then
         spawn_cmd="${spawn_cmd} && export PATH=${SOREN_PROJECT_ROOT}/tools:\$PATH"
     fi
-    local claude_cmd="claude --dangerously-skip-permissions"
-    if [[ -n "$model_flag" ]]; then
-        claude_cmd="claude --model ${model_flag} --dangerously-skip-permissions"
-    fi
-    spawn_cmd="${spawn_cmd} && cd ${cd_target} && ${claude_cmd}"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port" "$model_flag")
+    spawn_cmd="${spawn_cmd} && cd ${cd_target} && ${oc_cmd}"
 
-    # Start Claude with environment variables (two-step pattern for reliability)
-    info "Starting Claude agent..."
+    # Start opencode with environment variables (two-step pattern for reliability)
+    info "Starting opencode agent..."
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$spawn_cmd"
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to initialize
-    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
-    sleep "$STARTUP_DELAY"
-
-    # Disable vim mode if enabled (for reliable message delivery)
-    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 1
+    # Wait for the embedded opencode server to come up
+    info "Waiting for opencode to initialize (port ${oc_port})..."
+    if ! soren_oc_wait_ready "$oc_port" 30; then
+        warn "opencode health endpoint not responding after 30s — falling back to fixed delay"
+        sleep "$STARTUP_DELAY"
     fi
 
     # Override task content for permanent workers
@@ -487,14 +484,16 @@ Your supervisor will merge your branch back into the integration branch when you
 WTEOF
     fi
 
-    # Send single-line instruction telling Claude to read the context file
+    # Send single-line instruction telling the agent to read the context file
     # This avoids multiline paste issues entirely
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
-    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
-    sleep 0.1
-    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    if ! soren_oc_http_send "$oc_port" "$instruction"; then
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+        sleep 0.1
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    fi
 
     # Link to task system if --task was provided
     if [[ -n "$task_id" ]]; then
@@ -540,6 +539,7 @@ cmd_kill() {
     done
 
     [[ -z "$name" ]] && die "usage: workers kill <name> [--force]"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     if is_supervisor "$name"; then
         die "cannot kill supervisor agents"
@@ -579,17 +579,27 @@ cmd_kill() {
         warn "Failed to archive conversation (server may be down)"
     fi
 
-    # Send Ctrl+C first to gracefully stop Claude
+    # Send Ctrl+C first to gracefully stop opencode
     tmux send-keys -t "${SOREN_SESSION}:${name}" C-c
     sleep 1
 
     # Kill the window
     tmux kill-window -t "${SOREN_SESSION}:${name}"
 
+    # Drop the oc_port from the registry and release its reservation so a
+    # stale port can't route HTTP messages to a different agent later
+    if [[ -f "$reg_file" ]]; then
+        local old_port=""
+        old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_port=""
+        soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k].oc_port)'
+        if [[ -n "$old_port" ]]; then
+            soren_oc_release_port "$old_port"
+        fi
+    fi
+
     ok "Worker '$name' terminated"
 
     # Check for worktree and print preservation note
-    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     if [[ -f "$reg_file" ]]; then
         local wt_path wt_branch
         wt_path=$(jq -r --arg key "$name" '.[$key].worktree_path // empty' "$reg_file" 2>/dev/null)
@@ -605,6 +615,7 @@ cmd_kill() {
 cmd_sleep() {
     local name="${1:-}"
     [[ -z "$name" ]] && die "usage: workers sleep <name>"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     if is_supervisor "$name"; then
         die "cannot sleep supervisor agents"
@@ -628,8 +639,12 @@ cmd_sleep() {
             local existing_sid
             existing_sid=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
             if [[ -n "$existing_sid" ]]; then
-                local tmp; tmp=$(mktemp)
-                jq --arg k "$name" '.[$k].status = "SLEEPING"' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+                local old_port=""
+                old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_port=""
+                soren_registry_update "$reg_file" --arg k "$name" '.[$k].status = "SLEEPING" | del(.[$k].oc_port)'
+                if [[ -n "$old_port" ]]; then
+                    soren_oc_release_port "$old_port"
+                fi
                 # Also update SQLite
                 local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
                 if [[ -f "$db_file" ]]; then
@@ -658,7 +673,7 @@ cmd_sleep() {
         ok "Captured session: ${session_id:0:8}..."
     fi
 
-    # Send /exit to Claude for graceful shutdown (saves session state)
+    # Exit opencode gracefully (sessions are persisted automatically)
     tmux send-keys -t "${SOREN_SESSION}:${name}" C-c 2>/dev/null || true
     sleep 0.5
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
@@ -668,12 +683,16 @@ cmd_sleep() {
     # Kill the tmux window
     tmux kill-window -t "${SOREN_SESSION}:${name}" 2>/dev/null || true
 
-    # Update registry: mark as SLEEPING, store session_id
+    # Update registry: mark as SLEEPING, store session_id, drop the oc_port
+    # (and release its reservation) so it can't route to a different agent
     if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
-        local tmp; tmp=$(mktemp)
-        jq --arg k "$name" --arg sid "$session_id" \
-            '.[$k].status = "SLEEPING" | .[$k].session_id = $sid' \
-            "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+        local sleep_old_port=""
+        sleep_old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || sleep_old_port=""
+        soren_registry_update "$reg_file" --arg k "$name" --arg sid "$session_id" \
+            '.[$k].status = "SLEEPING" | .[$k].session_id = $sid | del(.[$k].oc_port)'
+        if [[ -n "$sleep_old_port" ]]; then
+            soren_oc_release_port "$sleep_old_port"
+        fi
     fi
 
     # Also update SQLite
@@ -691,6 +710,7 @@ cmd_wake() {
     local name="${1:-}"
     local message="${2:-}"
     [[ -z "$name" ]] && die "usage: workers wake <name> [message]"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
 
@@ -703,10 +723,11 @@ cmd_wake() {
     fi
 
     # Get saved session ID and worker config from registry
-    local session_id="" worker_dir="" project_id="" saved_model=""
+    local session_id="" worker_dir="" worktree_path="" project_id="" saved_model=""
     if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
         session_id=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
         worker_dir=$(jq -r --arg k "$name" '.[$k].worker_dir // ""' "$reg_file" 2>/dev/null)
+        worktree_path=$(jq -r --arg k "$name" '.[$k].worktree_path // ""' "$reg_file" 2>/dev/null)
         project_id=$(jq -r --arg k "$name" '.[$k].project_id // ""' "$reg_file" 2>/dev/null)
         saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file" 2>/dev/null)
     fi
@@ -727,22 +748,34 @@ cmd_wake() {
     agent_id=$(jq -r --arg k "$name" '.[$k].agent_id // ""' "$reg_file" 2>/dev/null)
     [[ -z "$agent_id" ]] && agent_id="ag_$(head -c 4 /dev/urandom | xxd -p)"
 
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    # Release the old port reservation (if any) before allocating a new one
+    local wake_old_port=""
+    wake_old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || wake_old_port=""
+    if [[ -n "$wake_old_port" ]]; then
+        soren_oc_release_port "$wake_old_port"
+    fi
+
+    # Allocate a fresh opencode port for the resumed instance
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    soren_registry_update "$reg_file" --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p'
+
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
 
-    local cd_target="${worker_dir:-${SOREN_PROJECT_ROOT}}"
-    local model_arg=""
-    [[ -n "$saved_model" ]] && model_arg="--model ${saved_model} "
-    local resume_cmd="export ${env_vars} && cd ${cd_target} && claude ${model_arg}--resume ${session_id} --dangerously-skip-permissions"
+    # Prefer the worktree path, then the worker dir, then the project root
+    local cd_target="${worktree_path:-${worker_dir:-${SOREN_PROJECT_ROOT}}}"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port" "$saved_model" "$session_id")
+    local resume_cmd="export ${env_vars} && cd ${cd_target} && ${oc_cmd}"
 
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$resume_cmd"
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Update registry status
-    local tmp; tmp=$(mktemp)
-    jq --arg k "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '.[$k].status = "IN_PROGRESS" | .[$k].last_activity = $ts' \
-        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+    # Update registry status — IDLE (the worker hasn't started a task yet;
+    # the first PostToolUse will flip it). Matches the SQLite status below.
+    soren_registry_update "$reg_file" --arg k "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '.[$k].status = "IDLE" | .[$k].last_activity = $ts'
 
     # Also update SQLite
     local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
@@ -752,19 +785,10 @@ cmd_wake() {
 
     ok "Worker '$name' is awake"
 
-    # If a message was provided, wait for prompt then send it
+    # If a message was provided, wait for readiness then send it
     if [[ -n "$message" ]]; then
-        info "Waiting for Claude to resume..."
-        local retries=15
-        while [[ $retries -gt 0 ]]; do
-            sleep 1
-            local pane_output
-            pane_output=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null || true)
-            if echo "$pane_output" | grep -qE '❯|bypass permissions'; then
-                break
-            fi
-            ((retries--))
-        done
+        info "Waiting for opencode to resume..."
+        soren_oc_wait_ready "$oc_port" 20 || sleep "$STARTUP_DELAY"
         sleep 1
         # Include last-task context from conversation_store
         local last_task
@@ -787,7 +811,7 @@ cmd_sleep_all() {
         [[ "$window" == "monitor" ]] && continue
         is_supervisor "$window" && continue
 
-        cmd_sleep "$window" 2>/dev/null && ((count++)) || true
+        cmd_sleep "$window" 2>/dev/null && count=$((count+1)) || true
     done <<< "$windows"
 
     ok "Put $count workers to sleep"
@@ -816,7 +840,7 @@ cmd_list() {
             echo -e "  ${CYAN}●${NC} $window (supervisor)"
         else
             echo -e "  ${GREEN}●${NC} $window"
-            ((count++))
+            count=$((count+1))
         fi
     done <<< "$windows"
 
@@ -834,7 +858,7 @@ cmd_list() {
                 local sid
                 sid=$(jq -r --arg k "$sname" '.[$k].session_id // "none"' "$reg_file" 2>/dev/null)
                 echo -e "  ${DIM}●${NC} $sname (session: ${sid:0:8}...)"
-                ((sleep_count++))
+                sleep_count=$((sleep_count+1))
             done <<< "$sleeping"
         fi
     fi
@@ -953,6 +977,7 @@ cmd_send() {
     message="${args[1]:-}"
 
     [[ -z "$name" ]] && die "usage: workers send <name> <message> [--no-context]"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
     [[ -z "$message" ]] && die "usage: workers send <name> <message> [--no-context]"
 
     if ! window_exists "$name"; then
@@ -1020,21 +1045,30 @@ ${message}"
         -d "{\"from_agent\": $(printf '%s' "$from_agent" | jq -Rs .), \"to_agent\": $(printf '%s' "$name" | jq -Rs .), \"content\": $(printf '%s' "$message" | jq -Rs .), \"type\": \"task\"}" \
         >/dev/null 2>&1 || true
 
-    # Send message using literal flag then Enter
-    # Small delay between text and Enter ensures Claude Code receives both
-    # (matches lib/tmux.sh delay pattern used by router)
-    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$message"
-    sleep 0.1
-    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    # Deliver over HTTP to the worker's embedded opencode server (reliable,
+    # no paste/prompt-state issues); fall back to tmux send-keys.
+    local oc_port
+    if oc_port=$(soren_oc_port_for "$name") && soren_oc_http_send "$oc_port" "$message"; then
+        ok "Message sent to '$name' (http)"
+        return 0
+    fi
 
-    # Auto-detect stuck paste buffers — Claude Code sometimes shows
-    # "[Pasted text #N +M lines]" without submitting. Press Enter again if so.
-    sleep 0.3
-    local pane_tail
-    pane_tail=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null) || true
-    if echo "$pane_tail" | grep -qE '\[Pasted text'; then
+    # tmux fallback. Multiline or long messages can't go through send-keys
+    # directly (paste-buffer issues) — write them to a file and send a
+    # one-line pointer instead (matches the spawn path's file-pointer pattern).
+    if [[ "$message" == *$'\n'* || ${#message} -gt 200 ]]; then
+        local msg_dir="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
+        mkdir -p "$msg_dir"
+        local msg_file="${msg_dir}/${name}-message-$(date +%s).md"
+        printf '%s\n' "$message" > "$msg_file"
+        local pointer="[soren:${from_agent}] Read ${msg_file} — it contains a message for you."
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$pointer"
+        sleep 0.1
         tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 0.2
+    else
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$message"
+        sleep 0.1
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
     fi
 
     ok "Message sent to '$name'"
@@ -1045,6 +1079,7 @@ cmd_status() {
     local lines="${2:-30}"
 
     [[ -z "$name" ]] && die "usage: workers status <name> [lines]"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     if ! window_exists "$name"; then
         die "worker '$name' not found"
@@ -1107,7 +1142,7 @@ cmd_team() {
         fi
 
         printf "  %-18s %-12s %-12s %-8s %-8s ${status_color}%s${NC}\n" "$name" "$disp" "$proj" "$resets" "$tasks" "$status_label"
-        ((count++))
+        count=$((count+1))
     done <<< "$workers"
 
     echo ""
@@ -1121,6 +1156,7 @@ cmd_team() {
 cmd_reset() {
     local name="${1:-}"
     [[ -z "$name" ]] && die "usage: workers reset <name>"
+    [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     # Verify it's a permanent worker
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
@@ -1136,7 +1172,7 @@ cmd_reset() {
 
     # Step 1: Capture pre-reset state (reuse pre-compact hook)
     local artifact_file=""
-    local pre_compact_hook="${SOREN_PROJECT_ROOT}/.claude/hooks/pre-compact.sh"
+    local pre_compact_hook="${SOREN_PROJECT_ROOT}/.opencode/hooks/pre-compact.sh"
     if [[ -x "$pre_compact_hook" ]]; then
         artifact_file=$("$pre_compact_hook" "$name" 2>/dev/null) || true
         [[ -n "$artifact_file" ]] && info "State captured: $artifact_file"
@@ -1160,17 +1196,17 @@ cmd_reset() {
     curl -sX POST "http://localhost:${SOREN_PORT:-8000}/api/agents/${name}/archive" > /dev/null 2>&1 || \
         warn "Failed to archive (server may be down)"
 
-    # Step 4: Gracefully exit Claude, then restart
-    info "Stopping Claude process..."
+    # Step 4: Gracefully exit opencode, then restart
+    info "Stopping opencode process..."
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
     sleep 0.1
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to exit (up to 10 seconds)
+    # Wait for opencode to exit (up to 10 seconds)
     local wait=0
     while ((wait < 10)); do
         sleep 1
-        ((wait++))
+        wait=$((wait+1))
         local pane_output
         pane_output=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -3 2>/dev/null || echo "")
         if echo "$pane_output" | grep -qE '^\$|^%|❯'; then
@@ -1185,8 +1221,8 @@ cmd_reset() {
         sleep 2
     fi
 
-    # Step 5: Restart Claude in the same window
-    info "Restarting Claude..."
+    # Step 5: Restart opencode in the same window (fresh session = fresh context)
+    info "Restarting opencode..."
     local agent_id
     agent_id=$(jq -r --arg k "$name" '.[$k].agent_id' "$reg_file")
     local project_id
@@ -1194,26 +1230,30 @@ cmd_reset() {
     local saved_model
     saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file")
 
+    # Release the old port reservation (if any) before allocating a new one
+    local reset_old_port=""
+    reset_old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || reset_old_port=""
+    if [[ -n "$reset_old_port" ]]; then
+        soren_oc_release_port "$reset_old_port"
+    fi
+
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    soren_registry_update "$reg_file" --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p'
+
     local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" && "$project_id" != "null" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
 
-    local reset_model_arg=""
-    [[ -n "$saved_model" ]] && reset_model_arg="--model ${saved_model} "
-    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "export ${env_vars} && claude ${reset_model_arg}--dangerously-skip-permissions"
+    local reset_oc_cmd
+    reset_oc_cmd=$(soren_oc_cli "$oc_port" "$saved_model")
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "export ${env_vars} && ${reset_oc_cmd}"
     sleep 0.1
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to initialize
-    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
-    sleep "$STARTUP_DELAY"
-
-    # Disable vim mode if needed
-    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 1
-    fi
+    # Wait for opencode to initialize
+    info "Waiting for opencode to initialize (port ${oc_port})..."
+    soren_oc_wait_ready "$oc_port" 30 || sleep "$STARTUP_DELAY"
 
     # Step 6: Re-inject role context
     local role_ctx
@@ -1233,11 +1273,8 @@ cmd_reset() {
     # Step 7: Update registry counters
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    local tmp
-    tmp=$(mktemp)
-    jq --arg k "$name" --arg ts "$now" \
-        '.[$k].reset_count = ((.[$k].reset_count // 0) + 1) | .[$k].last_reset_at = $ts | .[$k].tasks_since_reset = 0' \
-        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+    soren_registry_update "$reg_file" --arg k "$name" --arg ts "$now" \
+        '.[$k].reset_count = ((.[$k].reset_count // 0) + 1) | .[$k].last_reset_at = $ts | .[$k].tasks_since_reset = 0'
 
     ok "Permanent worker '$name' reset (reset #$(jq -r --arg k "$name" '.[$k].reset_count' "$reg_file"))"
 }
@@ -1293,7 +1330,7 @@ cmd_clone() {
 
     # Handle name collisions (killed clones may still be in registry)
     while jq -e --arg k "$clone_name" '.[$k]' "$reg_file" >/dev/null 2>&1; do
-        ((clone_index++))
+        clone_index=$((clone_index+1))
         clone_name="${parent_name}-clone-${clone_index}"
     done
 
@@ -1335,12 +1372,9 @@ CLONECTX
     cmd_spawn "${clone_args[@]}"
 
     # 6. Add clone fields to registry (after spawn registered the base entry)
-    local tmp
-    tmp=$(mktemp)
     local display="${parent_display} | ${task_summary}"
-    jq --arg k "$clone_name" --arg parent "$parent_name" --argjson idx "$clone_index" --arg disp "$display" \
-        '.[$k].clone_of = $parent | .[$k].clone_index = $idx | .[$k].display_name = $disp' \
-        "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+    soren_registry_update "$reg_file" --arg k "$clone_name" --arg parent "$parent_name" --argjson idx "$clone_index" --arg disp "$display" \
+        '.[$k].clone_of = $parent | .[$k].clone_index = $idx | .[$k].display_name = $disp'
 
     # 7. Notify parent via mailbox
     ./tools/mailbox send "$parent_name" "[STATUS] Clone spawned" "Clone ${clone_name} spawned for: ${task}" 2>/dev/null || true
@@ -1396,10 +1430,13 @@ cmd_merge_clone() {
     # Delete the branch (already merged)
     git branch -d "$worktree_branch" 2>/dev/null || warn "Could not delete branch $worktree_branch"
 
-    # Clean up registry entry
-    local tmp
-    tmp=$(mktemp)
-    jq --arg k "$clone_name" 'del(.[$k])' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+    # Clean up registry entry (release the clone's port reservation first)
+    local clone_port=""
+    clone_port=$(jq -r --arg k "$clone_name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || clone_port=""
+    if [[ -n "$clone_port" ]]; then
+        soren_oc_release_port "$clone_port"
+    fi
+    soren_registry_update "$reg_file" --arg k "$clone_name" 'del(.[$k])'
 
     # Clean up context files
     rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${clone_name}-context.md"
@@ -1450,7 +1487,7 @@ cmd_list_clones() {
         fi
 
         printf "  %-28s %-8s %-28s ${status_color}%s${NC}\n" "$name" "$idx" "$branch" "$status_label"
-        ((count++))
+        count=$((count+1))
     done <<< "$clones"
 
     echo ""
@@ -1504,7 +1541,7 @@ SPAWN OPTIONS:
                        Permanent workers persist across tasks and receive [TASK] messages.
                        Use 'workers reset' to clear context without losing identity.
                        Use 'workers kill --force' to permanently remove.
-    --model <model>    Claude model tier (currently opus only).
+    --model <model>    Model tier: haiku|sonnet|opus, or a full provider/model id.
                        All agents default to opus (Opus 4.6 only constraint).
                        Stored in registry — wake and reset preserve the model choice.
 

@@ -1,7 +1,6 @@
 ---
 name: backlog
 description: Manage the persistent task backlog for supervisor autonomy. Use when you need to add, list, claim, complete, skip, or reprioritize backlog items.
-allowed-tools: Bash(./tools/backlog:*)
 ---
 
 # Backlog - Persistent Work Queue
@@ -29,30 +28,31 @@ Priority defaults to 3, source defaults to "system".
 
 ### List items
 ```bash
-./tools/backlog list            # Pending items, sorted by priority
-./tools/backlog list all        # All items regardless of status
-./tools/backlog list completed  # Completed items
+./tools/backlog list            # Backlog items, sorted by priority
 ```
 
 ### Claim the next item
 ```bash
-./tools/backlog next    # Returns top pending item, marks it in_progress
+./tools/backlog next    # Claims the highest-priority backlog item; claimed items get status 'pending'
 ```
 
 ### Complete / skip
+
+Item IDs are UUIDs — use a unique prefix (e.g. `7966ee6a`), not `#3`.
+
 ```bash
-./tools/backlog complete 3    # Mark item #3 done
-./tools/backlog skip 5        # Mark item #5 skipped
+./tools/backlog done 7966ee6a "Fixed in commit abc123"   # Mark item done (alias: complete)
+./tools/backlog skip 368208bc                             # Mark item done (skipped)
 ```
 
 ### Reprioritize
 ```bash
-./tools/backlog prioritize 2 1    # Bump item #2 to critical (P1)
+./tools/backlog prioritize 206c8978 1    # Bump item to critical (P1)
 ```
 
 ### Show details
 ```bash
-./tools/backlog show 3    # Full details for item #3
+./tools/backlog show 7966ee6a    # Full details for one item
 ```
 
 ## Priority Scale

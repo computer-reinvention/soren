@@ -5,11 +5,13 @@
 
 ## Overview
 
-SOREN runs a **permanent worker team** — long-lived Claude Code agents that persist across tasks and context resets. Each worker has a fixed identity (name, personality, specialization) and receives work via the supervisor's task system.
+SOREN runs a **permanent worker team** — long-lived opencode agents that persist across tasks and context resets. Each worker has a fixed identity (name, personality, specialization) and receives work via the supervisor's task system.
 
 The team is designed around the principle that **specialized, adversarial review produces better output than generalist workers**. Builders build, reviewers break — and they're different agents.
 
 ## Current Roster
+
+> **EXAMPLE ROSTER — this template ships with no permanent workers.** Bootstrap your own team with `./tools/workers-init-role` or `./tools/teams setup-permanent`, then update this table.
 
 ### Builders (3)
 
@@ -64,14 +66,14 @@ All permanent workers are spawned with `--permanent` flag:
 This gives them:
 - **Deletion protection** — `workers kill` requires `--force` and logs an audit entry
 - **Context reset** — `workers reset <name>` gracefully restarts without losing identity
-- **Proactive reset policy** — reset after 5 completed tasks or 3 hours (whichever first)
+- **Recommended reset policy (supervisor-triggered, NOT auto-enforced)** — reset after ~5 completed tasks or ~3 hours; the registry tracks `tasks_since_reset`/`last_reset_at` to support this
 - **Cleanup immunity** — `auto-maintenance` and `cleanup_stale` skip permanent workers
 
 ### Task Assignment
 
 ```bash
 # Create a task, then assign it
-./tools/tasks create "Fix the login bug" --assign perm-backend
+./tools/tasks add "Fix the login bug" --assign perm-backend
 
 # Or assign an existing task
 ./tools/workers assign <task-id> perm-backend
@@ -89,7 +91,7 @@ For code changes, the supervisor routes through the adversarial review layer:
 4. If REVISE: builder addresses feedback, reviewer re-reviews
 5. QA (Echo) runs test suite and browser verification
 
-Sage and Echo use Chrome MCP tools for browser-based visual testing — they navigate to `http://localhost:8000`, take screenshots, test interactions, and verify dark mode / responsive behavior.
+UI reviewers and QA use chrome-devtools MCP tools (navigate_page, take_snapshot, take_screenshot, click, fill — available when the chrome-devtools MCP server is enabled in opencode.json) for browser-based visual testing — they navigate to `http://localhost:8000`, take screenshots, test interactions, and verify dark mode / responsive behavior. If the MCP server is unavailable, they verify via curl + build output and note the gap in their [DONE].
 
 ### Communication
 
@@ -97,15 +99,15 @@ Workers communicate via the mailbox system:
 - **Inbound**: `[TASK]`, `[UPDATE]`, `[QUESTION]`, `[PRIORITY]`, `[COMPLETE]`
 - **Outbound**: `[STATUS]`, `[DONE]`, `[BLOCKED]`, `[QUESTION]`
 
-Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.`
+Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.` Idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message. "Permanent" means the worker survives across tasks and context resets — not that it is always resident in a tmux window.
 
 ## Design Rationale
 
 This team structure emerged from an adversarial debate (see `.soren/journal/2026-02-21/artifacts/04-critic-convergence.md`). Key decisions:
 
 1. **Separate builders and reviewers** — builders should never review their own output. Adversarial review catches what the author misses.
-2. **Frontend/backend split in review** — UI review requires visual browser testing (Chrome MCP); API review requires tracing data flows and security analysis. Different skills, different tools.
-3. **Permanent over ephemeral for core roles** — the cost of context loading (reading CLAUDE.md, role files, codebase orientation) on every spawn is significant. Permanent workers amortize this cost across many tasks.
+2. **Frontend/backend split in review** — UI review requires visual browser testing (chrome-devtools MCP tools); API review requires tracing data flows and security analysis. Different skills, different tools.
+3. **Permanent over ephemeral for core roles** — the cost of context loading (reading AGENTS.md, role files, codebase orientation) on every spawn is significant. Permanent workers amortize this cost across many tasks.
 4. **Tester as permanent, not ephemeral** — QA benefits from accumulated knowledge of what breaks and where the gaps are. Echo remembers previous test runs (until context reset).
 5. **Research as dedicated role** — following links, synthesizing information, and saving artifacts is a distinct workflow that shouldn't interrupt builders.
 
@@ -156,7 +158,7 @@ Not everything needs a permanent worker. The supervisor still spawns ephemeral w
 - Parallel execution when permanent workers are busy
 - Debate pairs for architectural decisions (see `docs/templates/teams/DEBATE_PAIR.md`)
 
-Ephemeral workers use templates from `docs/templates/roles/` and are killed after task completion.
+Ephemeral workers use templates from `docs/templates/roles/` and are retired after verification — kept alive through review/verification of their work, then killed once no follow-up remains.
 
 ## Modifying This Document
 
