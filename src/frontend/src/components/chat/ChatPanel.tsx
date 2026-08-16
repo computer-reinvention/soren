@@ -109,12 +109,27 @@ export function ChatPanel() {
 
   const targetAgent = selectedAgentId || 'supervisor';
 
-  // Check if the selected agent is a worker
+  // Check if the selected agent is a worker (drives inbox view + header)
   const selectedAgent = agentsData?.agents?.find((a) => a.id === selectedAgentId);
   const isWorker = selectedAgent?.type === 'worker';
 
+  // Command Center routing: when no agent is selected, the first @mention
+  // naming a live agent becomes the primary send target; default supervisor.
+  // (The server additionally mention-routes any other @tags.)
+  const resolveSendTarget = useCallback(
+    (text: string): string => {
+      if (selectedAgentId) return selectedAgentId;
+      for (const match of text.matchAll(/@([\w-]+)/g)) {
+        if (agentsData?.agents?.some((a) => a.id === match[1])) return match[1];
+      }
+      return 'supervisor';
+    },
+    [selectedAgentId, agentsData]
+  );
+
   const sendMutation = useMutation({
-    mutationFn: (content: string) => api.sendMessageToAgent(targetAgent, content),
+    mutationFn: ({ to, content }: { to: string; content: string }) =>
+      api.sendMessageToAgent(to, content),
   });
 
   const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
@@ -133,19 +148,22 @@ export function ChatPanel() {
   }, [selectedAgentId, latestEventBySession, isAgentActive]);
 
   const handleSendDirect = useCallback((message: string) => {
-    sendMutation.mutate(message);
+    sendMutation.mutate({ to: resolveSendTarget(message), content: message });
     setPendingMessage(null);
-  }, [sendMutation]);
+  }, [sendMutation, resolveSendTarget]);
 
   const handleSend = useCallback((message: string) => {
-    // If sending to a worker, show confirmation modal
-    if (isWorker) {
+    // If the resolved target is a worker (selected or @tagged from the
+    // Command Center), show the confirmation modal first
+    const target = resolveSendTarget(message);
+    const targetObj = agentsData?.agents?.find((a) => a.id === target);
+    if (targetObj?.type === 'worker') {
       setPendingMessage(message);
       setShowWorkerConfirm(true);
     } else {
       handleSendDirect(message);
     }
-  }, [isWorker, handleSendDirect]);
+  }, [resolveSendTarget, agentsData, handleSendDirect]);
 
   const handleWorkerConfirm = useCallback(() => {
     if (pendingMessage) {
@@ -231,9 +249,14 @@ export function ChatPanel() {
       <ChatInput
         onSend={handleSend}
         isPending={sendMutation.isPending}
-        placeholder={`Message ${targetAgent} — Enter to send`}
+        placeholder={
+          selectedAgentId
+            ? `Message ${targetAgent} — Enter to send`
+            : 'Message supervisor — @tag any agent to route directly'
+        }
         inputRef={inputRef}
         agents={agentsData?.agents || []}
+        resolveTarget={selectedAgentId ? undefined : resolveSendTarget}
         onInterrupt={selectedAgentId ? () => interruptMutation.mutate() : undefined}
         isAgentWorking={isAgentWorking}
         isInterrupting={interruptMutation.isPending}
@@ -250,7 +273,7 @@ export function ChatPanel() {
       <WorkerConfirmModal
         open={showWorkerConfirm}
         onOpenChange={setShowWorkerConfirm}
-        agentName={selectedAgent?.name || targetAgent}
+        agentName={pendingMessage ? resolveSendTarget(pendingMessage) : (selectedAgent?.name || targetAgent)}
         onConfirm={handleWorkerConfirm}
       />
     </div>

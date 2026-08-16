@@ -11,6 +11,9 @@ interface ChatInputProps {
   placeholder?: string;
   inputRef?: Ref<HTMLTextAreaElement>;
   agents?: Agent[];
+  /** Command Center mode: resolves where the current text will be routed
+   *  (first live @mention, else supervisor). Renders a routing chip. */
+  resolveTarget?: (text: string) => string;
   onInterrupt?: () => void;
   isAgentWorking?: boolean;
   isInterrupting?: boolean;
@@ -24,7 +27,7 @@ interface MentionState {
   selectedIndex: number;
 }
 
-export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], onInterrupt, isAgentWorking, isInterrupting, interruptedAt }: ChatInputProps) {
+export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [showInterruptFeedback, setShowInterruptFeedback] = useState(false);
   const internalRef = useRef<HTMLTextAreaElement>(null);
@@ -259,6 +262,22 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             <div className="px-3 py-2 text-sm text-muted-foreground">
               No agents matching &ldquo;@{mention.query}&rdquo;
             </div>
+          </div>
+        )}
+
+        {/* Command Center routing chip — where this message will be delivered */}
+        {resolveTarget && (
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Bot className="h-3 w-3" />
+            <span>
+              →{' '}
+              <span className={cn(
+                'font-medium',
+                resolveTarget(message) !== 'supervisor' && 'text-primary'
+              )}>
+                {resolveTarget(message)}
+              </span>
+            </span>
           </div>
         )}
 

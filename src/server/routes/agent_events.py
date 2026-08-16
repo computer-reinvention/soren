@@ -141,17 +141,43 @@ async def receive_agent_event(event: AgentEvent):
             "[FIX-REQUEST]", "[UI-CHECK]",
         )
         _content_stripped = response_content.strip()
+
+        # Supervisors may also deliver replies via the mailbox pipeline.
+        # Direct TUI responses must still stream to the dashboard, so instead
+        # of skipping supervisors entirely (which silenced their chat replies)
+        # we only skip when an identical message was already stored recently
+        # (mailbox + Stop double-delivery guard).
+        _is_duplicate = False
+        if display_agent_id == "supervisor" or display_agent_id.startswith("sup-"):
+            try:
+                recent = await mailbox_service.get_messages(
+                    limit=20, agent_id=display_agent_id
+                )
+                _now = datetime.now(timezone.utc)
+                for _m in recent:
+                    _ts = _m.timestamp
+                    if _ts.tzinfo is None:
+                        _ts = _ts.replace(tzinfo=timezone.utc)
+                    if (_now - _ts).total_seconds() > 180:
+                        continue
+                    if (
+                        _m.from_agent == display_agent_id
+                        and _m.content.strip() == _content_stripped
+                    ):
+                        _is_duplicate = True
+                        break
+            except Exception as exc:
+                logger.debug(f"Supervisor dedup check failed (storing anyway): {exc}")
+
         if any(_content_stripped.startswith(tag) for tag in _INTERNAL_TAGS):
             logger.debug(
                 f"Skipping internal verification response from {display_agent_id}: "
                 f"{_content_stripped[:60]}"
             )
-        elif display_agent_id == "supervisor" or display_agent_id.startswith("sup-"):
-            # Supervisor delivers messages via mailbox (targeted delivery).
-            # Storing from Stop events would create duplicates.
+        elif _is_duplicate:
             logger.debug(
                 f"Skipping Stop-event message store for {display_agent_id} "
-                f"(delivered via mailbox)"
+                f"(identical message already delivered via mailbox)"
             )
         else:
             msg = Message(

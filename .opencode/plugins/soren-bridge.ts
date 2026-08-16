@@ -288,6 +288,20 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
         cache_creation_input_tokens: lastTokens?.cache?.write ?? 0,
       }
 
+      // Race guard: session.idle can fire before the final text part is
+      // visible via the API. If the assistant produced output but we found
+      // no text, wait briefly and refetch once.
+      if (!responseContent && usage.output_tokens > 0) {
+        await new Promise((r) => setTimeout(r, 800))
+        const retry = await fetchMessages(sessionID)
+        for (const msg of retry) {
+          if (msg.info?.role !== "assistant") continue
+          for (const part of msg.parts ?? []) {
+            if (part.type === "text" && part.text) responseContent = part.text
+          }
+        }
+      }
+
       await post(EVENTS_URL, {
         event_type: "Stop",
         session_id: sessionID,
