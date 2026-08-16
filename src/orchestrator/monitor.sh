@@ -36,7 +36,7 @@ echo $$ > "${SCRIPT_DIR}/../../.soren/run/monitor.pid"
 # Configuration
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PORT="${SOREN_PORT:-8000}"
-SOREN_HOST="${SOREN_HOST:-0.0.0.0}"
+SOREN_HOST="${SOREN_HOST:-127.0.0.1}"
 SOREN_MAILBOX="${SOREN_MAILBOX:-.soren/mailbox}"
 SOREN_PROJECT_ROOT="${SOREN_PROJECT_ROOT:-$(pwd)}"
 ROUTER_LOG=".soren/router.log"
