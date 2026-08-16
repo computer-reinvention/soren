@@ -114,7 +114,7 @@ The top-level agent. It reads user messages from the mailbox (delivered via the 
 
 ### Permanent workers
 
-Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and accumulate context across tasks. Idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message — "permanent" means they survive across tasks and context resets, not that they are always resident.
+Named agents with domain expertise that persist across sessions. Each has a role file (`.soren/worker-contexts/*-role.md`) defining their expertise, constraints, and accumulated knowledge. They get spawned once and accumulate context across tasks. Permanent workers are spawned with `keep_awake` and stay resident; ephemeral idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message.
 
 ### Temporary workers
 

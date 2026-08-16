@@ -66,7 +66,7 @@ All permanent workers are spawned with `--permanent` flag:
 This gives them:
 - **Deletion protection** — `workers kill` requires `--force` and logs an audit entry
 - **Context reset** — `workers reset <name>` gracefully restarts without losing identity
-- **Recommended reset policy (supervisor-triggered, NOT auto-enforced)** — reset after ~5 completed tasks or ~3 hours; the registry tracks `tasks_since_reset`/`last_reset_at` to support this
+- **Proactive reset policy (auto-enforced)** — `tools/auto-maintenance` resets IDLE permanent workers after 5 completed tasks or 3 hours since last reset, whichever first (tune with `SOREN_RESET_TASKS`/`SOREN_RESET_HOURS`, 0 disables). Task counts come from `mailbox done` reports; never fires mid-task or while sleeping
 - **Cleanup immunity** — `auto-maintenance` and `cleanup_stale` skip permanent workers
 
 ### Task Assignment
@@ -99,7 +99,7 @@ Workers communicate via the mailbox system:
 - **Inbound**: `[TASK]`, `[UPDATE]`, `[QUESTION]`, `[PRIORITY]`, `[COMPLETE]`
 - **Outbound**: `[STATUS]`, `[DONE]`, `[BLOCKED]`, `[QUESTION]`
 
-Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.` Idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message. "Permanent" means the worker survives across tasks and context resets — not that it is always resident in a tmux window.
+Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.` Ephemeral idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message. Permanent workers are exempt: they are spawned with `keep_awake` set and stay resident between tasks.
 
 ## Design Rationale
 

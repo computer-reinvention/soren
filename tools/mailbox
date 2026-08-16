@@ -26,6 +26,11 @@ source "${TOOLS_DIR}/../src/orchestrator/lib/filelock.sh"
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 SOREN_MAILBOX="${SOREN_MAILBOX:-.soren/mailbox}"
+
+# Shared opencode/registry helpers (soren_registry_update)
+if [[ -f "${TOOLS_DIR}/lib/opencode.sh" ]]; then
+    source "${TOOLS_DIR}/lib/opencode.sh"
+fi
 SOREN_PORT="${SOREN_PORT:-8000}"
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_AGENT_NAME="${SOREN_AGENT_NAME:-unknown}"
@@ -246,6 +251,24 @@ cmd_done() {
         cmd_send "$target" "[DONE] $summary" "$body"
     else
         cmd_quick "$target" "[DONE] $summary"
+    fi
+
+    _bump_tasks_since_reset || true
+}
+
+# Track completed tasks for permanent workers (drives the proactive reset
+# policy enforced by tools/auto-maintenance). Non-fatal on any failure.
+_bump_tasks_since_reset() {
+    local agent="${SOREN_AGENT_NAME:-}"
+    [[ -n "$agent" ]] || return 0
+    local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || return 0
+    local is_perm
+    is_perm=$(jq -r --arg k "$agent" '.[$k].permanent // false' "$reg_file" 2>/dev/null) || return 0
+    [[ "$is_perm" == "true" ]] || return 0
+    if command -v soren_registry_update >/dev/null 2>&1 || declare -f soren_registry_update >/dev/null 2>&1; then
+        soren_registry_update "$reg_file" --arg k "$agent" \
+            '.[$k].tasks_since_reset = ((.[$k].tasks_since_reset // 0) + 1)' 2>/dev/null || true
     fi
 }
 
