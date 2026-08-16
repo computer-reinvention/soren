@@ -57,7 +57,10 @@ export function ThoughtStream() {
         <div className="text-center">
           <Brain className="h-6 w-6 text-muted-foreground mx-auto mb-2" />
           <p className="text-xs text-muted-foreground">
-            Agent reasoning will stream here as they think.
+            Agent reasoning will stream here when the model exposes it.
+          </p>
+          <p className="text-[10px] text-muted-foreground/70 mt-1">
+            Some models return encrypted reasoning — see the Events tab for tool activity.
           </p>
         </div>
       </div>
