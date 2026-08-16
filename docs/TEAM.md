@@ -5,7 +5,7 @@
 
 ## Overview
 
-SOREN runs a **permanent worker team** — long-lived Claude Code agents that persist across tasks and context resets. Each worker has a fixed identity (name, personality, specialization) and receives work via the supervisor's task system.
+SOREN runs a **permanent worker team** — long-lived opencode agents that persist across tasks and context resets. Each worker has a fixed identity (name, personality, specialization) and receives work via the supervisor's task system.
 
 The team is designed around the principle that **specialized, adversarial review produces better output than generalist workers**. Builders build, reviewers break — and they're different agents.
 
@@ -105,7 +105,7 @@ This team structure emerged from an adversarial debate (see `.soren/journal/2026
 
 1. **Separate builders and reviewers** — builders should never review their own output. Adversarial review catches what the author misses.
 2. **Frontend/backend split in review** — UI review requires visual browser testing (Chrome MCP); API review requires tracing data flows and security analysis. Different skills, different tools.
-3. **Permanent over ephemeral for core roles** — the cost of context loading (reading CLAUDE.md, role files, codebase orientation) on every spawn is significant. Permanent workers amortize this cost across many tasks.
+3. **Permanent over ephemeral for core roles** — the cost of context loading (reading AGENTS.md, role files, codebase orientation) on every spawn is significant. Permanent workers amortize this cost across many tasks.
 4. **Tester as permanent, not ephemeral** — QA benefits from accumulated knowledge of what breaks and where the gaps are. Echo remembers previous test runs (until context reset).
 5. **Research as dedicated role** — following links, synthesizing information, and saving artifacts is a distinct workflow that shouldn't interrupt builders.
 

@@ -12,7 +12,7 @@
 #   2. Auto-detect language, git remote, project name, build/test commands
 #   3. Register project via projects add
 #   4. Generate worker context file with detected tech stack
-#   5. Install Claude hooks (unless --no-hooks)
+#   5. Install the soren-bridge opencode plugin (unless --no-hooks)
 #   6. Activate project supervisor (unless --no-activate)
 #   7. Index into memory (unless --no-index)
 #   8. Print summary
@@ -313,7 +313,7 @@ ARGUMENTS:
 OPTIONS:
     --name <name>           Project display name (auto-detected if omitted)
     --description <desc>    Project description (auto-detected from README if omitted)
-    --no-hooks              Skip installing Claude hooks in the project
+    --no-hooks              Skip installing the soren-bridge opencode plugin in the project
     --no-activate           Skip spawning the project supervisor
     --no-index              Skip indexing project docs into memory
     --dry-run               Show what would be done without making changes
@@ -324,7 +324,7 @@ WHAT IT DOES:
     2. Auto-detects language, git remote, project name, build/test commands
     3. Registers project (tools/projects add)
     4. Generates worker context file with detected stack and commands
-    5. Installs Claude hooks (tools/projects install-hooks)
+    5. Installs the soren-bridge opencode plugin (tools/projects install-hooks)
     6. Activates project supervisor (tools/projects activate)
     7. Indexes docs into memory (tools/memory-index --project <id>)
     8. Prints summary
@@ -488,7 +488,7 @@ main() {
     info "Edit this file to add project-specific conventions and notes"
 
     # ── Step 5: Install hooks ─────────────────────────────────────────────────
-    step "5/8" "Installing Claude hooks"
+    step "5/8" "Installing opencode bridge plugin"
 
     if [[ $no_hooks -eq 1 ]]; then
         warn "Skipped (--no-hooks)"

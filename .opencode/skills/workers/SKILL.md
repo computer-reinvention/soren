@@ -1,7 +1,6 @@
 ---
 name: workers
 description: Spawn, manage, and communicate with worker agents. Use when you need to create a new worker, kill a worker, list workers, or send messages to workers.
-allowed-tools: Bash(./tools/workers:*)
 ---
 
 # Worker Management

@@ -24,8 +24,8 @@ class Settings(BaseSettings):
     # Session prefix for spawned sessions
     session_prefix: str = "soren-"
 
-    # Startup delay for Claude to initialize (seconds)
-    claude_startup_delay: int = 8
+    # Startup delay for the agent TUI to initialize (seconds)
+    agent_startup_delay: int = 8
 
     # Auto-sleep: idle workers are put to sleep after this many minutes (SOREN_IDLE_SLEEP_MINUTES)
     idle_sleep_minutes: int = 30

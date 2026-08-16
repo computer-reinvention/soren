@@ -30,48 +30,32 @@ fail() { echo -e "  ${RED}✗${NC} $1"; ((failed++)); }
 section() { echo -e "\n${BOLD}$1${NC}"; }
 
 #───────────────────────────────────────────────────────────────────────────────
-# 1. HOOKS — verify all hook scripts from settings.json exist and are executable
+# 1. OPENCODE BRIDGE — verify the plugin, hook scripts, and opencode binary
 #───────────────────────────────────────────────────────────────────────────────
-section "Hooks"
+section "Opencode bridge"
 
-settings_file="${SOREN_HOME}/.claude/settings.json"
-if [[ ! -f "$settings_file" ]]; then
-    fail "settings.json not found: $settings_file"
+bridge_plugin="${SOREN_HOME}/.opencode/plugins/soren-bridge.ts"
+if [[ -f "$bridge_plugin" ]]; then
+    pass "plugin: soren-bridge.ts"
 else
-    pass "settings.json exists"
+    fail "plugin missing: $bridge_plugin"
+fi
 
-    # Extract all command fields from hooks, filter to file paths only
-    # (skip inline shell commands that don't start with $( or /)
-    git_root="$SOREN_HOME"
-    hook_commands=$(jq -r '
-        .hooks | to_entries[] | .value[] | .hooks[]? | .command // empty
-    ' "$settings_file" 2>/dev/null)
+for hook in verify-done.sh verify-ui-check.sh pre-compact.sh; do
+    hook_path="${SOREN_HOME}/.opencode/hooks/${hook}"
+    if [[ ! -f "$hook_path" ]]; then
+        fail "hook missing: $hook ($hook_path)"
+    elif [[ ! -x "$hook_path" ]]; then
+        fail "hook not executable: $hook"
+    else
+        pass "hook: $hook"
+    fi
+done
 
-    while IFS= read -r cmd; do
-        [[ -z "$cmd" ]] && continue
-
-        # Skip inline shell commands (contain { or ||, no .sh extension)
-        if [[ "$cmd" == *"{"* || "$cmd" == *"||"* ]] && [[ "$cmd" != *".sh"* ]]; then
-            continue
-        fi
-
-        # Resolve $(git rev-parse --show-toplevel) to actual path
-        resolved="${cmd//\$(git rev-parse --show-toplevel)/$git_root}"
-
-        # Extract just the script path (strip trailing args if any)
-        script_path="$resolved"
-
-        # Get basename for display
-        display_name=$(basename "$script_path")
-
-        if [[ ! -f "$script_path" ]]; then
-            fail "hook missing: $display_name ($script_path)"
-        elif [[ ! -x "$script_path" ]]; then
-            fail "hook not executable: $display_name"
-        else
-            pass "hook: $display_name"
-        fi
-    done <<< "$hook_commands"
+if command -v opencode >/dev/null 2>&1; then
+    pass "opencode binary on PATH"
+else
+    fail "opencode binary not found on PATH"
 fi
 
 #───────────────────────────────────────────────────────────────────────────────

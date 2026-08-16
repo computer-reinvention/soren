@@ -37,7 +37,7 @@ NC='\033[0m'
 
 cmd_start() {
     # Check dependencies first
-    for cmd in tmux claude git curl uv; do
+    for cmd in tmux opencode git curl uv; do
         if ! command -v $cmd &>/dev/null; then
             printf "${RED}Error: $cmd is required but not installed${NC}\n"
             log_status "STARTUP" "FATAL: Missing dependency: $cmd"

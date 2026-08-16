@@ -1,7 +1,6 @@
 ---
 name: backlog
 description: Manage the persistent task backlog for supervisor autonomy. Use when you need to add, list, claim, complete, skip, or reprioritize backlog items.
-allowed-tools: Bash(./tools/backlog:*)
 ---
 
 # Backlog - Persistent Work Queue

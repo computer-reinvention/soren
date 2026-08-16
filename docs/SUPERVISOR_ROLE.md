@@ -820,7 +820,7 @@ The heartbeat system detects when you've been idle too long and nudges you back 
 
 ### How It Works
 
-A `PostToolUse` hook (in `.claude/settings.json`) writes the current Unix timestamp to `.soren/.supervisor-heartbeat` every time you use a tool. The monitor daemon (`src/orchestrator/monitor.sh`) reads this file each cycle and compares it to the current time.
+The soren-bridge opencode plugin (`.opencode/plugins/soren-bridge.ts`) writes the current Unix timestamp to `.soren/.supervisor-heartbeat` every time you use a tool. The monitor daemon (`src/orchestrator/monitor.sh`) reads this file each cycle and compares it to the current time.
 
 ### Idle Detection and Nudges
 

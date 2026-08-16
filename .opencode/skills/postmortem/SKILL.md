@@ -1,7 +1,6 @@
 ---
 name: postmortem
 description: Generate a post-mortem PDF report for any reverted or failed commit. Use when you need to analyze what went wrong with a commit.
-allowed-tools: Bash(./tools/postmortem:*)
 ---
 
 # Postmortem - Incident Analysis Reports

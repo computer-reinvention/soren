@@ -1,7 +1,6 @@
 ---
 name: journal
 description: Write journal entries to maintain persistent memory across sessions. Use frequently - after completing tasks, making decisions, encountering issues, or learning something notable.
-allowed-tools: Bash(./tools/journal:*)
 ---
 
 # Journal - Persistent Memory

@@ -1,6 +1,6 @@
 """Budget guard — cost estimation and task deferral helpers.
 
-Token pricing uses Claude Opus 4.6 rates since all agents run on Opus.
+Token pricing uses Claude Opus 4.6 rates (via opencode) since all agents run on Opus.
 """
 
 import os
@@ -8,7 +8,7 @@ from datetime import date
 
 from .conversation_store import conversation_store
 
-# Anthropic token pricing (Claude Opus 4.6, USD per token)
+# Anthropic token pricing (Claude Opus 4.6 via opencode, USD per token)
 _INPUT_PRICE_PER_TOKEN        = 5.00  / 1_000_000
 _OUTPUT_PRICE_PER_TOKEN       = 25.00 / 1_000_000
 _CACHE_READ_PRICE_PER_TOKEN   = 0.50  / 1_000_000

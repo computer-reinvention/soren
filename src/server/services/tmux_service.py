@@ -92,7 +92,7 @@ class TmuxService:
             ])
 
         # Delay for multiline paste to be processed
-        # Claude Code shows "[Pasted text #N +X lines]" and needs time to register
+        # The TUI shows a pasted-text placeholder and needs time to register
         if "\n" in text:
             await asyncio.sleep(0.15)  # 150ms delay for multiline
         else:
@@ -142,19 +142,6 @@ class TmuxService:
             "-p", "-S", f"-{lines}"
         ])
         return stdout
-
-    async def is_vim_mode_enabled(self, window: str, session: Optional[str] = None) -> bool:
-        """Check if Claude Code's vim mode is enabled by looking for mode indicators."""
-        import re
-        output = await self.capture_pane(window, lines=5, session=session)
-        return bool(re.search(r"-- (INSERT|NORMAL|VISUAL) --", output))
-
-    async def disable_vim_mode(self, window: str, session: Optional[str] = None) -> bool:
-        """Disable vim mode if it's enabled. Returns True if vim mode was disabled."""
-        if await self.is_vim_mode_enabled(window, session):
-            await self.send_input(window, "/vim", session)
-            return True
-        return False
 
     async def create_window(self, name: str, session: Optional[str] = None) -> bool:
         """Create a new tmux window."""

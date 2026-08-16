@@ -75,7 +75,7 @@ When you started SOREN, it created:
 ```
 tmux session "soren"
 ├── monitor     - Health checking daemon
-├── supervisor  - Main AI coordinator (Claude)
+├── supervisor  - Main AI coordinator (opencode)
 └── (workers)   - Created on demand for tasks
 ```
 

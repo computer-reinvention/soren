@@ -10,7 +10,7 @@ This guide is for **project supervisors** (sup-hero, sup-heroweb, etc.) who want
 
 Every time you spawn an ephemeral worker for your project, it pays a startup tax:
 
-1. **Reads CLAUDE.md, WORKER_ROLE.md, and its task description** — 2-3 minutes of context loading
+1. **Reads AGENTS.md, WORKER_ROLE.md, and its task description** — 2-3 minutes of context loading
 2. **Scans the codebase** to understand architecture, conventions, and file layout
 3. **Discovers the tech stack** by reading config files, package manifests, and existing code
 4. **Builds a mental model** of how things fit together before writing a single line
@@ -41,7 +41,7 @@ Before writing any role file, do a thorough scan of the project. Read the files,
 | What to Read | What to Extract |
 |--------------|-----------------|
 | `README.md` | Purpose, setup instructions, architecture overview |
-| `CLAUDE.md` | AI-specific instructions, constraints, conventions |
+| `AGENTS.md` (or legacy `CLAUDE.md`) | AI-specific instructions, constraints, conventions |
 | `package.json` / `pyproject.toml` / `go.mod` | Dependencies, scripts, project metadata |
 | `.env.example` / config files | Environment variables, feature flags, external services |
 
@@ -245,7 +245,7 @@ The project supervisor (sup-hero) reads the project thoroughly:
 ```bash
 # Read project docs
 cat /path/to/hero/README.md
-cat /path/to/hero/CLAUDE.md
+cat /path/to/hero/AGENTS.md
 cat /path/to/hero/package.json
 
 # Understand structure

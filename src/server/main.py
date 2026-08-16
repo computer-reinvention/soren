@@ -105,7 +105,7 @@ AUTH_EXEMPT_PATHS = {
     "/api/messages/verify-result",
 }
 
-# Prefixes that bypass authentication (internal Claude Code hooks)
+# Prefixes that bypass authentication (internal soren-bridge plugin endpoints)
 AUTH_EXEMPT_PREFIXES = (
     "/api/agent-events",
     "/api/thoughts",

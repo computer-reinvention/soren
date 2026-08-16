@@ -17,7 +17,7 @@ Welcome to SOREN - a self-improving multi-agent AI orchestration system. This gu
 
 ## What is SOREN?
 
-SOREN (Claude Multiplexer) is an experimental system that orchestrates multiple Claude AI agents working together. Think of it as a team of AI programmers:
+SOREN is an experimental system that orchestrates multiple opencode-based Claude AI agents working together. Think of it as a team of AI programmers:
 
 - A **supervisor** receives tasks and decides how to break them down
 - **Workers** handle individual pieces of work in isolated environments
@@ -131,7 +131,7 @@ Dashboard
 │                                                                  │
 │   [External]     [Mailbox]      [Router]       [Agents]          │
 │   Webhooks  ───▶  .soren/    ───▶ daemon  ───▶  tmux windows      │
-│   User msgs      mailbox        routes msgs    run Claude        │
+│   User msgs      mailbox        routes msgs    run opencode      │
 │                                                     │            │
 │                                                     ▼            │
 │                                              [WebSocket]         │
@@ -157,7 +157,7 @@ Before installing SOREN, make sure you have:
 - **tmux** - Terminal multiplexing for agent isolation
 - **git** - Version control and auto-rollback
 - **[uv](https://github.com/astral-sh/uv)** - Fast Python package manager
-- **Claude API access** - The agents are powered by Claude
+- **[opencode](https://opencode.ai)** - The agent runtime; agents are powered by Claude models
 
 ### Installation
 

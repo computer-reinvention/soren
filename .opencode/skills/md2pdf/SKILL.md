@@ -1,7 +1,6 @@
 ---
 name: md2pdf
 description: Convert any Markdown file to a clean, professional PDF. Supports headings, code blocks, tables, lists, blockquotes, and inline formatting.
-allowed-tools: Bash(./tools/md2pdf:*)
 ---
 
 # md2pdf - Markdown to PDF Converter

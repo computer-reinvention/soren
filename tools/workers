@@ -23,7 +23,10 @@ set -euo pipefail
 
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
-STARTUP_DELAY=8
+STARTUP_DELAY=8  # fallback wait when the opencode health endpoint is unreachable
+
+# Shared opencode helpers (model mapping, ports, health, HTTP send)
+source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -343,9 +346,18 @@ cmd_spawn() {
         fi
     fi
 
+    # Allocate a dedicated port for this worker's embedded opencode server
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    if [[ -f "$reg_file" ]]; then
+        local ptmp; ptmp=$(mktemp)
+        jq --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p' \
+            "$reg_file" > "$ptmp" && mv "$ptmp" "$reg_file"
+    fi
+
     # Build environment variable exports
     local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     if [[ -n "$project_id" ]]; then
         env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
     fi
@@ -355,26 +367,20 @@ cmd_spawn() {
     if [[ -n "$worker_dir" ]] || [[ -n "$worktree_path" ]]; then
         spawn_cmd="${spawn_cmd} && export PATH=${SOREN_PROJECT_ROOT}/tools:\$PATH"
     fi
-    local claude_cmd="claude --dangerously-skip-permissions"
-    if [[ -n "$model_flag" ]]; then
-        claude_cmd="claude --model ${model_flag} --dangerously-skip-permissions"
-    fi
-    spawn_cmd="${spawn_cmd} && cd ${cd_target} && ${claude_cmd}"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port" "$model_flag")
+    spawn_cmd="${spawn_cmd} && cd ${cd_target} && ${oc_cmd}"
 
-    # Start Claude with environment variables (two-step pattern for reliability)
-    info "Starting Claude agent..."
+    # Start opencode with environment variables (two-step pattern for reliability)
+    info "Starting opencode agent..."
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$spawn_cmd"
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to initialize
-    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
-    sleep "$STARTUP_DELAY"
-
-    # Disable vim mode if enabled (for reliable message delivery)
-    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 1
+    # Wait for the embedded opencode server to come up
+    info "Waiting for opencode to initialize (port ${oc_port})..."
+    if ! soren_oc_wait_ready "$oc_port" 30; then
+        warn "opencode health endpoint not responding after 30s — falling back to fixed delay"
+        sleep "$STARTUP_DELAY"
     fi
 
     # Override task content for permanent workers
@@ -487,14 +493,16 @@ Your supervisor will merge your branch back into the integration branch when you
 WTEOF
     fi
 
-    # Send single-line instruction telling Claude to read the context file
+    # Send single-line instruction telling the agent to read the context file
     # This avoids multiline paste issues entirely
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
-    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
-    sleep 0.1
-    tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    if ! soren_oc_http_send "$oc_port" "$instruction"; then
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+        sleep 0.1
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+    fi
 
     # Link to task system if --task was provided
     if [[ -n "$task_id" ]]; then
@@ -579,7 +587,7 @@ cmd_kill() {
         warn "Failed to archive conversation (server may be down)"
     fi
 
-    # Send Ctrl+C first to gracefully stop Claude
+    # Send Ctrl+C first to gracefully stop opencode
     tmux send-keys -t "${SOREN_SESSION}:${name}" C-c
     sleep 1
 
@@ -658,7 +666,7 @@ cmd_sleep() {
         ok "Captured session: ${session_id:0:8}..."
     fi
 
-    # Send /exit to Claude for graceful shutdown (saves session state)
+    # Exit opencode gracefully (sessions are persisted automatically)
     tmux send-keys -t "${SOREN_SESSION}:${name}" C-c 2>/dev/null || true
     sleep 0.5
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
@@ -727,13 +735,20 @@ cmd_wake() {
     agent_id=$(jq -r --arg k "$name" '.[$k].agent_id // ""' "$reg_file" 2>/dev/null)
     [[ -z "$agent_id" ]] && agent_id="ag_$(head -c 4 /dev/urandom | xxd -p)"
 
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    # Allocate a fresh opencode port for the resumed instance
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    local ptmp; ptmp=$(mktemp)
+    jq --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p' \
+        "$reg_file" > "$ptmp" && mv "$ptmp" "$reg_file"
+
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
 
     local cd_target="${worker_dir:-${SOREN_PROJECT_ROOT}}"
-    local model_arg=""
-    [[ -n "$saved_model" ]] && model_arg="--model ${saved_model} "
-    local resume_cmd="export ${env_vars} && cd ${cd_target} && claude ${model_arg}--resume ${session_id} --dangerously-skip-permissions"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port" "$saved_model" "$session_id")
+    local resume_cmd="export ${env_vars} && cd ${cd_target} && ${oc_cmd}"
 
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$resume_cmd"
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
@@ -752,19 +767,10 @@ cmd_wake() {
 
     ok "Worker '$name' is awake"
 
-    # If a message was provided, wait for prompt then send it
+    # If a message was provided, wait for readiness then send it
     if [[ -n "$message" ]]; then
-        info "Waiting for Claude to resume..."
-        local retries=15
-        while [[ $retries -gt 0 ]]; do
-            sleep 1
-            local pane_output
-            pane_output=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null || true)
-            if echo "$pane_output" | grep -qE '❯|bypass permissions'; then
-                break
-            fi
-            ((retries--))
-        done
+        info "Waiting for opencode to resume..."
+        soren_oc_wait_ready "$oc_port" 20 || sleep "$STARTUP_DELAY"
         sleep 1
         # Include last-task context from conversation_store
         local last_task
@@ -1020,22 +1026,17 @@ ${message}"
         -d "{\"from_agent\": $(printf '%s' "$from_agent" | jq -Rs .), \"to_agent\": $(printf '%s' "$name" | jq -Rs .), \"content\": $(printf '%s' "$message" | jq -Rs .), \"type\": \"task\"}" \
         >/dev/null 2>&1 || true
 
-    # Send message using literal flag then Enter
-    # Small delay between text and Enter ensures Claude Code receives both
-    # (matches lib/tmux.sh delay pattern used by router)
+    # Deliver over HTTP to the worker's embedded opencode server (reliable,
+    # no paste/prompt-state issues); fall back to tmux send-keys.
+    local oc_port
+    if oc_port=$(soren_oc_port_for "$name") && soren_oc_http_send "$oc_port" "$message"; then
+        ok "Message sent to '$name' (http)"
+        return 0
+    fi
+
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$message"
     sleep 0.1
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-
-    # Auto-detect stuck paste buffers — Claude Code sometimes shows
-    # "[Pasted text #N +M lines]" without submitting. Press Enter again if so.
-    sleep 0.3
-    local pane_tail
-    pane_tail=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -5 2>/dev/null) || true
-    if echo "$pane_tail" | grep -qE '\[Pasted text'; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 0.2
-    fi
 
     ok "Message sent to '$name'"
 }
@@ -1136,7 +1137,7 @@ cmd_reset() {
 
     # Step 1: Capture pre-reset state (reuse pre-compact hook)
     local artifact_file=""
-    local pre_compact_hook="${SOREN_PROJECT_ROOT}/.claude/hooks/pre-compact.sh"
+    local pre_compact_hook="${SOREN_PROJECT_ROOT}/.opencode/hooks/pre-compact.sh"
     if [[ -x "$pre_compact_hook" ]]; then
         artifact_file=$("$pre_compact_hook" "$name" 2>/dev/null) || true
         [[ -n "$artifact_file" ]] && info "State captured: $artifact_file"
@@ -1160,13 +1161,13 @@ cmd_reset() {
     curl -sX POST "http://localhost:${SOREN_PORT:-8000}/api/agents/${name}/archive" > /dev/null 2>&1 || \
         warn "Failed to archive (server may be down)"
 
-    # Step 4: Gracefully exit Claude, then restart
-    info "Stopping Claude process..."
+    # Step 4: Gracefully exit opencode, then restart
+    info "Stopping opencode process..."
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/exit"
     sleep 0.1
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to exit (up to 10 seconds)
+    # Wait for opencode to exit (up to 10 seconds)
     local wait=0
     while ((wait < 10)); do
         sleep 1
@@ -1185,8 +1186,8 @@ cmd_reset() {
         sleep 2
     fi
 
-    # Step 5: Restart Claude in the same window
-    info "Restarting Claude..."
+    # Step 5: Restart opencode in the same window (fresh session = fresh context)
+    info "Restarting opencode..."
     local agent_id
     agent_id=$(jq -r --arg k "$name" '.[$k].agent_id' "$reg_file")
     local project_id
@@ -1194,26 +1195,25 @@ cmd_reset() {
     local saved_model
     saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file")
 
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    local ptmp; ptmp=$(mktemp)
+    jq --arg k "$name" --argjson p "$oc_port" '.[$k].oc_port = $p' \
+        "$reg_file" > "$ptmp" && mv "$ptmp" "$reg_file"
+
     local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" && "$project_id" != "null" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
 
-    local reset_model_arg=""
-    [[ -n "$saved_model" ]] && reset_model_arg="--model ${saved_model} "
-    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "export ${env_vars} && claude ${reset_model_arg}--dangerously-skip-permissions"
+    local reset_oc_cmd
+    reset_oc_cmd=$(soren_oc_cli "$oc_port" "$saved_model")
+    tmux send-keys -t "${SOREN_SESSION}:${name}" -l "export ${env_vars} && ${reset_oc_cmd}"
     sleep 0.1
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
-    # Wait for Claude to initialize
-    info "Waiting ${STARTUP_DELAY}s for Claude to initialize..."
-    sleep "$STARTUP_DELAY"
-
-    # Disable vim mode if needed
-    if tmux capture-pane -t "${SOREN_SESSION}:${name}" -p | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "/vim"
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        sleep 1
-    fi
+    # Wait for opencode to initialize
+    info "Waiting for opencode to initialize (port ${oc_port})..."
+    soren_oc_wait_ready "$oc_port" 30 || sleep "$STARTUP_DELAY"
 
     # Step 6: Re-inject role context
     local role_ctx
@@ -1504,7 +1504,7 @@ SPAWN OPTIONS:
                        Permanent workers persist across tasks and receive [TASK] messages.
                        Use 'workers reset' to clear context without losing identity.
                        Use 'workers kill --force' to permanently remove.
-    --model <model>    Claude model tier (currently opus only).
+    --model <model>    Model tier: haiku|sonnet|opus, or a full provider/model id.
                        All agents default to opus (Opus 4.6 only constraint).
                        Stored in registry — wake and reset preserve the model choice.
 

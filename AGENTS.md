@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working in this repository.
+This file provides guidance to opencode agents working in this repository.
 
 ## Project overview
 
@@ -126,7 +126,7 @@ Webhooks/User → Mailbox (.soren/mailbox) → Router daemon → Supervisor agen
 
 - Agent statuses: `PENDING`, `IN_PROGRESS`, `BLOCKED`, `TESTING`, `COMPLETE`, `FAILED`, `IDLE`
 - Message types: `TASK`, `STATUS`, `RESPONSE`, `ERROR`, `USER`
-- Agent events (from Claude Code hooks): `PostToolUse`, `Stop` — tracked in `routes/agent_events.py`
+- Agent events (from the soren-bridge opencode plugin): `UserPromptSubmit`, `PostToolUse`, `Stop` — tracked in `routes/agent_events.py`
 
 ### Runtime data
 
@@ -146,7 +146,7 @@ REST endpoints under `/api/`:
 - `/agents` — CRUD, messaging, terminal capture
 - `/agents/ws` — WebSocket for real-time updates
 - `/messages` — history and user message display
-- `/agent-events` — Claude Code hook event receiver
+- `/agent-events` — agent event receiver (fed by `.opencode/plugins/soren-bridge.ts`)
 - `/journal` — daily journal CRUD and search
 - `/filesystem` — file browser
 - `/webhooks/{source}` — external webhook receiver
@@ -165,6 +165,29 @@ Key settings (in `src/server/config.py`):
 - `SOREN_HOST` / `SOREN_PORT` — server bind (default `0.0.0.0:8000`)
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — message queue path (default `.soren/mailbox`)
+
+## Execution engine (opencode)
+
+Every SOREN agent is an [opencode](https://opencode.ai) TUI running in a tmux
+window, pinned to a dedicated embedded-server port (`SOREN_OC_PORT`, range
+42000-42999, recorded as `oc_port` in `.soren/agent_registry.json`).
+
+- **Spawning**: `tools/workers spawn` launches `opencode --port <p>` with
+  `OPENCODE_PERMISSION` granting full autonomy (replaces Claude Code's
+  `--dangerously-skip-permissions`).
+- **Events**: `.opencode/plugins/soren-bridge.ts` (active only when
+  `SOREN_AGENT=true`) posts `UserPromptSubmit`/`PostToolUse`/`Stop` to
+  `/api/agent-events`, streams thoughts to `/api/thoughts`, appends
+  `.soren/audit.log`, touches heartbeat files, enforces the supervisor
+  edit block, runs the stop-gate nudge, and triggers
+  `.opencode/hooks/verify-done.sh` on mailbox done reports.
+- **Messaging**: delivery prefers HTTP (`POST /tui/append-prompt` +
+  `/tui/submit-prompt` on the agent's port) with tmux send-keys fallback.
+- **Sleep/wake**: session IDs (`ses_*`) captured from plugin events; wake
+  resumes with `opencode --session <id>`.
+- **Readiness/liveness**: `GET /global/health` on the agent's port.
+- **Model tiers**: `haiku|sonnet|opus` map to provider models via
+  `tools/lib/opencode.sh` (`SOREN_MODEL_*` env overrides).
 
 ## Self-improvement safety model
 

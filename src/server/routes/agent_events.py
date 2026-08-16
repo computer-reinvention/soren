@@ -44,9 +44,9 @@ router = APIRouter()
 @router.post("", response_model=AgentEventResponse)
 async def receive_agent_event(event: AgentEvent):
     """
-    Receive events from Claude Code hooks.
+    Receive events from the soren-bridge opencode plugin.
 
-    This endpoint is called by the hook scripts when:
+    This endpoint is called by the plugin when:
     - PostToolUse: After a tool (Bash, Write, Edit, Read) is executed
     - Stop: When the agent completes a response
 

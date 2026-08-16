@@ -16,6 +16,9 @@ set -euo pipefail
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 REGISTRY="${SOREN_HOME}/.soren/projects.json"
 
+# Shared opencode helpers (model mapping, ports, health, HTTP send)
+source "${SOREN_HOME}/tools/lib/opencode.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -230,19 +233,20 @@ cmd_remove() {
         done <<< "$windows"
     fi
 
-    # Step 3: Remove .claude/settings.json if hooks were installed
+    # Step 3: Remove the soren-bridge plugin shim if it was installed
     local hooks_installed
     hooks_installed=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .hooks_installed' "$REGISTRY")
     if [[ "$hooks_installed" == "true" ]]; then
         local project_path
         project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
-        local settings_file="${project_path}/.claude/settings.json"
-        if [[ -f "$settings_file" ]]; then
-            info "Removing installed hooks: $settings_file"
-            rm -f "$settings_file"
-            # Remove .claude dir if empty
-            rmdir "${project_path}/.claude" 2>/dev/null || true
-            ok "Hooks removed"
+        local plugin_file="${project_path}/.opencode/plugins/soren-bridge.ts"
+        if [[ -f "$plugin_file" ]]; then
+            info "Removing installed soren-bridge plugin: $plugin_file"
+            rm -f "$plugin_file"
+            # Prune empty .opencode/plugins dirs
+            rmdir "${project_path}/.opencode/plugins" 2>/dev/null || true
+            rmdir "${project_path}/.opencode" 2>/dev/null || true
+            ok "soren-bridge plugin removed"
         fi
     fi
 
@@ -427,14 +431,24 @@ cmd_activate() {
         sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${sup_name}', '${agent_id}', 'IN_PROGRESS', json('{\"type\":\"project-supervisor\",\"role\":\"project-supervisor\",\"project_id\":\"${id}\",\"display_name\":\"${sup_name}\",\"created_by\":\"tools/projects\",\"created_at\":\"${now}\",\"agent_id\":\"${agent_id}\"}'));"
     fi
 
+    # Allocate a dedicated port for the supervisor's embedded opencode server
+    local oc_port
+    oc_port=$(soren_oc_free_port) || die "could not allocate an opencode port"
+    local port_tmp
+    port_tmp=$(mktemp)
+    jq --arg key "$sup_name" --argjson p "$oc_port" '.[$key].oc_port = $p' \
+        "$reg_file" > "$port_tmp" && mv "$port_tmp" "$reg_file"
+
     # Build environment variables
     local port="${SOREN_PORT:-8000}"
-    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${sup_name} SOREN_AGENT_ROLE=project-supervisor SOREN_PROJECT_ID=${id} SOREN_SESSION=${session} SOREN_HOME=${SOREN_HOME} SOREN_PORT=${port} SOREN_MAILBOX=${SOREN_HOME}/.soren/mailbox SOREN_SUPERVISOR=supervisor CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false"
+    local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${sup_name} SOREN_AGENT_ROLE=project-supervisor SOREN_PROJECT_ID=${id} SOREN_SESSION=${session} SOREN_HOME=${SOREN_HOME} SOREN_PORT=${port} SOREN_MAILBOX=${SOREN_HOME}/.soren/mailbox SOREN_SUPERVISOR=supervisor SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
 
     # Build spawn command — add SOREN tools to PATH so supervisor can use journal/mailbox/workers
-    local spawn_cmd="export ${env_vars} && export PATH=${SOREN_HOME}/tools:\$PATH && cd ${project_path} && claude --dangerously-skip-permissions"
+    local oc_cmd
+    oc_cmd=$(soren_oc_cli "$oc_port")
+    local spawn_cmd="export ${env_vars} && export PATH=${SOREN_HOME}/tools:\$PATH && cd ${project_path} && ${oc_cmd}"
 
-    # Start Claude
+    # Start opencode
     info "Starting project supervisor..."
     tmux send-keys -t "${session}:${sup_name}" -l "$spawn_cmd"
     tmux send-keys -t "${session}:${sup_name}" Enter
@@ -467,7 +481,7 @@ You have the same authority and autonomy as Supervisor Prime, scoped to your pro
 ## What to Read
 
 1. Read \`${SOREN_HOME}/docs/SUPERVISOR_ROLE.md\` for your orchestration behavior, delegation guidelines, and the complexity assessment guide.
-2. Read the project's own \`CLAUDE.md\` (if it exists) for project-specific context — it's in your working directory.
+2. Read the project's own \`AGENTS.md\` (or \`CLAUDE.md\`) (if it exists) for project-specific context — it's in your working directory.
 3. Read \`${SOREN_HOME}/docs/templates/teams/README.md\` and \`${SOREN_HOME}/docs/templates/roles/README.md\` before designing any delegation.
 
 ## Core Principles
@@ -721,25 +735,13 @@ Before spawning workers, consult \`${SOREN_HOME}/docs/templates/teams/README.md\
 Role templates for individual workers are in \`${SOREN_HOME}/docs/templates/roles/README.md\`. Point workers to the relevant role template when spawning them.
 CTXEOF
 
-    # Wait for Claude to initialize
-    info "Waiting for Claude to initialize..."
-    local retries=30
-    while ! tmux capture-pane -t "${session}:${sup_name}" -p 2>/dev/null | grep -qE "^❯|bypass permissions"; do
-        sleep 1
-        ((retries--)) || break
-        if ((retries <= 0)); then
-            warn "Claude startup timeout, sending instructions anyway"
-            break
-        fi
-    done
-    sleep 1
-
-    # Disable vim mode if enabled
-    if tmux capture-pane -t "${session}:${sup_name}" -p 2>/dev/null | grep -qE "\-\- (INSERT|NORMAL|VISUAL) \-\-"; then
-        tmux send-keys -t "${session}:${sup_name}" -l "/vim"
-        tmux send-keys -t "${session}:${sup_name}" Enter
-        sleep 1
+    # Wait for the embedded opencode server to come up
+    info "Waiting for opencode to initialize (port ${oc_port})..."
+    if ! soren_oc_wait_ready "$oc_port" 30; then
+        warn "opencode startup timeout, sending instructions anyway"
+        sleep 8
     fi
+    sleep 1
 
     # Send the context reference
     local instruction="[soren:supervisor-prime] Read ${SOREN_HOME}/.soren/worker-contexts/${sup_name}-context.md to understand your role as project supervisor for '${id}'. Then read ${SOREN_HOME}/docs/SUPERVISOR_ROLE.md for orchestration guidelines. You are a project supervisor managed by Supervisor Prime, not a human user. Delegate work to workers, never write code yourself. IMPORTANT: Always prefix system-level responses (heartbeat replies, compaction recovery, idle status, status confirmations) with [SYS] so they render as compact notifications in the dashboard."
@@ -844,7 +846,7 @@ cmd_install_hooks() {
     local is_self
     is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
     if [[ "$is_self" == "true" ]]; then
-        warn "SOREN self-project already has hooks configured"
+        warn "SOREN self-project already has the soren-bridge plugin configured"
         return 0
     fi
 
@@ -852,117 +854,32 @@ cmd_install_hooks() {
     project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
     [[ -d "$project_path" ]] || die "project path does not exist: $project_path"
 
-    info "Installing SOREN hooks in: $project_path"
+    info "Installing soren-bridge opencode plugin in: $project_path"
 
-    # Create .claude directory in the target project
-    local target_claude_dir="${project_path}/.claude"
-    mkdir -p "$target_claude_dir"
+    # Create .opencode/plugins directory in the target project
+    local target_plugin_dir="${project_path}/.opencode/plugins"
+    mkdir -p "$target_plugin_dir"
 
-    # Generate settings.json with absolute paths to SOREN hooks
-    local settings_file="${target_claude_dir}/settings.json"
+    # Install a plugin shim that re-exports SOREN's bridge plugin
+    local plugin_file="${target_plugin_dir}/soren-bridge.ts"
 
-    # Warn if settings.json already exists
-    if [[ -f "$settings_file" ]]; then
-        warn "Existing .claude/settings.json found — overwriting"
+    # Warn if the plugin shim already exists
+    if [[ -f "$plugin_file" ]]; then
+        warn "Existing .opencode/plugins/soren-bridge.ts found — overwriting"
     fi
 
-    cat > "$settings_file" << HOOKSEOF
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "AskUserQuestion|EnterPlanMode",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/block-interactive.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/stream-thought.sh",
-            "timeout": 5,
-            "async": true
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|Write|Edit|Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/notify-output.sh",
-            "timeout": 10
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/audit-log.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "[ \"\$SOREN_AGENT_ROLE\" = \"supervisor\" -o \"\$SOREN_AGENT_ROLE\" = \"project-supervisor\" ] && date +%s > \"\${SOREN_HOME}/.soren/.sup-\${SOREN_PROJECT_ID}-heartbeat\"",
-            "timeout": 5,
-            "async": true
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/stream-result.sh",
-            "timeout": 5,
-            "async": true
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/stop-gate.sh",
-            "timeout": 15
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${SOREN_HOME}/.claude/hooks/notify-complete.sh",
-            "timeout": 10
-          }
-        ]
-      }
-    ]
-  }
-}
-HOOKSEOF
+    cat > "$plugin_file" << PLUGINEOF
+// Installed by SOREN (tools/projects install-hooks). Do not edit.
+export { SorenBridge } from "${SOREN_HOME}/.opencode/plugins/soren-bridge.ts"
+PLUGINEOF
 
     # Update registry: mark hooks as installed
     local tmp
     tmp=$(mktemp)
     jq --arg id "$id" '(.projects[] | select(.id == $id)).hooks_installed = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
 
-    ok "Hooks installed in $project_path/.claude/settings.json"
-    echo "  All hooks point to: ${SOREN_HOME}/.claude/hooks/"
+    ok "soren-bridge plugin installed at $plugin_file"
+    echo "  Re-exports: ${SOREN_HOME}/.opencode/plugins/soren-bridge.ts"
 }
 
 cmd_help() {
@@ -979,7 +896,7 @@ COMMANDS:
     info <id>               Show project details
     activate <id>           Spawn project supervisor and set active
     deactivate <id>         Kill project supervisor and set inactive
-    install-hooks <id>      Install SOREN hooks in target project
+    install-hooks <id>      Install SOREN's soren-bridge opencode plugin in target project
     help                    Show this help message
 
 ADD OPTIONS:

@@ -1,7 +1,6 @@
 ---
 name: teams
 description: Set up, manage, and tear down multi-agent team structures from templates. Use when you need to spawn a coordinated team (squad, feature team, platform team, tiger team, or debate pair) rather than individual workers.
-allowed-tools: Bash(./tools/teams:*)
 ---
 
 # Team Management
