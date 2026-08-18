@@ -20,6 +20,7 @@ set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 TEMPLATES_DIR="${SOREN_HOME}/templates/team"
+export SOREN_SKILLS_DIR="${SOREN_SKILLS_DIR:-${SOREN_HOME}/.opencode/skills}"
 
 # Colors
 RED='\033[0;31m'
@@ -45,6 +46,16 @@ import json, os, re, sys
 CATEGORIES = ("builder", "reviewer", "support")
 TIERS = ("haiku", "sonnet", "opus")
 PROTECTED = ("forbidden", "via-worktree")
+SKILL_NAME_RE = re.compile(r'^[a-z0-9]+(-[a-z0-9]+)*$')
+
+
+def skills_dir(tdir):
+    """Resolve the .opencode/skills directory (env override, else derived)."""
+    env = os.environ.get('SOREN_SKILLS_DIR')
+    if env:
+        return env
+    root = os.path.dirname(os.path.dirname(os.path.abspath(tdir)))
+    return os.path.join(root, '.opencode', 'skills')
 
 
 def strip_comment(line):
@@ -187,6 +198,21 @@ def validate_file(path):
         elif category in ('builder', 'support') and verdicts:
             errors.append(f'{category}s must have empty report.verdicts, got {verdicts}')
 
+    # skills: optional list; each entry lowercase-hyphen with an existing SKILL.md
+    skills = fm.get('skills')
+    if skills is not None:
+        if not isinstance(skills, list):
+            errors.append(f'skills must be a list, got {skills!r}')
+        else:
+            sdir = skills_dir(sys.argv[2])
+            for s in skills:
+                if not isinstance(s, str) or not SKILL_NAME_RE.match(s):
+                    errors.append(f'skill {s!r} is not lowercase-hyphen (^[a-z0-9]+(-[a-z0-9]+)*$)')
+                    continue
+                skill_md = os.path.join(sdir, s, 'SKILL.md')
+                if not os.path.isfile(skill_md):
+                    errors.append(f'skill {s!r} has no SKILL.md at {skill_md}')
+
     if '## Accumulated Knowledge' not in body:
         errors.append("body missing '## Accumulated Knowledge' section")
 
@@ -247,12 +273,13 @@ def main():
         print(json.dumps(fm, indent=2, ensure_ascii=False))
 
     elif mode == 'list':
-        rows = [('AGENT_ID', 'NAME', 'CATEGORY', 'TIER', 'WORKTREE', 'PROTECTED_PATHS')]
+        rows = [('AGENT_ID', 'NAME', 'CATEGORY', 'TIER', 'WORKTREE', 'PROTECTED_PATHS', 'SKILLS')]
         for path, (fm, err) in load_all(tdir).items():
             if err or fm is None:
-                rows.append((os.path.basename(path), '<parse error>', '-', '-', '-', '-'))
+                rows.append((os.path.basename(path), '<parse error>', '-', '-', '-', '-', '-'))
                 continue
             report = fm.get('report') or {}
+            skills = fm.get('skills')
             rows.append((
                 str(fm.get('agent_id', '?')),
                 str(fm.get('display_name', '?')),
@@ -260,6 +287,7 @@ def main():
                 str(fm.get('tier', '?')),
                 str(fm.get('worktree_required', '?')).lower(),
                 str(fm.get('protected_paths', '?')),
+                str(len(skills)) if isinstance(skills, list) else '-',
             ))
         widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
         for idx, r in enumerate(rows):

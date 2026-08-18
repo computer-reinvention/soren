@@ -39,12 +39,21 @@ Use the `projects` tool to manage the SOREN project registry. Projects registere
 ./tools/projects remove <project-id>
 ```
 
+### Regenerate conventions skills
+```bash
+./tools/projects sync-skills
+```
+
 ## Auto-Detection
 
 When registering a project with `add`, the tool automatically detects:
 - **Git remote** from the `origin` remote URL
 - **Language** from manifest files (pyproject.toml, package.json, Cargo.toml, go.mod)
 - **Project ID** from the directory basename (lowercased, sanitized)
+
+## Conventions Skills (auto-generated)
+
+Registering a project also generates a conventions skill at `.opencode/skills/project-<id>-conventions/SKILL.md` — the project's stack, key commands, its own rules file (AGENTS.md/CLAUDE.md excerpt), and commit style. **Load it before working on that project** (`skill({name: "project-<id>-conventions"})`). It is removed on `projects remove`; run `sync-skills` to refresh all of them after a project's rules or scripts change.
 
 ## Examples
 

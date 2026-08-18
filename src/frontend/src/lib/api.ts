@@ -5,6 +5,7 @@ import type { JournalDayResponse, JournalDatesResponse, JournalSearchResponse, R
 import type { FilesystemResponse } from '../types/filesystem';
 import type { SessionListResponse, Session, SessionCreateRequest } from '../types/session';
 import type { ProjectList, Project, ProjectCreate, ProjectAgentsResponse } from '../types/project';
+import type { TeamList, Team } from '../types/team';
 import type { TaskListResponse, TaskTreeResponse, TaskStatsResponse, Task } from '../types/task';
 import { API_BASE } from './constants';
 import { useAuthStore } from '../stores/authStore';
@@ -312,6 +313,19 @@ export const api = {
   async getProjectAgents(projectId: string): Promise<ProjectAgentsResponse> {
     const res = await apiFetch(`${API_BASE}/api/projects/${encodeURIComponent(projectId)}/agents`);
     if (!res.ok) throw new Error('Failed to fetch project agents');
+    return res.json();
+  },
+
+  // Teams API
+  async getTeams(): Promise<TeamList> {
+    const res = await apiFetch(`${API_BASE}/api/teams`);
+    if (!res.ok) throw new Error('Failed to fetch teams');
+    return res.json();
+  },
+
+  async getTeam(prefix: string): Promise<Team> {
+    const res = await apiFetch(`${API_BASE}/api/teams/${encodeURIComponent(prefix)}`);
+    if (!res.ok) throw new Error('Failed to fetch team');
     return res.json();
   },
 
