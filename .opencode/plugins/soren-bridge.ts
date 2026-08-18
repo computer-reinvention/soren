@@ -32,6 +32,45 @@ const THOUGHTS_URL = env.SOREN_THOUGHTS_URL ?? `${API}/api/thoughts`
 const isSupervisor = AGENT === "supervisor" || AGENT.startsWith("sup-") || AGENT.startsWith("supervisor-")
 const isPermanent = AGENT.startsWith("perm-")
 
+// Structural write-guard configuration
+const WORKTREE = (env.SOREN_WORKTREE ?? "").replace(/\/$/, "")
+const OVERRIDE = env.SOREN_PROTECTED_OVERRIDE === "1"
+/** Recovery-critical paths, relative to SOREN_HOME. Trailing slash = subtree. */
+const PROTECTED_PATHS = [
+  "src/orchestrator/",
+  ".opencode/plugins/",
+  ".opencode/hooks/",
+  "tools/lib/opencode.sh",
+  "soren.sh",
+]
+
+let cwdForResolve = SOREN_HOME // refined with the plugin's directory at init
+
+function resolvePath(p: string): string {
+  if (!p) return ""
+  if (p.startsWith("/")) return p
+  if (p.startsWith("~/")) return `${env.HOME ?? ""}/${p.slice(2)}`
+  return `${cwdForResolve}/${p}`.replace(/\/\.\//g, "/")
+}
+
+function insideLiveCheckout(abs: string): boolean {
+  if (!abs.startsWith(SOREN_HOME + "/") && abs !== SOREN_HOME) return false
+  // The runtime dir is not "the checkout" — journals, mailbox, contexts live there
+  if (abs.startsWith(`${SOREN_HOME}/.soren/`)) return false
+  if (WORKTREE && (abs === WORKTREE || abs.startsWith(WORKTREE + "/"))) return false
+  return true
+}
+
+function relToHome(abs: string): string {
+  return abs.startsWith(SOREN_HOME + "/") ? abs.slice(SOREN_HOME.length + 1) : abs
+}
+
+function isProtectedLivePath(abs: string): boolean {
+  if (!insideLiveCheckout(abs)) return false
+  const rel = relToHome(abs)
+  return PROTECTED_PATHS.some((p) => (p.endsWith("/") ? rel.startsWith(p) : rel === p))
+}
+
 function truncate(s: unknown, n: number): string {
   const str = typeof s === "string" ? s : JSON.stringify(s ?? "")
   return str.length > n ? str.slice(0, n) + "…" : str
@@ -100,6 +139,7 @@ type MessageEnvelope = {
 
 export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
   if (!ACTIVE) return {}
+  if (directory) cwdForResolve = String(directory).replace(/\/$/, "")
 
   const instance = serverUrl?.toString().replace(/\/$/, "") ?? ""
   const nudgedSessions = new Set<string>()
@@ -141,21 +181,84 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       })
     },
 
-    // ── PreToolUse: supervisor edit blocking ───────────────────────────────
+    // ── PreToolUse: structural write guards ────────────────────────────────
+    // Three layers, all bypassed by SOREN_PROTECTED_OVERRIDE=1 (manual ops):
+    //   1. Worktree jail    — a worker spawned with --worktree may not write
+    //                         to the live checkout at all; its writes belong
+    //                         in its worktree (merged via supervisor review).
+    //   2. Protected paths  — recovery-critical code (orchestrator scripts,
+    //                         this plugin, verification hooks, the shared
+    //                         opencode lib, root soren.sh) must never be
+    //                         edited in the LIVE checkout by any agent.
+    //                         Worktree copies are editable; changes arrive
+    //                         via reviewed git merges, which this gate does
+    //                         not intercept.
+    //   3. Supervisor block — the supervisor delegates code changes; it may
+    //                         only edit its own memory files.
     "tool.execute.before": async (input, output) => {
-      if (AGENT !== "supervisor") return
-      if (!["edit", "write", "patch"].includes(input.tool)) return
-      const filePath: string = output.args?.filePath ?? output.args?.file_path ?? ""
-      const allowed =
-        filePath.includes("/.soren/") ||
-        /(^|\/)MEMORY\.md$/.test(filePath) ||
-        filePath.includes("/memory/") ||
-        /reflection[^/]*\.md$/.test(filePath)
-      if (!allowed) {
-        throw new Error(
-          `[SOREN] Supervisor must not edit code files directly (${filePath || "unknown path"}). ` +
-            `Delegate the change to a worker via ./tools/workers spawn or ./tools/tasks add.`,
-        )
+      if (OVERRIDE) return
+
+      if (["edit", "write", "patch"].includes(input.tool)) {
+        const rawPath: string = output.args?.filePath ?? output.args?.file_path ?? ""
+        const abs = resolvePath(rawPath)
+
+        // Layer 1: worktree jail
+        if (WORKTREE && abs && insideLiveCheckout(abs)) {
+          throw new Error(
+            `[SOREN] Worktree isolation: you were spawned into ${WORKTREE} — write there, not in the live checkout (${abs}). ` +
+              `Your branch is merged by the supervisor after review.`,
+          )
+        }
+
+        // Layer 2: protected recovery code in the live checkout
+        if (abs && isProtectedLivePath(abs)) {
+          throw new Error(
+            `[SOREN] Protected path: ${relToHome(abs)} is recovery-critical and cannot be edited in the live checkout. ` +
+              `Work in a worktree (workers spawn --worktree) and have the supervisor merge after review. ` +
+              `Manual override: SOREN_PROTECTED_OVERRIDE=1.`,
+          )
+        }
+
+        // Layer 3: supervisor edits only its memory files
+        if (AGENT === "supervisor") {
+          const allowed =
+            abs.includes("/.soren/") ||
+            /(^|\/)MEMORY\.md$/.test(abs) ||
+            abs.includes("/memory/") ||
+            /reflection[^/]*\.md$/.test(abs)
+          if (!allowed) {
+            throw new Error(
+              `[SOREN] Supervisor must not edit code files directly (${rawPath || "unknown path"}). ` +
+                `Delegate the change to a worker via ./tools/workers spawn or ./tools/tasks add.`,
+            )
+          }
+        }
+        return
+      }
+
+      // Bash heuristic for layers 1+2: block write-shaped commands that
+      // reference protected paths in the live checkout. Conservative by
+      // design — git merge/log/diff and reads pass through untouched.
+      if (input.tool === "bash") {
+        const command: string = output.args?.command ?? input.args?.command ?? ""
+        if (!command) return
+        const writey =
+          /(^|[\s|;&])(>>?|sed\s+-i|tee\s|mv\s|cp\s|rm\s|chmod\s|truncate\s|git\s+(checkout|restore)\s)/.test(command)
+        if (!writey) return
+        const mentionsProtected =
+          /(^|[\s\/'"=])(src\/orchestrator\/|\.opencode\/(plugins|hooks)\/|tools\/lib\/opencode\.sh|soren\.sh)/.test(command)
+        if (!mentionsProtected) return
+        // Worktree workers touch protected paths legitimately via relative
+        // paths (their cwd is the worktree). Block only when the command
+        // targets the live checkout explicitly, or the agent has no worktree.
+        const targetsLive = command.includes(SOREN_HOME + "/")
+        if (!WORKTREE || targetsLive) {
+          throw new Error(
+            `[SOREN] Protected path: this command appears to modify recovery-critical files in the live checkout. ` +
+              `Work in a worktree (workers spawn --worktree); the supervisor merges after review. ` +
+              `Manual override: SOREN_PROTECTED_OVERRIDE=1.`,
+          )
+        }
       }
     },
 

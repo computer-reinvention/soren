@@ -352,6 +352,11 @@ cmd_spawn() {
     if [[ -n "$project_id" ]]; then
         env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
     fi
+    # Worktree isolation: the soren-bridge plugin enforces that worktree
+    # workers never write to the live checkout (structural jail).
+    if [[ -n "$worktree_path" ]]; then
+        env_vars="${env_vars} SOREN_WORKTREE=${worktree_path}"
+    fi
 
     # Build the command — prepend SOREN tools to PATH when working outside project root
     local spawn_cmd="export ${env_vars}"
@@ -488,6 +493,8 @@ WORKTREE:
 You are on branch ${worktree_branch}, branched from the supervisor's integration branch.
 Commit your work here. Do not switch branches. Do not merge into main.
 Your supervisor will merge your branch back into the integration branch when you report [DONE].
+ISOLATION IS ENFORCED: the soren-bridge plugin blocks any write you attempt
+against the live checkout (${SOREN_PROJECT_ROOT}). Work only inside your worktree.
 WTEOF
     fi
 
@@ -792,6 +799,7 @@ cmd_wake() {
 
     local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
+    [[ -n "$worktree_path" ]] && env_vars="${env_vars} SOREN_WORKTREE=${worktree_path}"
 
     # Prefer the worktree path, then the worker dir, then the project root
     local cd_target="${worktree_path:-${worker_dir:-${SOREN_PROJECT_ROOT}}}"
