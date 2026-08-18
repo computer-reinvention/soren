@@ -509,27 +509,48 @@ WTEOF
     fi
 
     # Verify the prompt actually landed by checking the TUI pane.
-    # If the pane still shows an empty prompt after 5s, the send was silently
-    # dropped (the race condition). Fall back to tmux send-keys.
-    # Note: 5s gives the TUI enough time to show activity indicators;
-    # shorter waits (e.g. 3s) cause false negatives and unnecessary fallbacks.
+    # SPAWN PATH (cold TUI): The TUI may take 20-30s to start processing
+    # after a fresh spawn. Poll for activity indicators over a longer window
+    # (up to 45s, checking every 3s) and exit early on first sign of activity.
+    # This replaces the old fixed 5s wait which caused false negatives on
+    # cold TUIs and triggered unnecessary tmux fallback.
+    local _activity_pattern='thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'
     if $send_success; then
-        sleep 5
-        local pane_check
-        pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -8 2>/dev/null || true)
-        # If the TUI is processing our prompt, we'll see activity indicators
-        # (thinking, working, tool use, assistant output). An empty prompt or
-        # the bare opencode welcome screen means the send was dropped.
-        if ! echo "$pane_check" | grep -qiE 'thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'; then
-            warn "Prompt may not have landed — retrying via tmux send-keys"
+        local _poll_max=15   # 15 iterations * 3s = 45s max
+        local _poll_interval=3
+        local _poll_i
+        local _activity_found=false
+        for (( _poll_i = 0; _poll_i < _poll_max; _poll_i++ )); do
+            sleep "$_poll_interval"
+            local pane_check
+            pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -10 2>/dev/null || true)
+            if echo "$pane_check" | grep -qiE "$_activity_pattern"; then
+                _activity_found=true
+                break
+            fi
+        done
+        if ! $_activity_found; then
+            warn "Prompt may not have landed after $(( _poll_max * _poll_interval ))s — falling back to tmux send-keys"
             send_success=false
         fi
     fi
 
+    # Fallback: re-send via tmux send-keys. Guard against double-submission
+    # by checking whether the prompt text (or activity from it) has appeared
+    # in the pane since the HTTP send. A late-landing HTTP prompt would show
+    # the instruction text or activity indicators — skip the fallback in
+    # that case to avoid sending the task twice.
     if ! $send_success; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
-        sleep 0.1
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        local _final_pane
+        _final_pane=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -15 2>/dev/null || true)
+        if echo "$_final_pane" | grep -qiE "$_activity_pattern" || \
+           echo "$_final_pane" | grep -qF "worker-contexts/${name}-context.md"; then
+            info "Activity detected late — HTTP prompt landed, skipping tmux fallback"
+        else
+            tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+            sleep 0.1
+            tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        fi
     fi
 
     # Link to task system if --task was provided
@@ -1087,8 +1108,10 @@ ${message}"
         -d "{\"from_agent\": $(printf '%s' "$from_agent" | jq -Rs .), \"to_agent\": $(printf '%s' "$name" | jq -Rs .), \"content\": $(printf '%s' "$message" | jq -Rs .), \"type\": \"task\"}" \
         >/dev/null 2>&1 || true
 
-    # Deliver over HTTP to the worker's embedded opencode server (reliable,
-    # no paste/prompt-state issues); fall back to tmux send-keys.
+    # SEND PATH (warm TUI): The worker is already running, so the HTTP
+    # endpoint is responsive and soren_oc_http_send's built-in retry (3
+    # attempts with backoff) is sufficient. No pane-polling needed — unlike
+    # the spawn path where the TUI may still be initializing.
     local oc_port
     if oc_port=$(soren_oc_port_for "$name") && soren_oc_http_send "$oc_port" "$message"; then
         ok "Message sent to '$name' (http)"
