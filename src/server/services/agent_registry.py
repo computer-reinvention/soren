@@ -332,6 +332,9 @@ class AgentRegistry:
             logger.warning("JSON parse failed for agent %s in mark_sleeping: %s", key, e)
             return
         entry["status"] = "SLEEPING"
+        # Clear the opencode port: the window is gone, and a recycled port
+        # must never route HTTP messages to a different agent later.
+        entry.pop("oc_port", None)
         with self._lock:
             self._conn.execute(
                 "UPDATE agents SET status = 'SLEEPING', data = ? WHERE key = ?",

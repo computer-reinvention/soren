@@ -15,6 +15,8 @@
 #   ./soren.sh health           Hit the health endpoint
 #   ./soren.sh test             Run the test suite (pytest + frontend typecheck)
 #   ./soren.sh smoke            End-to-end smoke test: spawn a test worker
+#   ./soren.sh team up [core]   Bootstrap the permanent worker team (core = 3)
+#   ./soren.sh team status      Show permanent worker roster
 #   ./soren.sh help             Show this help
 #
 # Lifecycle commands delegate to src/orchestrator/soren.sh.
@@ -166,6 +168,21 @@ cmd_doctor() {
     else
         warn "Server not responding on port ${SOREN_PORT}"
     fi
+
+    # Port drift: registered oc_ports that don't answer while their window lives
+    local reg="${ROOT}/.soren/agent_registry.json"
+    if [[ -f "$reg" ]] && command -v jq >/dev/null 2>&1; then
+        local drift=0 name port
+        while IFS=$'\t' read -r name port; do
+            [[ -z "$port" || "$port" == "null" ]] && continue
+            tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$name" || continue
+            if ! curl -sf -m 2 "http://127.0.0.1:${port}/global/health" >/dev/null 2>&1; then
+                warn "oc_port drift: ${name} registered on :${port} but not answering (self-heals on next send)"
+                drift=$((drift+1))
+            fi
+        done < <(jq -r 'to_entries[] | [.key, (.value.oc_port // "")] | @tsv' "$reg" 2>/dev/null)
+        [[ $drift -eq 0 ]] && ok "Agent ports consistent with registry"
+    fi
     echo ""
 
     # Deep verification (plugin, hooks, tools) if the system-verify tool exists
@@ -210,8 +227,55 @@ cmd_test() {
     ok "All tests passed"
 }
 
+# Bootstrap the permanent worker team from versioned role templates.
+# core = builders + QA only (3 agents); full = the whole TEAM.md roster (8).
+# NOTE: permanent workers are keep_awake — they stay resident and respond to
+# heartbeat nudges, which costs tokens. Start with core.
+TEAM_CORE=(perm-backend perm-frontend perm-qa)
+TEAM_FULL=(perm-backend perm-frontend perm-infra perm-ui-review perm-api-review perm-research perm-devops perm-qa)
+
+cmd_team() {
+    local action="${1:-status}"
+    case "$action" in
+        up)
+            server_healthy || die "system not running — ./soren.sh start first"
+            local size="${2:-core}"
+            local roster=()
+            case "$size" in
+                core) roster=("${TEAM_CORE[@]}") ;;
+                full) roster=("${TEAM_FULL[@]}") ;;
+                *)    die "usage: soren.sh team up [core|full]" ;;
+            esac
+            warn "Spawning ${#roster[@]} permanent workers (opus tier, keep_awake — they stay resident)."
+            mkdir -p "${ROOT}/.soren/worker-contexts"
+            local id role_src role_dst spawned=0
+            for id in "${roster[@]}"; do
+                role_src="${ROOT}/templates/team/${id}-role.md"
+                role_dst="${ROOT}/.soren/worker-contexts/${id}-role.md"
+                [[ -f "$role_src" ]] || { warn "missing template: $role_src — skipping $id"; continue; }
+                if tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null | grep -qxF "$id"; then
+                    ok "$id already running"
+                    continue
+                fi
+                cp "$role_src" "$role_dst"
+                info "Spawning $id..."
+                "${ROOT}/tools/workers" spawn "$id" "permanent role bootstrap" \
+                    --permanent "$role_dst" || { warn "spawn failed for $id"; continue; }
+                spawned=$((spawned+1))
+            done
+            ok "Team up: ${spawned} spawned. Check: ./soren.sh team status"
+            ;;
+        status)
+            "${ROOT}/tools/workers" team
+            ;;
+        *)
+            die "usage: soren.sh team [up [core|full] | status]"
+            ;;
+    esac
+}
+
 cmd_help() {
-    sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -233,6 +297,7 @@ case "${1:-help}" in
              die "server not responding on port ${SOREN_PORT}" ;;
     test)    cmd_test ;;
     smoke)   cmd_smoke ;;
+    team)    shift; cmd_team "$@" ;;
     help|--help|-h) cmd_help ;;
     *)       die "unknown command: $1 (see ./soren.sh help)" ;;
 esac
