@@ -198,7 +198,9 @@ from the supervisor.
 2. Acknowledge with `[STATUS] Starting task <id>`
 3. Do the work
 4. Commit with a descriptive message
-5. Report `[DONE]` with a summary via `./tools/mailbox done "summary"`
+5. Report `[DONE]` with a summary and `Commit: <sha>` via `./tools/mailbox done "summary Commit: <sha>"`.
+   If the task changed no code, report `./tools/mailbox done "no-op: <summary>"` instead —
+   never create an empty commit, never report HEAD's hash for work you didn't do
 
 ### Between tasks:
 - You remain idle and responsive
@@ -358,7 +360,9 @@ from the supervisor.
 2. Acknowledge with `[STATUS] Starting task <id>`
 3. Do the work
 4. Commit with a descriptive message
-5. Report `[DONE]` with a summary via `./tools/mailbox done "summary"`
+5. Report `[DONE]` with a summary and `Commit: <sha>` via `./tools/mailbox done "summary Commit: <sha>"`.
+   If the task changed no code, report `./tools/mailbox done "no-op: <summary>"` instead —
+   never create an empty commit, never report HEAD's hash for work you didn't do
 
 ### Between tasks:
 - You remain idle and responsive
@@ -470,13 +474,15 @@ After spawning each worker, verify:
 
 ### Resetting Context
 
-When a worker's context gets stale (after many tasks or several hours), reset it:
+When a worker's context gets stale, reset it:
 
 ```bash
 ./tools/workers reset {worker-name}
 ```
 
 This gracefully restarts the worker while preserving its identity and role file. The worker re-reads its role file on restart and picks up where it left off.
+
+Note: `tools/auto-maintenance` already auto-enforces the reset policy for IDLE permanent workers — after 5 completed tasks or 3 hours since last reset, whichever comes first (`SOREN_RESET_TASKS`/`SOREN_RESET_HOURS`, 0 disables). Manual resets are only needed when you want to force a refresh sooner.
 
 ---
 

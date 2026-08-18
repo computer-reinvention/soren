@@ -101,7 +101,9 @@ Workers communicate via the mailbox system:
 - **Inbound**: `[TASK]`, `[UPDATE]`, `[QUESTION]`, `[PRIORITY]`, `[COMPLETE]`
 - **Outbound**: `[STATUS]`, `[DONE]`, `[BLOCKED]`, `[QUESTION]`
 
-Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.` Ephemeral idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message. Permanent workers are exempt: they are spawned with `keep_awake` set and stay resident between tasks.
+Between tasks, workers idle and respond to heartbeat nudges with `[SYS] Idle — awaiting task.` Ephemeral idle workers auto-sleep after 30 minutes (`SOREN_IDLE_SLEEP_MINUTES`) and are auto-woken when sent a message; sleeping ephemerals are auto-retired by `auto-maintenance` after `SOREN_RETIRE_SLEEPING_HOURS` (default 24h, 0 disables) with their conversation archives preserved. Permanent workers are exempt from both: they are spawned with `keep_awake` set and stay resident between tasks.
+
+Completion reports use `[DONE]` with `Commit: <sha>` for code changes, or `[DONE] no-op: <summary>` for tasks that changed no code (empty commits are banned; research agents reporting findings are separately exempt from the commit requirement).
 
 ## Design Rationale
 
@@ -160,7 +162,7 @@ Not everything needs a permanent worker. The supervisor still spawns ephemeral w
 - Parallel execution when permanent workers are busy
 - Debate pairs for architectural decisions (see `docs/templates/teams/DEBATE_PAIR.md`)
 
-Ephemeral workers use templates from `docs/templates/roles/` and are retired after verification — kept alive through review/verification of their work, then killed once no follow-up remains.
+Ephemeral workers use templates from `docs/templates/roles/` and are retired after verification — kept alive through review/verification of their work, then killed once no follow-up remains. If not killed explicitly, they auto-sleep after 30 idle minutes and are auto-retired after `SOREN_RETIRE_SLEEPING_HOURS` (24h default). **Throwaway test workers are the spawner's responsibility** — kill them (`workers kill <name>`) as soon as the test concludes.
 
 ## Modifying This Document
 

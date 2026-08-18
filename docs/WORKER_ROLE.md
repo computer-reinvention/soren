@@ -138,6 +138,21 @@ Evidence: <screenshot path, test output, or demo script path>
 
 The `Commit:` line is required — `verify-done.sh` requires a 7-40 character hex commit hash in every non-research `[DONE]`. A missing hash triggers a `[FIX-REQUEST]`; after 2 missing-hash retries, the failure escalates to the supervisor. Only agents whose name contains "research" are exempt (research-only tasks with no code changes).
 
+### No-Op Protocol (tasks that change no code)
+
+Some tasks legitimately produce no commit: output-only tasks (e.g., "print X"), verification echoes, config checks, read-only investigations. For these, report exactly:
+
+```bash
+./tools/mailbox done "no-op: <one-line summary of what you verified/produced>"
+```
+
+The `no-op:` marker tells verify-done.sh to skip commit verification and send `[VERIFIED]` immediately. Rules:
+
+- **NEVER create an empty commit** (`git commit --allow-empty`) "for traceability" — it litters history and reviewers will REJECT it
+- **NEVER report HEAD's hash** for work you didn't do — that's misleading and will be treated as a false claim
+- **NEVER claim `no-op:` when you actually changed files** — reviewers are required to reject false no-op claims
+- Do NOT say "no commit applies" or leave the hash off without the marker — that triggers `[FIX-REQUEST]` retries
+
 **If you cannot verify your work, report [BLOCKED] instead of [DONE].**
 
 ### Correction Injection
@@ -152,7 +167,7 @@ These are automatically injected based on your task description. They represent 
 ### Verification Pipeline
 
 When you report `[DONE]`, the verify-done hook automatically:
-1. Checks if your commit exists
+1. Checks if your commit exists (skipped for `no-op:` reports and research agents — those get `[VERIFIED]` immediately)
 2. Runs pytest if Python files changed
 3. Runs typecheck if frontend files changed
 4. Sends [VERIFIED] or [VERIFY-FAILED] + [FIX-REQUEST] back to you
@@ -194,7 +209,10 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 ./tools/journal log "Fixed the off-by-one error in pagination"
 
 # Report completion
-./tools/mailbox done "Implemented auth endpoint, tests passing"
+./tools/mailbox done "Implemented auth endpoint, tests passing. Commit: a1b2c3d"
+
+# Report completion for a task that changed no code
+./tools/mailbox done "no-op: verified config, no files changed"
 
 # Report a blocker
 ./tools/mailbox blocked "Cannot find the config module — need path"
@@ -344,6 +362,12 @@ Evidence: <file path or 'tested in browser via chrome-devtools MCP'>
 
 `Commit: <sha>` is mandatory for non-research work — verify-done.sh rejects `[DONE]` messages without a 7-40 char hex hash (2 retries, then escalation to the supervisor).
 
+If your task changed no code (output-only, verification echo, config check), use the no-op format instead — no `Commit:` line, no empty commit, no borrowed HEAD hash:
+
+```
+[DONE] no-op: <one-line summary>
+```
+
 If you cannot verify a fix, report [BLOCKED] instead of [DONE].
 
 ---
@@ -382,6 +406,12 @@ Files modified:
 - src/components/LoginForm.tsx (created)
 - src/pages/Login.tsx (modified)
 Tests: all passing
+```
+
+For tasks that changed no code, use the no-op marker instead of a commit hash:
+
+```
+[DONE] no-op: verified config check passes, no files changed
 ```
 
 ### Message Tags Reference
@@ -546,11 +576,21 @@ When your task is complete:
 1. **Verify**: Ensure all requirements are met
 2. **Test**: Run relevant tests
 3. **Reflect**: Before reporting, briefly note what worked and what didn't (see below)
-4. **Report**: Output `[DONE]` with summary
+4. **Report**: Output `[DONE]` with summary — `Commit: <sha>` for code changes, `no-op: <summary>` for tasks that changed nothing
 5. **Wait**: Supervisor will review and either:
    - Assign next task
    - Ask for modifications
    - Close your window
+
+### Worker End-of-Life (what happens after [DONE])
+
+Your lifecycle is: **spawn → work → [DONE] (with `Commit: <sha>` OR `no-op:`) → verification (`[VERIFIED]` or `[FIX-REQUEST]`) → follow-ups or retirement.**
+
+- After `[VERIFIED]`, stay alive and responsive — follow-up tasks and questions are common
+- If idle for 30 minutes (ephemeral workers), you auto-sleep (`SOREN_IDLE_SLEEP_MINUTES`); you'll be auto-woken if messaged
+- Sleeping ephemeral workers are auto-retired by `auto-maintenance` after `SOREN_RETIRE_SLEEPING_HOURS` (default 24h) — your conversation archive is preserved, so nothing is lost
+- Your supervisor may kill you explicitly once your task is `[VERIFIED]` and no follow-up is planned — that's normal
+- You do not need to do anything to "clean yourself up" — never kill your own window mid-verification
 
 ### Reflection After Task (Brief, Not Bureaucratic)
 
@@ -615,6 +655,7 @@ Need help with: <specific question>
 | Need clarification | `[QUESTION] <your question>`           |
 | Stuck              | `[BLOCKED] <issue and what you tried>` |
 | Finished           | `[DONE] <summary>` + `Commit: <sha>`   |
+| Finished, no code changed | `[DONE] no-op: <summary>` (never an empty commit) |
 
 ---
 

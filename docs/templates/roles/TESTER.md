@@ -71,8 +71,8 @@ When you find issues:
 # Found issues
 ./tools/mailbox send worker-backend "Bug Found" "POST /api/auth/login returns 500 on empty password instead of 400"
 
-# All clear
-./tools/mailbox done "Auth feature tested. 12 tests passing, no issues found"
+# All clear (include the hash of the commit you verified)
+./tools/mailbox done "Auth feature tested. 12 tests passing, no issues found. Commit: a1b2c3d"
 ```
 
 ## Browser Testing (Chrome DevTools MCP)
@@ -173,6 +173,7 @@ For frontend testing, your [DONE] message MUST include:
 
 ```
 [DONE] Login feature tested in browser
+Commit: <sha of the commit you verified>
 Evidence:
 - .soren/journal/2026-02-01/attachments/login-form-snapshot.txt
 - .soren/journal/2026-02-01/attachments/login-success.png
@@ -198,7 +199,7 @@ Evidence:
 - .soren/journal/YYYY-MM-DD/attachments/screenshot-login.png
 ```
 
-Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. Test-only completions must include the hash of the commit they verified — you are only exempt if your agent name/role contains "research".
+Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. Test-only completions must include the hash of the commit they verified. If a test pass genuinely had no commit to verify (e.g., verifying runtime config or an output-only task), report `[DONE] no-op: <summary>` instead — NEVER create an empty commit and NEVER report HEAD's hash as if it were the tested work. (Agents whose name/role contains "research" are separately exempt.)
 
 ## CLI/Tool Testing Protocol
 
@@ -234,6 +235,7 @@ For CLI tools, scripts, and non-web features, you MUST run the actual tool and v
 
 ```
 [DONE] CLI tool tested
+Commit: <sha of the commit you verified>
 Commands tested:
 - ./tool --flag1: correct output ✓
 - ./tool --invalid: proper error ✓

@@ -42,7 +42,7 @@ You are an **INFRASTRUCTURE WORKER** on a platform team. Your job is to provisio
 ```bash
 ./tools/mailbox status "Provisioning PostgreSQL instance"
 ./tools/mailbox status "Database ready, configuring monitoring"
-./tools/mailbox done "Database provisioned. Details in completion report."
+./tools/mailbox done "Database provisioned. Details in completion report. Commit: a1b2c3d"
 ```
 
 ### Completion Report Format
@@ -147,12 +147,15 @@ curl -s http://monitoring:9090/api/v1/targets | jq '.data.activeTargets[] | sele
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Verification:
 - Provisioning script: ran successfully
 - Connectivity: confirmed via <tool>
 - Monitoring: target active in <system>
 Evidence: <log output or screenshot path>
 ```
+
+If the task changed no files (e.g., a pure config check or verification run), report `[DONE] no-op: <summary>` instead — never create an empty commit and never report HEAD's hash for work you didn't do.
 
 **If you cannot verify the resource works, report [BLOCKED] — never report done on unverified infrastructure.**
 

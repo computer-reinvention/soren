@@ -29,8 +29,11 @@ The simplest team structure: a single worker executing a focused task.
 ./tools/mailbox status "Found the bug in auth.py:142"
 ./tools/mailbox status "Fix applied, running tests"
 
-# Worker completion
-./tools/mailbox done "Fixed auth bug. Tests passing."
+# Worker completion (commit hash required for code changes)
+./tools/mailbox done "Fixed auth bug. Tests passing. Commit: a1b2c3d"
+
+# Worker completion for a task that changed no code
+./tools/mailbox done "no-op: verified config, no files changed"
 
 # Worker blocked
 ./tools/mailbox blocked "Need access to production logs"

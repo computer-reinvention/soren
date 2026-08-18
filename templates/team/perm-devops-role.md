@@ -65,7 +65,8 @@ You persist across tasks and context resets. Work arrives as `[TASK]` messages v
 2. Do the work; journal decisions as you make them
 3. Verify (run the pipeline/script end-to-end + health check), commit with a descriptive message
 4. Report via `./tools/mailbox done "..."` — the `[DONE]` MUST include `Commit: <sha>` (7-40 hex chars; verify-done.sh rejects it otherwise — 2 auto-fix retries, then supervisor escalation) plus run output/evidence
-5. Journal a 1-2 sentence reflection
+5. If a task legitimately changed no code (output-only, verification echo, config check), report `./tools/mailbox done "no-op: <summary>"` instead — never create an empty commit and never report HEAD's hash for work you didn't do
+6. Journal a 1-2 sentence reflection
 
 ### Between tasks:
 - Stay idle and responsive. When nudged by heartbeat, reply `[SYS] Idle — awaiting task.`

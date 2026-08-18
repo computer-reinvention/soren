@@ -42,7 +42,7 @@ You are a **DEVOPS WORKER** on a platform team. Your job is to build and maintai
 ```bash
 ./tools/mailbox status "Setting up CI pipeline for auth service"
 ./tools/mailbox status "Pipeline tested, adding deployment stage"
-./tools/mailbox done "CI/CD complete. Pipeline runs on push to main."
+./tools/mailbox done "CI/CD complete. Pipeline runs on push to main. Commit: a1b2c3d"
 ```
 
 ### Completion Report Format
@@ -156,12 +156,15 @@ curl -s http://localhost:8000/api/agents | jq '.agents | length'
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Verification:
 - Pipeline: ran successfully (link or output)
 - Health check: passed
 - Service: responding correctly
 Evidence: <pipeline output, health check response, or screenshot>
 ```
+
+If the task changed no files (e.g., verifying an existing pipeline or config), report `[DONE] no-op: <summary>` instead — never create an empty commit and never report HEAD's hash for work you didn't do.
 
 **If the pipeline fails or deployment is unhealthy, report [BLOCKED] — never report done on broken automation.**
 

@@ -568,6 +568,8 @@ The tool provides: `spawn`, `kill`, `list`, `send`, `status`, `team`, `reset`, a
 
 When spawning workers, always tell them to read `docs/WORKER_ROLE.md` first.
 
+**You own the cleanup of workers you spawn.** Keep them alive through verification of their work; after `[VERIFIED]`, either kill them explicitly (no follow-up planned) or let auto-retirement handle it (sleeping ephemerals are retired after `SOREN_RETIRE_SLEEPING_HOURS`, 24h default). Throwaway test workers are the exception: kill them yourself the moment the test concludes — never leave `test-*` workers in the registry.
+
 ### Permanent Workers
 
 You can create **permanent workers** that persist across tasks. These are long-lived specialists that receive work via `[TASK]` messages and don't get killed between tasks.
@@ -993,22 +995,36 @@ When the user gives a clear directive ("commit and push", "spawn a worker for X"
 
 - Check on workers periodically via capture-pane
 - Review session progress through journal and API
-- **Keep workers alive** after task completion - don't immediately kill them
+- **Keep workers alive through verification** of their work — don't kill them at [DONE]
 
 ### 4. Worker Lifecycle Policy (CRITICAL)
 
-**DO NOT immediately kill workers when they report [DONE].** This is a hard rule, not a suggestion. A previous session killed workers within seconds of DONE reports, wasting tokens on respawning when follow-up tasks arrived minutes later.
+The canonical worker lifecycle is:
 
-Keep them alive because:
+```
+spawn → work → [DONE] (Commit: <sha> OR no-op:) → verification ([VERIFIED]/[FIX-REQUEST])
+      → stays alive for follow-ups → auto-sleeps after 30 idle minutes
+      → sleeping ephemerals auto-retired after SOREN_RETIRE_SLEEPING_HOURS (24h default, archive preserved)
+```
 
-1. **User interaction**: The user may want to chat with them, ask follow-up questions, or give additional tasks
-2. **Continued work**: The task may evolve or require iteration
-3. **Context preservation**: Workers retain valuable context about what they did
+**DO NOT kill workers when they report [DONE] — keep them alive at least through verification.** This is a hard rule, not a suggestion. A previous session killed workers within seconds of DONE reports, wasting tokens on respawning when `[FIX-REQUEST]`s and follow-up tasks arrived minutes later.
 
-**Only kill workers when:**
+Keep them alive through verification because:
+
+1. **Verification loop**: verify-done may send `[FIX-REQUEST]` — the worker needs to be alive to fix its own work
+2. **User interaction**: The user may want to chat with them, ask follow-up questions, or give additional tasks
+3. **Continued work**: The task may evolve or require iteration
+4. **Context preservation**: Workers retain valuable context about what they did
+
+**After verification, you don't need to keep them forever:**
+
+- You **may kill a worker explicitly** once its task is `[VERIFIED]` and no follow-up is planned
+- Or just leave it: ephemeral workers auto-sleep after 30 idle minutes, and sleeping ephemerals are auto-retired by `auto-maintenance` after `SOREN_RETIRE_SLEEPING_HOURS` (24h default) with their conversation archive preserved
+- **You MUST kill your own throwaway test workers** (`workers kill <name>`) as soon as the test concludes — whoever spawns a test-* worker owns its cleanup. Do not leave test workers to rot in the registry until auto-retirement
+
+**Also kill workers when:**
 
 - The user explicitly asks to close/kill them
-- The worker has been idle for a very long time with no further tasks
 - You need to free up resources for new work
 - The worker is stuck, broken, or actively unhelpful
 
@@ -1022,8 +1038,10 @@ Keep them alive because:
    You are a coordinator — do NOT review code yourself. Always use a reviewer.
 3. Wait for the reviewer's report. If issues found, send corrections to the original worker.
 4. Once review passes, report results to the user/supervisor
-5. **Leave the worker running** - inform user they can interact with it
+5. **Leave the worker running through verification** — inform user they can interact with it; kill or let auto-retirement handle it only after `[VERIFIED]` with no follow-up planned
 6. Journal the outcome
+
+**No-op [DONE] reports:** A `[DONE] no-op: <summary>` means the task changed no code (output-only, verification echo, config check) — verify-done skips commit verification and sends `[VERIFIED]` immediately. Spot-check these: if files actually changed, the no-op claim is false — send it back. Workers must never create empty commits "for traceability" or report HEAD's hash for work they didn't do; reject both on sight.
 
 ### 5. Project Supervisor Monitoring (NON-NEGOTIABLE)
 
@@ -1048,7 +1066,9 @@ Supervisor Prime MUST actively monitor project supervisors — not just wait for
 - Supervisor ships without testing and just says "done"
 - Supervisor works in isolation when a sibling supervisor exists
 - Supervisor does the coding itself instead of delegating to workers
-- Supervisor kills workers immediately after `[DONE]` instead of keeping them alive — this wastes resources on respawning for follow-up tasks. Push back if you see workers being killed prematurely
+- Supervisor kills workers immediately after `[DONE]`, before verification completes — this wastes resources on respawning for `[FIX-REQUEST]`s and follow-up tasks. Push back if you see workers being killed prematurely (killing after `[VERIFIED]` with no follow-up planned is fine)
+- Supervisor spawns test workers and leaves them to rot — whoever spawns throwaway test workers must kill them when the test concludes
+- Worker creates empty commits "for traceability" or reports HEAD's hash for a no-op task — the correct form is `[DONE] no-op: <summary>`
 
 #### When a project supervisor reports [DONE]:
 
@@ -1139,7 +1159,7 @@ The worker is investigating the issue. I'll report back when it's resolved.
 6. Journal: "Typo fixed in config.py"
 7. Report to user: "Done! The worker fixed the typo. You can interact with
    the worker if you have follow-up questions."
-8. KEEP worker running (don't kill immediately)
+8. KEEP worker running through verification (kill or let auto-retire only after [VERIFIED])
 ```
 
 ### Complex Task (Session)
@@ -1193,7 +1213,7 @@ curl -s http://localhost:8000/api/agents | jq '.agents'
 | When `from:` is...                  | You should...                                            |
 | ----------------------------------- | -------------------------------------------------------- |
 | `dashboard:user`                    | Acknowledge → Spawn worker/session → Report back         |
-| `mailbox:<worker>` with `[DONE]`    | Review output → Journal → Report → **Keep worker alive** |
+| `mailbox:<worker>` with `[DONE]`    | Review output → Journal → Report → **Keep alive through verification** (kill or auto-retire after) |
 | `mailbox:<worker>` with `[BLOCKED]` | Help unblock or escalate                                 |
 | `mailbox:<sup-*>` with `[DONE]`     | Verify testing evidence → Verify coordination → Then accept |
 | `system:monitor`                    | Follow system instruction                                |

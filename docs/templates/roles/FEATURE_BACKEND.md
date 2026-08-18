@@ -45,7 +45,7 @@ You are a **BACKEND WORKER** on a feature development team. Your job is to imple
 ```bash
 ./tools/mailbox status "Starting on authentication endpoints"
 ./tools/mailbox status "API ready, documenting for frontend"
-./tools/mailbox done "Auth endpoints complete. API: POST /api/auth/login, POST /api/auth/logout"
+./tools/mailbox done "Auth endpoints complete. API: POST /api/auth/login, POST /api/auth/logout. Commit: a1b2c3d"
 ```
 
 ### With Frontend Worker
@@ -60,6 +60,7 @@ When reporting [DONE], include:
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Files modified:
 - src/server/routes/auth.py (created)
 - src/server/services/auth_service.py (created)
@@ -135,11 +136,14 @@ curl -s -X POST http://localhost:8000/api/auth/login \
 
 ```
 [DONE] <summary>
+Commit: <sha>
 Files modified: ...
 Tests: uv run pytest tests/test_feature.py - X passed
 Demo: curl output showing endpoints work
 API Contract: <endpoint details for frontend>
 ```
+
+If the task changed no code, report `[DONE] no-op: <summary>` instead — never create an empty commit and never report HEAD's hash for work you didn't do.
 
 **If tests fail or endpoints return unexpected results, report [BLOCKED] — never commit broken code.**
 

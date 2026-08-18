@@ -7,6 +7,7 @@
 #   2. Remove worker context files for windows that no longer exist
 #   3. Proactively reset IDLE permanent workers after SOREN_RESET_TASKS
 #      completed tasks or SOREN_RESET_HOURS since last reset
+#   4. Retire sleeping ephemeral workers after SOREN_RETIRE_SLEEPING_HOURS
 #
 # Safety:
 #   - NEVER touches supervisor, project-supervisor (sup-*), sentry, or monitor
@@ -186,6 +187,77 @@ PYEOF
 }
 
 #───────────────────────────────────────────────────────────────────────────────
+# 4. Retire long-sleeping ephemeral workers (registry hygiene)
+#
+# One-shot workers auto-sleep after 30 idle minutes and their registry
+# entries otherwise accumulate forever. Sleeping NON-permanent workers whose
+# last activity is older than SOREN_RETIRE_SLEEPING_HOURS are retired:
+# conversation archive requested (best effort), registry entry removed,
+# context files cleaned. Permanent workers and supervisors are exempt —
+# their saved sessions are the whole point.
+#
+# Tunable: SOREN_RETIRE_SLEEPING_HOURS (default 24, 0 disables)
+#───────────────────────────────────────────────────────────────────────────────
+
+SOREN_RETIRE_SLEEPING_HOURS=${SOREN_RETIRE_SLEEPING_HOURS:-24}
+
+retire_sleeping_ephemerals() {
+    [[ "$SOREN_RETIRE_SLEEPING_HOURS" == "0" ]] && return 0
+
+    local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    [[ -f "$reg_file" ]] || return 0
+
+    # shellcheck source=/dev/null
+    source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh" 2>/dev/null || true
+
+    local name last_ts
+    while IFS=$'\t' read -r name last_ts; do
+        [[ -z "$name" ]] && continue
+        is_protected "$name" && continue
+
+        # Age check (ISO timestamp → hours) via python3 for portability
+        local age_hours
+        age_hours=$(python3 - "$last_ts" <<'PYEOF' 2>/dev/null || echo ""
+import sys
+from datetime import datetime, timezone
+try:
+    ts = sys.argv[1].replace("Z", "+00:00")
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int((datetime.now(timezone.utc) - dt).total_seconds() // 3600))
+except Exception:
+    pass
+PYEOF
+)
+        [[ -z "$age_hours" ]] && continue
+        (( age_hours >= SOREN_RETIRE_SLEEPING_HOURS )) || continue
+
+        echo "[MAINTENANCE] Retiring sleeping ephemeral '${name}' (idle ${age_hours}h)"
+
+        # Archive conversation (best effort; may already be archived)
+        curl -sX POST "http://localhost:${SOREN_PORT}/api/agents/${name}/archive" >/dev/null 2>&1 || true
+
+        # Remove registry entry (flock'd when available)
+        if declare -f soren_registry_update >/dev/null 2>&1; then
+            soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])' || true
+        else
+            local tmp; tmp=$(mktemp)
+            jq --arg k "$name" 'del(.[$k])' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
+        fi
+        # Mirror into SQLite registry if present
+        sqlite3 "${SOREN_PROJECT_ROOT}/.soren/agent_registry.db" \
+            "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
+
+        # Clean context files
+        rm -f "${CONTEXT_DIR}/${name}-context.md" \
+              "${CONTEXT_DIR}/${name}-message-"*.md 2>/dev/null || true
+    done < <(jq -r 'to_entries[]
+        | select(.value.status == "SLEEPING" and (.value.permanent // false | not))
+        | [.key, (.value.last_activity // .value.created_at // "")] | @tsv' "$reg_file" 2>/dev/null)
+}
+
+#───────────────────────────────────────────────────────────────────────────────
 # Main
 #───────────────────────────────────────────────────────────────────────────────
 
@@ -193,6 +265,7 @@ main() {
     kill_idle_workers
     cleanup_orphaned_contexts
     reset_stale_permanents
+    retire_sleeping_ephemerals
 }
 
 main

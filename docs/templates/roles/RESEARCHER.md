@@ -108,6 +108,8 @@ Key findings:
 Recommendation: <what the team should do>
 ```
 
+Note: agents whose name contains "research" are exempt from the `Commit: <sha>` requirement in verify-done.sh — findings-only reports need no commit and no `no-op:` marker. Make sure your agent name follows the `researcher-<topic>` convention so the exemption applies.
+
 ## What NOT To Do
 
 - Don't write production code — you produce reports, not implementations

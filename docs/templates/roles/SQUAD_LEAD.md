@@ -63,7 +63,7 @@ Think about:
 ### With Supervisor
 ```bash
 ./tools/mailbox status "Auth feature 50% complete. Backend done, frontend in progress."
-./tools/mailbox done "Auth feature complete. All tests passing."
+./tools/mailbox done "Auth feature complete. All tests passing. Commit: abc123"
 ./tools/mailbox blocked "Need design clarification for the password reset flow."
 ```
 

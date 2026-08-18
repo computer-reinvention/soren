@@ -90,6 +90,7 @@ Ready for review before proceeding.
 Reviewed: All worker implementations
 Tests: Passing
 Architecture: Clean, follows patterns
+Commit: <sha of the final reviewed commit>
 Ready for final approval.
 "
 ```
