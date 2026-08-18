@@ -372,6 +372,13 @@ cmd_spawn() {
     if ! soren_oc_wait_ready "$oc_port" 30; then
         warn "opencode health endpoint not responding after 30s — falling back to fixed delay"
         sleep "$STARTUP_DELAY"
+    else
+        # Health is up but the TUI prompt may not be ready yet (root cause of
+        # intermittent prompt delivery failures). Probe the TUI input pipeline.
+        info "Verifying TUI prompt readiness..."
+        if ! soren_oc_wait_tui_ready "$oc_port" 15; then
+            warn "TUI prompt not accepting input after 15s — continuing with retry-based send"
+        fi
     fi
 
     # Override task content for permanent workers
@@ -489,7 +496,28 @@ WTEOF
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
-    if ! soren_oc_http_send "$oc_port" "$instruction"; then
+    local send_success=false
+    if soren_oc_http_send "$oc_port" "$instruction"; then
+        send_success=true
+    fi
+
+    # Verify the prompt actually landed by checking the TUI pane.
+    # If the pane still shows an empty prompt after 3s, the send was silently
+    # dropped (the race condition). Fall back to tmux send-keys.
+    if $send_success; then
+        sleep 3
+        local pane_check
+        pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -8 2>/dev/null || true)
+        # If the TUI is processing our prompt, we'll see activity indicators
+        # (thinking, working, tool use, assistant output). An empty prompt or
+        # the bare opencode welcome screen means the send was dropped.
+        if ! echo "$pane_check" | grep -qiE 'thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'; then
+            warn "Prompt may not have landed — retrying via tmux send-keys"
+            send_success=false
+        fi
+    fi
+
+    if ! $send_success; then
         tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
         sleep 0.1
         tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
@@ -788,7 +816,11 @@ cmd_wake() {
     # If a message was provided, wait for readiness then send it
     if [[ -n "$message" ]]; then
         info "Waiting for opencode to resume..."
-        soren_oc_wait_ready "$oc_port" 20 || sleep "$STARTUP_DELAY"
+        if soren_oc_wait_ready "$oc_port" 20; then
+            soren_oc_wait_tui_ready "$oc_port" 10 || true
+        else
+            sleep "$STARTUP_DELAY"
+        fi
         sleep 1
         # Include last-task context from conversation_store
         local last_task
