@@ -60,11 +60,20 @@ highest_priority=""
 
 if [[ -f "$SOREN_MAILBOX" ]] && [[ -s "$SOREN_MAILBOX" ]]; then
     # ── Step 1: Build a map of resolved message ids from status_update records ──
-    # Collect ids whose latest status is 'completed' or 'failed'.
-    # jq filters: select status_update records, keep only terminal statuses.
+    # Collect ids whose LATEST status is 'completed' or 'failed'.
+    # We group all status_update records by .id, pick the one with the max .ts
+    # for each group, and only emit the id if that latest status is terminal.
+    # This correctly handles re-opened messages (e.g. completed -> working).
     resolved_ids=""
     if command -v jq &>/dev/null; then
-        resolved_ids=$(jq -r 'select(.type == "status_update" and (.status == "completed" or .status == "failed")) | .id' "$SOREN_MAILBOX" 2>/dev/null | sort -u || true)
+        resolved_ids=$(jq -rs '
+            [ .[] | select(.type == "status_update") ]
+            | group_by(.id)
+            | map(sort_by(.ts) | last)
+            | .[]
+            | select(.status == "completed" or .status == "failed")
+            | .id
+        ' "$SOREN_MAILBOX" 2>/dev/null | sort -u || true)
     fi
 
     # ── Step 2: Count unread messages, excluding status_update records and resolved messages ──
