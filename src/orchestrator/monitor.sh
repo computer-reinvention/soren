@@ -1728,7 +1728,9 @@ mark_healthy_if_stable() {
     now=$(date +%s)
     mkdir -p "$(dirname "$HEAD_FIRST_SEEN_FILE")"
     local seen_sha seen_ts
-    read -r seen_sha seen_ts < "$HEAD_FIRST_SEEN_FILE" 2>/dev/null || true
+    if [[ -f "$HEAD_FIRST_SEEN_FILE" ]]; then
+        read -r seen_sha seen_ts < "$HEAD_FIRST_SEEN_FILE" || true
+    fi
     if [[ "${seen_sha:-}" != "$head" ]]; then
         echo "$head $now" > "$HEAD_FIRST_SEEN_FILE"
         return 0
