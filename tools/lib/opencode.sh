@@ -163,25 +163,71 @@ soren_oc_wait_ready() {
     return 1
 }
 
+# Wait until the TUI's prompt-acceptance machinery is actually ready.
+# /global/health can return 200 while the TUI session is still initializing.
+# This probes append-prompt + clear-prompt to confirm the TUI input pipeline
+# is wired up. Call AFTER soren_oc_wait_ready.
+# Usage: soren_oc_wait_tui_ready <port> [timeout-seconds]
+soren_oc_wait_tui_ready() {
+    local port="$1"
+    local timeout="${2:-15}"
+    local payload='{"text":"."}'
+    local i
+    for (( i = 0; i < timeout * 2; i++ )); do
+        # Try to append a single dot — if the TUI prompt is ready, this
+        # succeeds with HTTP 200 AND the submit endpoint is wired up.
+        if curl -sf -m 3 -X POST "http://127.0.0.1:${port}/tui/append-prompt" \
+                -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
+            # Clean up: clear the dot we just appended
+            curl -sf -m 3 -X POST "http://127.0.0.1:${port}/tui/clear-prompt" \
+                -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
 # Inject a message into a running opencode TUI over HTTP.
 # More reliable than tmux send-keys (no paste/prompt-state issues).
-# Usage: soren_oc_http_send <port> <text>
+# Retries up to $retries times (default 3) on submit failure to handle the
+# race where /global/health is up but the TUI session hasn't finished init.
+# Usage: soren_oc_http_send <port> <text> [retries]
 soren_oc_http_send() {
     local port="$1"
     local text="$2"
+    local retries="${3:-3}"
     local payload
     payload=$(jq -cn --arg t "$text" '{text: $t}') || return 1
-    curl -sf -m 5 -X POST "http://127.0.0.1:${port}/tui/append-prompt" \
-        -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1 || return 1
-    sleep 0.2
-    if ! curl -sf -m 5 -X POST "http://127.0.0.1:${port}/tui/submit-prompt" \
-        -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1; then
-        # Append succeeded but submit failed: clear the prompt (best-effort)
-        # so the tmux fallback doesn't double-deliver the message.
+
+    local attempt
+    for (( attempt = 0; attempt <= retries; attempt++ )); do
+        # Back off before retries (not on the first attempt)
+        if (( attempt > 0 )); then
+            sleep $(( attempt ))  # 1s, 2s, 3s
+        fi
+
+        # Append
+        if ! curl -sf -m 5 -X POST "http://127.0.0.1:${port}/tui/append-prompt" \
+                -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
+            continue  # TUI not ready yet, retry
+        fi
+
+        sleep 0.3
+
+        # Submit
+        if curl -sf -m 5 -X POST "http://127.0.0.1:${port}/tui/submit-prompt" \
+                -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1; then
+            return 0  # Success
+        fi
+
+        # Submit failed — clear the appended text before retrying
         curl -sf -m 5 -X POST "http://127.0.0.1:${port}/tui/clear-prompt" \
             -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 || true
-        return 1
-    fi
+    done
+
+    # All retries exhausted
+    return 1
 }
 
 # Execute a TUI command (e.g. session.compact) on a running instance.

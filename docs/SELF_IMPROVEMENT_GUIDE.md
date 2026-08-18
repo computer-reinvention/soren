@@ -35,10 +35,26 @@ Your tmux session and the journal survive rollbacks. Rollback records are writte
 - `src/server/services/` — business logic
 - `src/server/websocket/` — real-time communication
 
+**Structurally protected (enforced by the soren-bridge plugin, not just policy):**
+
+Recovery-critical paths cannot be edited in the live checkout by any agent —
+the plugin blocks the tool call:
+
+- `src/orchestrator/` (monitor, router, compact, libs)
+- `.opencode/plugins/` and `.opencode/hooks/` (the enforcement layer itself + verification)
+- `tools/lib/opencode.sh` (spawn/port/registry primitives)
+- `soren.sh` (root entrypoint)
+
+The sanctioned change path: spawn with `--worktree`, edit the worktree copy,
+report `[DONE] Commit: <sha>`, and the supervisor merges after review. Workers
+spawned with a worktree are additionally jailed: ALL writes to the live
+checkout are blocked, not just protected paths. Human operators can bypass
+with `SOREN_PROTECTED_OVERRIDE=1`.
+
 **Never:**
 
 - **Never start anything on port 8000.** It is reserved for the SOREN API server; taking it kills all orchestration.
-- **Never modify `src/orchestrator/monitor.sh` while the system is running.** It IS the recovery system — breaking it removes the safety net. Same caution applies to `soren.sh` and the `/api/webhooks/health` endpoint.
+- **Never modify recovery code in the live checkout while the system is running** (see structurally protected paths above — the plugin will refuse anyway).
 - **Never force-push.** Rollback targets (`.soren/.last_healthy_commit`) and stashed work depend on history staying intact.
 - **Never delete or restructure `.soren/`** — it is runtime state (mailbox, journal, registry, task db). Read freely, append to the journal, don't reorganize.
 

@@ -66,10 +66,26 @@ if [[ -f "$SOREN_MAILBOX" ]] && [[ -s "$SOREN_MAILBOX" ]]; then
     # This correctly handles re-opened messages (e.g. completed -> working).
     resolved_ids=""
     if command -v jq &>/dev/null; then
+        # sort_by epoch to handle mixed timezones (+05:30, Z, etc.) correctly.
+        # jq's fromdateiso8601 only handles "Z" — not +HH:MM offsets — so we
+        # define a helper (ts2epoch) that strips fractional seconds, detects
+        # the offset sign, parses the base as UTC, then adjusts by the offset.
         resolved_ids=$(jq -rs '
+            def ts2epoch:
+              sub("\\.[0-9]+"; "")
+              | if test("\\+[0-9]{2}:[0-9]{2}$") then
+                  split("+") | .[0] as $b
+                  | (.[1] | split(":") | (.[0]|tonumber)*3600 + (.[1]|tonumber)*60) as $off
+                  | ($b + "Z" | fromdateiso8601) - $off
+                elif test("-[0-9]{2}:[0-9]{2}$") then
+                  (.[:-6]) as $b
+                  | (.[-5:] | split(":") | (.[0]|tonumber)*3600 + (.[1]|tonumber)*60) as $off
+                  | ($b + "Z" | fromdateiso8601) + $off
+                else fromdateiso8601? // 0
+                end;
             [ .[] | select(.type == "status_update") ]
             | group_by(.id)
-            | map(sort_by(.ts) | last)
+            | map(sort_by(.ts | ts2epoch) | last)
             | .[]
             | select(.status == "completed" or .status == "failed")
             | .id

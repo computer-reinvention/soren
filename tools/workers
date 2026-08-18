@@ -352,6 +352,11 @@ cmd_spawn() {
     if [[ -n "$project_id" ]]; then
         env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
     fi
+    # Worktree isolation: the soren-bridge plugin enforces that worktree
+    # workers never write to the live checkout (structural jail).
+    if [[ -n "$worktree_path" ]]; then
+        env_vars="${env_vars} SOREN_WORKTREE=${worktree_path}"
+    fi
 
     # Build the command — prepend SOREN tools to PATH when working outside project root
     local spawn_cmd="export ${env_vars}"
@@ -372,6 +377,13 @@ cmd_spawn() {
     if ! soren_oc_wait_ready "$oc_port" 30; then
         warn "opencode health endpoint not responding after 30s — falling back to fixed delay"
         sleep "$STARTUP_DELAY"
+    else
+        # Health is up but the TUI prompt may not be ready yet (root cause of
+        # intermittent prompt delivery failures). Probe the TUI input pipeline.
+        info "Verifying TUI prompt readiness..."
+        if ! soren_oc_wait_tui_ready "$oc_port" 15; then
+            warn "TUI prompt not accepting input after 15s — continuing with retry-based send"
+        fi
     fi
 
     # Override task content for permanent workers
@@ -481,6 +493,8 @@ WORKTREE:
 You are on branch ${worktree_branch}, branched from the supervisor's integration branch.
 Commit your work here. Do not switch branches. Do not merge into main.
 Your supervisor will merge your branch back into the integration branch when you report [DONE].
+ISOLATION IS ENFORCED: the soren-bridge plugin blocks any write you attempt
+against the live checkout (${SOREN_PROJECT_ROOT}). Work only inside your worktree.
 WTEOF
     fi
 
@@ -489,7 +503,30 @@ WTEOF
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
-    if ! soren_oc_http_send "$oc_port" "$instruction"; then
+    local send_success=false
+    if soren_oc_http_send "$oc_port" "$instruction"; then
+        send_success=true
+    fi
+
+    # Verify the prompt actually landed by checking the TUI pane.
+    # If the pane still shows an empty prompt after 5s, the send was silently
+    # dropped (the race condition). Fall back to tmux send-keys.
+    # Note: 5s gives the TUI enough time to show activity indicators;
+    # shorter waits (e.g. 3s) cause false negatives and unnecessary fallbacks.
+    if $send_success; then
+        sleep 5
+        local pane_check
+        pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -8 2>/dev/null || true)
+        # If the TUI is processing our prompt, we'll see activity indicators
+        # (thinking, working, tool use, assistant output). An empty prompt or
+        # the bare opencode welcome screen means the send was dropped.
+        if ! echo "$pane_check" | grep -qiE 'thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'; then
+            warn "Prompt may not have landed — retrying via tmux send-keys"
+            send_success=false
+        fi
+    fi
+
+    if ! $send_success; then
         tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
         sleep 0.1
         tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
@@ -762,6 +799,7 @@ cmd_wake() {
 
     local env_vars="SOREN_AGENT=true SOREN_AGENT_ID=${agent_id} SOREN_AGENT_NAME=${name} SOREN_SESSION=${SOREN_SESSION} SOREN_HOME=${SOREN_PROJECT_ROOT} SOREN_PORT=${SOREN_PORT:-8000} SOREN_SUPERVISOR=${supervisor_name} SOREN_OC_PORT=${oc_port} OPENCODE_PERMISSION='${SOREN_OC_PERMISSION}'"
     [[ -n "$project_id" ]] && env_vars="${env_vars} SOREN_PROJECT_ID=${project_id}"
+    [[ -n "$worktree_path" ]] && env_vars="${env_vars} SOREN_WORKTREE=${worktree_path}"
 
     # Prefer the worktree path, then the worker dir, then the project root
     local cd_target="${worktree_path:-${worker_dir:-${SOREN_PROJECT_ROOT}}}"
@@ -788,7 +826,11 @@ cmd_wake() {
     # If a message was provided, wait for readiness then send it
     if [[ -n "$message" ]]; then
         info "Waiting for opencode to resume..."
-        soren_oc_wait_ready "$oc_port" 20 || sleep "$STARTUP_DELAY"
+        if soren_oc_wait_ready "$oc_port" 20; then
+            soren_oc_wait_tui_ready "$oc_port" 10 || true
+        else
+            sleep "$STARTUP_DELAY"
+        fi
         sleep 1
         # Include last-task context from conversation_store
         local last_task

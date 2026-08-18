@@ -46,6 +46,12 @@ warn() { echo -e "${YELLOW}!${NC} $1"; }
 
 ensure_db() {
     [[ -f "$DB" ]] || die "tasks database not found: $DB"
+    # Ensure the remarks column exists (may be missing from older schemas).
+    # ALTER TABLE ... ADD COLUMN is a no-op if the column already exists in
+    # SQLite >= 3.35; for older versions we check first.
+    if ! sqlite3 "$DB" "SELECT remarks FROM tasks LIMIT 0;" 2>/dev/null; then
+        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN remarks TEXT DEFAULT '';" 2>/dev/null || true
+    fi
 }
 
 gen_uuid() {
@@ -156,8 +162,8 @@ cmd_add() {
     priority_text=$(pri_num_to_text "$priority_num")
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, project, assigned_to, status, priority, source, parent_id, resources, linked_workers, remarks, created_at, updated_at, completed_at)
-        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', '', '', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', '', '[]', '', '', '$now', '$now', '');"
+    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, status, priority, source, created_at, updated_at)
+        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', '$now', '$now');"
 
     ok "Added $(short_id "$id"): ${title} ($(priority_label "$priority_num"))"
 }
