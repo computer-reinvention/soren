@@ -539,6 +539,9 @@ TASK_INJECTED=0             # whether a task has been force-injected after nudge
 OBSERVE_STARTED_AT=0        # timestamp when observation mode began (0 = not observing)
 OBSERVE_PANE_HASH=""         # md5 hash of last captured pane output during observation
 OBSERVE_FROZEN_SINCE=0       # timestamp when pane output last changed (frozen timer starts here)
+LAST_HB_CHECK_TS=0           # wall-clock of previous heartbeat check (suspend detection)
+SOREN_SENTRY_ENABLED="${SOREN_SENTRY:-true}"   # set SOREN_SENTRY=false to disable sentry escalation
+SOREN_SUSPEND_GAP="${SOREN_SUSPEND_GAP:-120}"  # loop-gap seconds implying machine suspend
 
 # Sentry agent state
 SENTRY_ACTIVE=${SENTRY_ACTIVE:-false}
@@ -621,6 +624,22 @@ check_supervisor_heartbeat() {
     fi
 
     staleness=$((now - last_beat))
+
+    # Suspend detection: this check runs every ~5s. A large gap between
+    # consecutive checks means the machine was asleep — the supervisor
+    # didn't fail, time simply passed. Reset baselines instead of
+    # escalating (laptop sleep previously caused sentry thrash: staleness
+    # in the thousands, repeated sentry spawn/timeout/force-kill cycles).
+    if (( LAST_HB_CHECK_TS > 0 && now - LAST_HB_CHECK_TS > SOREN_SUSPEND_GAP )); then
+        local slept=$((now - LAST_HB_CHECK_TS))
+        log_status "HEARTBEAT" "Suspend detected (${slept}s loop gap) — resetting heartbeat baseline, no escalation"
+        echo "$now" > "$SUPERVISOR_HEARTBEAT_FILE" 2>/dev/null || true
+        reset_heartbeat_state
+        LAST_HB_CHECK_TS=$now
+        printf "  Heartbeat:  ${YELLOW}●${NC} suspend detected (${slept}s gap) — baseline reset\n"
+        return
+    fi
+    LAST_HB_CHECK_TS=$now
 
     # If heartbeat updated since we started nudging or observing, supervisor is active — reset
     if ((NUDGE_SENT_AT > 0 && last_beat > NUDGE_SENT_AT)) || \
@@ -725,7 +744,11 @@ check_supervisor_heartbeat() {
         fi
 
         reset_heartbeat_state
-        spawn_sentry
+        if [[ "$SOREN_SENTRY_ENABLED" == "true" ]]; then
+            spawn_sentry
+        else
+            log_status "HEARTBEAT" "Sentry disabled (SOREN_SENTRY=false) — supervisor needs manual attention"
+        fi
         return
     fi
 
@@ -899,7 +922,11 @@ check_supervisor_heartbeat() {
     printf "  Heartbeat:  ${RED}●${NC} supervisor unresponsive (${staleness}s, ${NUDGE_COUNT} nudges failed, process dead) - spawning sentry\n"
     log_warn "Supervisor unresponsive after ${NUDGE_COUNT} nudges and process not found. Spawning sentry."
     reset_heartbeat_state
-    spawn_sentry
+    if [[ "$SOREN_SENTRY_ENABLED" == "true" ]]; then
+        spawn_sentry
+    else
+        log_status "HEARTBEAT" "Sentry disabled (SOREN_SENTRY=false) — supervisor needs manual attention"
+    fi
 }
 
 #───────────────────────────────────────────────────────────────────────────────
