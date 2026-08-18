@@ -502,10 +502,12 @@ WTEOF
     fi
 
     # Verify the prompt actually landed by checking the TUI pane.
-    # If the pane still shows an empty prompt after 3s, the send was silently
+    # If the pane still shows an empty prompt after 5s, the send was silently
     # dropped (the race condition). Fall back to tmux send-keys.
+    # Note: 5s gives the TUI enough time to show activity indicators;
+    # shorter waits (e.g. 3s) cause false negatives and unnecessary fallbacks.
     if $send_success; then
-        sleep 3
+        sleep 5
         local pane_check
         pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -8 2>/dev/null || true)
         # If the TUI is processing our prompt, we'll see activity indicators
