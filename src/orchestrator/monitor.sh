@@ -1379,6 +1379,10 @@ run_dashboard() {
             if ((HEALTH_FAILURES > 0)); then
                 log_status "HEALTH" "Server recovered after ${HEALTH_FAILURES} failure(s)"
                 mark_healthy
+            else
+                # Normal healthy operation: advance the rollback target to new
+                # commits once they have proven stable (SOREN_HEALTHY_GRACE)
+                mark_healthy_if_stable
             fi
             HEALTH_FAILURES=0
         else
@@ -1691,11 +1695,48 @@ print(f'Daily digest: {uptime_h}h uptime, {tasks} tasks done, budget {budget_pct
 HEALTHY_COMMIT_FILE=".soren/.last_healthy_commit"
 RECOVERY_WAIT=30
 
+# Rollback guardrail tunables
+SOREN_HEALTHY_GRACE="${SOREN_HEALTHY_GRACE:-300}"                      # seconds a new HEAD must run healthy before being marked
+SOREN_MAX_GIT_RECOVERIES_PER_HOUR="${SOREN_MAX_GIT_RECOVERIES_PER_HOUR:-3}"  # circuit breaker for git-mutating recovery stages
+SOREN_RESCUE_BRANCH_KEEP="${SOREN_RESCUE_BRANCH_KEEP:-10}"             # rescue branches to retain
+HEAD_FIRST_SEEN_FILE=".soren/run/head-first-seen"
+RECOVERY_EVENTS_FILE=".soren/run/recovery-events.log"
+
 mark_healthy() {
     local commit
     commit=$(git rev-parse HEAD 2>/dev/null || echo "")
     if [[ -n "$commit" ]]; then
         echo "$commit" > "$HEALTHY_COMMIT_FILE"
+        # Warn when the "healthy" state depends on uncommitted tracked changes —
+        # rolling back to this commit will NOT reproduce the running state.
+        if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+            _orch_log "[HEALTH] WARNING: marked ${commit:0:8} healthy with dirty tracked files — rollback to it may not reproduce running state"
+        fi
+    fi
+}
+
+# Continuously advance the healthy pointer during NORMAL operation.
+# A new HEAD is only marked healthy after it has been running (and passing
+# health checks) for SOREN_HEALTHY_GRACE seconds — a bad commit that takes a
+# few minutes to fall over never becomes a rollback target.
+mark_healthy_if_stable() {
+    local head recorded now first_seen
+    head=$(git rev-parse HEAD 2>/dev/null) || return 0
+    recorded=$(cat "$HEALTHY_COMMIT_FILE" 2>/dev/null || echo "")
+    [[ "$head" == "$recorded" ]] && return 0
+
+    now=$(date +%s)
+    mkdir -p "$(dirname "$HEAD_FIRST_SEEN_FILE")"
+    local seen_sha seen_ts
+    read -r seen_sha seen_ts < "$HEAD_FIRST_SEEN_FILE" 2>/dev/null || true
+    if [[ "${seen_sha:-}" != "$head" ]]; then
+        echo "$head $now" > "$HEAD_FIRST_SEEN_FILE"
+        return 0
+    fi
+    first_seen="${seen_ts:-$now}"
+    if (( now - first_seen >= SOREN_HEALTHY_GRACE )); then
+        mark_healthy
+        log_status "HEALTH" "Healthy pointer advanced to ${head:0:8} (stable ${SOREN_HEALTHY_GRACE}s)"
     fi
 }
 
@@ -1703,8 +1744,71 @@ get_last_healthy_commit() {
     if [[ -f "$HEALTHY_COMMIT_FILE" ]]; then
         cat "$HEALTHY_COMMIT_FILE"
     else
+        _orch_log "[ROLLBACK] WARNING: no recorded healthy commit — falling back to HEAD~1 (arbitrary)"
         git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD
     fi
+}
+
+# ── Recovery circuit breaker ──────────────────────────────────────────────────
+# Git-mutating recovery (stages 2-4) is rate-limited. A flapping failure that
+# survives rollbacks (bad dependency, disk full, provider outage) must not
+# thrash the repository in a loop.
+_record_git_recovery() {
+    mkdir -p "$(dirname "$RECOVERY_EVENTS_FILE")"
+    date +%s >> "$RECOVERY_EVENTS_FILE"
+}
+
+_git_recoveries_last_hour() {
+    [[ -f "$RECOVERY_EVENTS_FILE" ]] || { echo 0; return; }
+    local now cutoff count=0 ts
+    now=$(date +%s)
+    cutoff=$((now - 3600))
+    while IFS= read -r ts; do
+        [[ -n "$ts" && "$ts" -ge "$cutoff" ]] && count=$((count+1))
+    done < "$RECOVERY_EVENTS_FILE"
+    # Compact the file while we're here
+    if (( count < $(wc -l < "$RECOVERY_EVENTS_FILE") )); then
+        local tmp; tmp=$(mktemp)
+        awk -v c="$cutoff" '$1 >= c' "$RECOVERY_EVENTS_FILE" > "$tmp" && mv "$tmp" "$RECOVERY_EVENTS_FILE"
+    fi
+    echo "$count"
+}
+
+# Deeper post-recovery verification. Uses tools/smoke-test only when smoke
+# credentials exist (without them auth-gated tests count as failures and every
+# recovery stage would wrongly "fail"); otherwise the health endpoint decides.
+deep_health_check() {
+    if ! is_server_running; then
+        return 1
+    fi
+    if [[ -x "${SOREN_PROJECT_ROOT}/tools/smoke-test" ]] \
+        && [[ -n "${SOREN_SMOKE_TOKEN:-}${SOREN_SMOKE_USER:-}" ]]; then
+        "${SOREN_PROJECT_ROOT}/tools/smoke-test" --url "http://localhost:${SOREN_PORT}" 2>/dev/null
+        return $?
+    fi
+    return 0
+}
+
+# Snapshot everything reachable before any history-mutating git operation.
+# Prints the rescue branch name. Never fails the caller.
+create_rescue_snapshot() {
+    local ts branch
+    ts=$(date +%s)
+    branch="soren/pre-rollback-${ts}"
+    git branch "$branch" HEAD >/dev/null 2>&1 || branch=""
+    # Stash tracked AND untracked dirt so nothing is lost to reset --hard
+    git stash push -u -m "soren-auto-rollback-${ts}" >/dev/null 2>&1 || true
+    # Prune old rescue branches beyond the retention window (BSD-safe)
+    local branches total excess old
+    branches=$(git for-each-ref --format='%(refname:short)' refs/heads/soren/pre-rollback-* 2>/dev/null | sort)
+    total=$(printf '%s\n' "$branches" | grep -c . || true)
+    excess=$(( total - SOREN_RESCUE_BRANCH_KEEP ))
+    if (( excess > 0 )); then
+        printf '%s\n' "$branches" | head -n "$excess" | while IFS= read -r old; do
+            [[ -n "$old" ]] && git branch -D "$old" 2>/dev/null || true
+        done
+    fi
+    echo "$branch"
 }
 
 # Journal the failure context before rollback
@@ -1803,6 +1907,27 @@ rollback_and_restart() {
 
     cd "$SOREN_PROJECT_ROOT"
 
+    # Refuse to mutate history from an abnormal repo state — a reset --hard
+    # mid-merge/rebase can corrupt agent work in ways a stash won't rescue.
+    local git_dir
+    git_dir=$(git rev-parse --git-dir 2>/dev/null || echo ".git")
+    if [[ -e "${git_dir}/MERGE_HEAD" || -e "${git_dir}/rebase-merge" || -e "${git_dir}/rebase-apply" ]]; then
+        log_warn "Repo is mid-merge/rebase — aborting it before rollback"
+        git merge --abort 2>/dev/null || git rebase --abort 2>/dev/null || true
+    fi
+
+    # Sanity: the target must exist and be an ancestor of HEAD (or HEAD itself)
+    if ! git cat-file -e "${target_commit}^{commit}" 2>/dev/null; then
+        log_fail "Rollback target ${target_commit} does not exist — refusing"
+        return 1
+    fi
+
+    # Warn the supervisor BEFORE files change under running agents
+    if tmux_window_exists "$SOREN_SESSION" "supervisor"; then
+        tmux_safe_send "$SOREN_SESSION" "supervisor" \
+            "[SYS] SYSTEM ALERT: auto-rollback to ${target_commit:0:8} starting NOW. Pause all workers; repo files are about to change." --force || true
+    fi
+
     # Belt-and-suspenders: backup .soren/ runtime data before git reset --hard.
     # The .gitignore should protect these files, but if something goes wrong
     # (e.g., .gitignore itself gets rolled back), this backup ensures recovery.
@@ -1813,7 +1938,17 @@ rollback_and_restart() {
         log_warn "Failed to backup .soren/ — proceeding anyway"
     fi
 
-    git stash push -m "soren-auto-rollback-$(date +%s)" 2>/dev/null || true
+    # Rescue snapshot: branch at current HEAD + stash (incl. untracked).
+    # Nothing an agent committed or wrote is ever unreachable after rollback.
+    local rescue_branch
+    rescue_branch=$(create_rescue_snapshot)
+    if [[ -n "$rescue_branch" ]]; then
+        log_step "Pre-rollback state preserved on branch ${rescue_branch}"
+        _orch_log "[ROLLBACK] Rescue branch: ${rescue_branch} (restore: git merge ${rescue_branch} / git stash list)"
+    else
+        log_warn "Could not create rescue branch — reflog is the only recovery path"
+    fi
+
     git reset --hard "$target_commit" 2>/dev/null || return 1
 
     # Restore runtime data that git reset may have clobbered
@@ -1923,9 +2058,11 @@ try_targeted_revert() {
     start_server
     sleep "$RECOVERY_WAIT"
 
-    # Smoke test to verify the revert actually fixed things
-    log_step "Smoke-testing after targeted revert..."
-    if "${SOREN_PROJECT_ROOT}/tools/smoke-test" --url "http://localhost:${SOREN_PORT}" 2>/dev/null; then
+    # Verify the revert actually fixed things. deep_health_check only uses
+    # tools/smoke-test when smoke credentials are configured — without them
+    # its auth-gated tests count as failures and this stage could never pass.
+    log_step "Verifying health after targeted revert..."
+    if deep_health_check; then
         log_ok "Targeted revert successful — smoke tests pass (${revert_sha:0:8})"
         log_status "RECOVERY" "Stage 2 SUCCESS: Targeted revert ${revert_sha} restored health"
         _orch_log "[TARGETED_REVERT] SUCCESS: Smoke tests pass after revert"
@@ -1993,6 +2130,23 @@ attempt_recovery() {
     fi
     log_status "RECOVERY" "Stage 1 FAILED: Simple restart did not work"
 
+    # Circuit breaker: git-mutating recovery is rate-limited. If rollbacks are
+    # not fixing the problem, the problem is not in git history — stop
+    # thrashing the repository and demand a human.
+    local git_recoveries
+    git_recoveries=$(_git_recoveries_last_hour)
+    if (( git_recoveries >= SOREN_MAX_GIT_RECOVERIES_PER_HOUR )); then
+        log_fail "CIRCUIT BREAKER: ${git_recoveries} git recoveries in the last hour (max ${SOREN_MAX_GIT_RECOVERIES_PER_HOUR}) — refusing further rollbacks"
+        log_status "RECOVERY" "CIRCUIT BREAKER OPEN: manual intervention required (${git_recoveries} git recoveries/hour)"
+        [[ -x "$notify_tool" ]] && "$notify_tool" \
+            "SOREN circuit breaker OPEN: ${git_recoveries} rollbacks in 1h did not restore health. Rollbacks suspended — investigate manually." \
+            --level alert >/dev/null 2>&1 || true
+        notify_supervisor_of_rollback \
+            "Circuit breaker open: repeated rollbacks are not fixing the failure. Likely non-code cause (deps, disk, provider, env). Rollbacks suspended for this hour." "SUSPENDED"
+        return
+    fi
+    _record_git_recovery
+
     # Journal the failure context once, before any git operations
     pre_rollback_journal "$error_log"
 
@@ -2015,7 +2169,7 @@ attempt_recovery() {
 
     sleep "$RECOVERY_WAIT"
 
-    if is_server_running; then
+    if deep_health_check; then
         log_ok "Recovery successful (rollback to $target_commit)"
         log_status "RECOVERY" "Stage 3 SUCCESS: Rollback to ${target_commit} worked"
         notify_supervisor_of_rollback "$error_log" "$target_commit"
@@ -2041,7 +2195,7 @@ attempt_recovery() {
 
         sleep "$RECOVERY_WAIT"
 
-        if is_server_running; then
+        if deep_health_check; then
             log_ok "Recovery successful (rollback to $commit_hash)"
             log_status "RECOVERY" "Stage 4 SUCCESS: Rollback to ${commit_hash} worked"
             notify_supervisor_of_rollback "$error_log" "$commit_hash"
