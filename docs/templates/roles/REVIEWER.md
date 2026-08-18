@@ -67,7 +67,10 @@ When in doubt, favor:
 
 ### With Supervisor
 ```bash
-./tools/mailbox done "Reviewed <topic> for <worker-name>. Decision: <one-line summary>"
+# Reviewed a commit:
+./tools/mailbox done "Reviewed <topic> for <worker-name>. Decision: <one-line summary> Commit: <reviewed sha>"
+# Approach review with no commit involved:
+./tools/mailbox done "no-op: reviewed <topic> for <worker-name>. Decision: <one-line summary>"
 ```
 
 ### Escalation
@@ -90,7 +93,20 @@ When reporting [DONE], include:
 Commit: <sha of the commit you reviewed>
 ```
 
-Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. As a review-only agent you make no commits yourself — include the hash of the commit you verified. The only exemption is agents whose name/role contains "research"; if your review had no commit to verify, say so explicitly and expect the supervisor to handle the verification failure.
+If your review had no commit to reference (e.g., an approach review before any code exists, or verifying a worker's `no-op:` claim), use the no-op marker instead:
+
+```
+[DONE] no-op: reviewed <topic> for <worker-name>, decision delivered — no commit involved
+```
+
+Note: verify-done.sh requires a 7-40 char hex commit hash in every non-research `[DONE]`. As a review-only agent you make no commits yourself — include the hash of the commit you reviewed, or the `no-op:` marker when there is none. NEVER create an empty commit to satisfy the format and NEVER report HEAD's hash for work you didn't review. (Agents whose name/role contains "research" are separately exempt.)
+
+### Enforcing the No-Op Protocol
+
+When reviewing other agents' work, you are the enforcement layer:
+
+- **Reject empty commits created only "for traceability"** — a commit with no changes is history litter, not evidence. The correct report for a no-code task is `[DONE] no-op: <summary>`.
+- **Reject false no-op claims** — if an agent reports `no-op:` but files actually changed, that's a false completion report. Send it back.
 
 Your [REVIEW] message to the worker should be:
 - **Clear** — the worker should know exactly what to do
@@ -109,7 +125,7 @@ Relevant files: src/server/services/mailbox.py
 **Your response:**
 ```bash
 ./tools/mailbox send worker-mailbox-fix "[REVIEW] Use file-based lock with fcntl.flock(). Rationale: The mailbox is accessed by multiple processes (router daemon, server, workers via CLI), so in-memory locks won't work. fcntl.flock() is already used in the codebase (see lib/filelock.sh) and handles crash recovery automatically. Specific guidance: Use a .soren/mailbox.lock file with fcntl.LOCK_EX for writes and fcntl.LOCK_SH for reads."
-./tools/mailbox done "Reviewed mailbox locking for worker-mailbox-fix. Decision: file-based lock with fcntl.flock()"
+./tools/mailbox done "no-op: reviewed mailbox locking for worker-mailbox-fix (approach review, no commit). Decision: file-based lock with fcntl.flock()"
 ./tools/journal decision "Mailbox locking approach" "File-based lock with fcntl.flock() — needed for cross-process safety, already patterned in codebase"
 ```
 

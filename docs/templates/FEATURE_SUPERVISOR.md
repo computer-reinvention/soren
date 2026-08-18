@@ -152,6 +152,7 @@ Your task: [Brief description]
 
 ## When Done
 Report via: ./tools/mailbox done "[summary + commit hash]"
+(or, if the task changed no code: ./tools/mailbox done "no-op: [summary]" — never an empty commit)
 ```
 
 ## Example Session
@@ -176,7 +177,7 @@ Report via: ./tools/mailbox done "[summary + commit hash]"
 
 ## Cleanup
 
-**Cleanup happens only after work is `[VERIFIED]`.** Do not kill workers immediately after `[DONE]` — keep them alive through verification and review; follow-up fixes are common. Sleep or reassign idle workers instead.
+**Cleanup happens only after work is `[VERIFIED]`.** Do not kill workers immediately after `[DONE]` — keep them alive through verification and review; follow-up fixes are common. Sleep or reassign idle workers instead. Workers you don't kill are handled automatically: idle ephemerals auto-sleep after 30 minutes and sleeping ephemerals are auto-retired after `SOREN_RETIRE_SLEEPING_HOURS` (24h default). Throwaway test workers are yours to kill the moment the test concludes — don't leave them for auto-retirement.
 
 When all work is verified and no follow-up remains:
 

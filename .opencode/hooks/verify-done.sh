@@ -241,6 +241,21 @@ extract_lesson() {
             esac
         fi
 
+        # Canonical no-op protocol: output-only/verification tasks that changed
+        # no code report "[DONE] no-op: <summary>". No commit is expected —
+        # do NOT create empty commits and do NOT report HEAD's hash.
+        # Reviewers are expected to reject abuse of this marker.
+        msg_lower_noop=$(echo "$done_msg" | tr '[:upper:]' '[:lower:]')
+        if [[ "$msg_lower_noop" == *"no-op:"* ]]; then
+            log_verify "SKIP: no-op DONE from $agent (no commit expected)"
+            retry_count_at_verify=$(get_retry_count)
+            clear_retry
+            "$MAILBOX_TOOL" send "$supervisor" \
+                "[VERIFIED] ${agent}: no-op task complete (no commit expected)" \
+                "No-op completion: ${done_msg:0:200}" 2>/dev/null || true
+            exit 0
+        fi
+
         if [[ "$is_research" == "true" ]]; then
             log_verify "SKIP: research-only DONE from $agent (no commit expected)"
             retry_count_at_verify=$(get_retry_count)

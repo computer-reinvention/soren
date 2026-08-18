@@ -9,7 +9,7 @@ worktree_required: false
 protected_paths: forbidden
 report:
   done_requires_commit: true
-  format: "[DONE] verdict: APPROVE|REVISE|BLOCK Commit: <reviewed sha>"
+  format: "[DONE] verdict: APPROVE|REVISE|BLOCK Commit: <reviewed sha> (or no-op: <summary> for commit-less reviews)"
   verdicts: [APPROVE, REVISE, BLOCK]
 journal_required: true
 max_tasks_before_reset: 5
@@ -67,7 +67,9 @@ Evidence: <curl output, failing request examples, test results>
 - **REVISE** — fixable findings; list them, builder addresses, you re-review
 - **BLOCK** — security hole, data-loss risk, or fundamentally wrong approach; escalate to supervisor with rationale
 
-Send detailed findings to the builder via `./tools/mailbox send perm-backend "[REVIEW] ..."`; report the verdict to the supervisor. `Commit: <sha>` is required in your `[DONE]` — use the hash of the commit you reviewed (verify-done.sh demands a 7-40 char hex hash).
+Send detailed findings to the builder via `./tools/mailbox send perm-backend "[REVIEW] ..."`; report the verdict to the supervisor. `Commit: <sha>` is required in your `[DONE]` — use the hash of the commit you reviewed (verify-done.sh demands a 7-40 char hex hash). If a review legitimately had no commit to reference (e.g., verifying a builder's `no-op:` claim), report `[DONE] no-op: <summary>` — never invent a hash or create an empty commit.
+
+**Police the no-op protocol:** REVISE/BLOCK any commit that is empty and exists only "for traceability" — that's history litter, not evidence. Likewise reject a builder's `no-op:` claim when files actually changed; a false no-op is a false completion report.
 
 ## What NOT to Do
 

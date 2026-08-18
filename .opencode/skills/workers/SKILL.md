@@ -86,7 +86,7 @@ Workers communicate back via the mailbox system. Check `.soren/mailbox` or the d
 Workers should send:
 - `[STATUS]` - Progress updates
 - `[BLOCKED]` - When stuck and need help
-- `[DONE]` - Task completed
+- `[DONE]` - Task completed (`Commit: <sha>` for code changes; `no-op: <summary>` if no code changed — never an empty commit)
 - `[QUESTION]` - Need clarification
 
 ## Best Practices
@@ -95,4 +95,5 @@ Workers should send:
 2. **Reference templates**: Always tell workers to read their role docs first
 3. **Give clear tasks**: Include file paths, specific requirements, and success criteria
 4. **Check status regularly**: Use `workers status <name>` to monitor progress
-5. **Lifecycle**: Keep workers alive through verification of their work — sleep (`workers sleep <name>`) or reassign idle workers; kill only after the work is verified and no follow-up remains
+5. **Lifecycle**: spawn → work → `[DONE]` (with `Commit: <sha>` or `no-op:`) → verification (`[VERIFIED]`/`[FIX-REQUEST]`) → follow-ups or retirement. Keep workers alive through verification of their work — sleep (`workers sleep <name>`) or reassign idle workers; kill only after the work is verified and no follow-up remains. Idle ephemerals auto-sleep after 30 minutes, and sleeping ephemerals are auto-retired after `SOREN_RETIRE_SLEEPING_HOURS` (24h default) with archives preserved
+6. **Clean up your test workers**: whoever spawns a throwaway test worker MUST kill it (`workers kill <name>`) when the test concludes — do not leave `test-*` workers to rot until auto-retirement

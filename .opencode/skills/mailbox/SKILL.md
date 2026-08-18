@@ -46,6 +46,18 @@ Send messages to other agents or the user via the mailbox.
 ./tools/mailbox status "<update>"     # -> supervisor: [STATUS] update
 ```
 
+#### The two [DONE] variants
+
+```bash
+# Task committed code — include the commit hash (required by verify-done.sh):
+./tools/mailbox done "Implemented rate limiting. Commit: a1b2c3d"
+
+# Task changed NO code (output-only, verification echo, config check) — use the no-op marker:
+./tools/mailbox done "no-op: verified webhook config, no files changed"
+```
+
+The `no-op:` marker makes verify-done skip commit verification and send `[VERIFIED]` immediately. Never create an empty commit to have a hash to report, never report HEAD's hash for work you didn't do, and never claim `no-op:` when files actually changed — reviewers reject all three.
+
 ### Read recent messages
 ```bash
 ./tools/mailbox read [lines]          # Show last N mailbox entries
@@ -70,8 +82,11 @@ Send messages to other agents or the user via the mailbox.
 # Quick status update
 ./tools/mailbox quick supervisor "Starting auth work"
 
-# Report done
-./tools/mailbox done "JWT implementation complete, tests passing"
+# Report done (code changed — include commit hash)
+./tools/mailbox done "JWT implementation complete, tests passing. Commit: a1b2c3d"
+
+# Report done (no code changed — no-op marker, no commit expected)
+./tools/mailbox done "no-op: config check complete, all values valid"
 
 # Report blocked
 ./tools/mailbox blocked "Need API credentials from secrets"
@@ -122,7 +137,9 @@ Example entries:
 
 ### When You're Done
 ```bash
-./tools/mailbox done "Task complete - files: src/auth.py, tests pass"
+./tools/mailbox done "Task complete - files: src/auth.py, tests pass. Commit: a1b2c3d"
+# or, if the task changed no code:
+./tools/mailbox done "no-op: <one-line summary>"
 ```
 
 ### To Ask Another Agent

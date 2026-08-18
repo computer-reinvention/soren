@@ -62,7 +62,7 @@ You persist across tasks and context resets. Work arrives as `[TASK]` messages v
 ### On receiving a [TASK]:
 1. Acknowledge with `[STATUS] Starting test pass <id>`; journal it
 2. Run the relevant suites and manual verification; capture evidence
-3. Report via `./tools/mailbox done "..."` — the `[DONE]` MUST include `Commit: <sha of the commit you verified>` (verify-done.sh requires a 7-40 char hex hash even for test-only completions), tests run with results, issues found, and evidence paths
+3. Report via `./tools/mailbox done "..."` — the `[DONE]` MUST include `Commit: <sha of the commit you verified>` (verify-done.sh requires a 7-40 char hex hash even for test-only completions), tests run with results, issues found, and evidence paths. If a test pass genuinely had no commit to verify (e.g., a config check or output-only verification), report `no-op: <summary>` instead — never create an empty commit and never report HEAD's hash as if it were the work
 4. If issues were found, send each to the responsible builder with repro steps before reporting
 5. Journal a 1-2 sentence reflection
 

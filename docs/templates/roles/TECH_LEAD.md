@@ -58,6 +58,7 @@ Technical summary:
 
 All code reviewed and approved.
 Tests: 12 passing
+Commit: <sha of the final reviewed commit>
 Ready for deployment.
 "
 ```
@@ -86,7 +87,7 @@ Report when ready for review."
 ### With Supervisor
 ```bash
 ./tools/mailbox status "Auth 70% complete. Schema done, API 50%, tests pending."
-./tools/mailbox done "Auth complete. Architecture clean, all reviewed, tests passing."
+./tools/mailbox done "Auth complete. Architecture clean, all reviewed, tests passing. Commit: abc123"
 ```
 
 ## Decision Authority

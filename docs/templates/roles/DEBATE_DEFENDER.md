@@ -51,7 +51,8 @@ You are the **DEFENDER** in a structured debate. Your job is to advocate for a p
 ./tools/mailbox send critic "Rebuttal Ready" "Addressed all 5 points. Conceded 2, defended 3."
 
 # When done
-./tools/mailbox done "Debate complete. Final plan at path/to/final.md"
+# Debates produce a plan artifact, not a commit — use the no-op marker
+./tools/mailbox done "no-op: debate complete. Final plan at path/to/final.md"
 ```
 
 ## Success Criteria

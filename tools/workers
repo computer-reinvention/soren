@@ -276,6 +276,7 @@ cmd_spawn() {
            "registered_at": $now,
            "type": "worker",
            "created_by": "tools/workers",
+           "spawned_by": $spawner,
            "created_at": $now,
            "agent_id": $aid,
            "display_name": $key,
@@ -284,7 +285,7 @@ cmd_spawn() {
            "worker_dir": $wdir,
            "worktree_path": $wpath
        }'
-    local jq_args=(--arg key "$name" --arg aid "$agent_id" --arg pid "$reg_project" --arg now "$now" --arg wdir "$worker_dir" --arg wpath "$worktree_path")
+    local jq_args=(--arg key "$name" --arg aid "$agent_id" --arg pid "$reg_project" --arg now "$now" --arg wdir "$worker_dir" --arg wpath "$worktree_path" --arg spawner "${SOREN_AGENT_NAME:-human}")
 
     # Add worktree branch if applicable
     if [[ -n "$worktree_path" ]]; then
@@ -644,29 +645,39 @@ cmd_kill() {
     # Kill the window
     tmux kill-window -t "${SOREN_SESSION}:${name}"
 
-    # Drop the oc_port from the registry and release its reservation so a
-    # stale port can't route HTTP messages to a different agent later
+    # Check for worktree BEFORE removing the registry entry (preservation note)
+    local wt_path="" wt_branch=""
+    if [[ -f "$reg_file" ]]; then
+        wt_path=$(jq -r --arg key "$name" '.[$key].worktree_path // empty' "$reg_file" 2>/dev/null)
+        wt_branch=$(jq -r --arg key "$name" '.[$key].worktree_branch // empty' "$reg_file" 2>/dev/null)
+    fi
+
+    # Retire the registry entry. A killed worker must NOT linger — leaving the
+    # entry made the stale-window sweep re-mark every killed ephemeral as
+    # SLEEPING, piling up phantom "sleeping agents". The conversation archive
+    # (above) preserves history; the registry entry is live-state only.
     if [[ -f "$reg_file" ]]; then
         local old_port=""
         old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_port=""
-        soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k].oc_port)'
+        soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])'
         if [[ -n "$old_port" ]]; then
             soren_oc_release_port "$old_port"
         fi
     fi
+    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    if [[ -f "$db_file" ]]; then
+        sqlite3 "$db_file" "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
+    fi
+    # Clean up context files for the retired worker
+    rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md" \
+          "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-message-"*.md 2>/dev/null || true
 
-    ok "Worker '$name' terminated"
+    ok "Worker '$name' terminated and retired from registry"
 
-    # Check for worktree and print preservation note
-    if [[ -f "$reg_file" ]]; then
-        local wt_path wt_branch
-        wt_path=$(jq -r --arg key "$name" '.[$key].worktree_path // empty' "$reg_file" 2>/dev/null)
-        wt_branch=$(jq -r --arg key "$name" '.[$key].worktree_branch // empty' "$reg_file" 2>/dev/null)
-        if [[ -n "$wt_path" ]]; then
-            echo ""
-            warn "Worktree preserved at ${wt_path} on branch ${wt_branch}."
-            echo "  Use 'git worktree remove ${wt_path}' to clean up after merging."
-        fi
+    if [[ -n "$wt_path" ]]; then
+        echo ""
+        warn "Worktree preserved at ${wt_path} on branch ${wt_branch}."
+        echo "  Use 'git worktree remove ${wt_path}' to clean up after merging."
     fi
 }
 

@@ -78,7 +78,7 @@ Verdicts:
 ./tools/mailbox send defender "Critique Ready" "ACCEPT 3, REVISE 4, REJECT 2"
 
 # After convergence
-./tools/mailbox send supervisor "[DONE] Debate converged. Final plan at path/to/final.md"
+./tools/mailbox send supervisor "[DONE] no-op: debate converged. Final plan at path/to/final.md"
 ```
 
 ## Red Flags to Watch For

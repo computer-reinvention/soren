@@ -67,7 +67,8 @@ Final:
 
 ### Both reporting completion
 ```bash
-./tools/mailbox done "Debate complete. Final plan at [PATH]. Defender and Critic converged."
+# Debates produce a plan artifact, not a commit — use the no-op marker
+./tools/mailbox done "no-op: debate complete. Final plan at [PATH]. Defender and Critic converged."
 ```
 
 ## Success Criteria

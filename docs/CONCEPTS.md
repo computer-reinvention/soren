@@ -92,7 +92,8 @@ PROGRESS UPDATES:
 
 COMPLETION NOTIFICATION:
   Worker ──(./tools/mailbox done "[summary + commit hash]")──▶ Supervisor
-  (machine-verified by the verify-done hook: commit exists, tests pass)
+  (machine-verified by the verify-done hook: commit exists, tests pass;
+   no-code tasks report "no-op: <summary>" instead — no commit expected)
 
 REAL-TIME VISIBILITY:
   All agents ──(WebSocket)──▶ Dashboard

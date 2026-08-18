@@ -9,6 +9,7 @@
 #   - registry port lookup      (soren_oc_port_for)
 #   - readiness / health        (soren_oc_health, soren_oc_wait_ready)
 #   - HTTP message injection    (soren_oc_http_send)  [preferred over send-keys]
+#   - prompt receipt verification (soren_oc_verify_prompt)
 #   - TUI command execution     (soren_oc_http_command)
 #
 # Source this from tools/workers, tools/projects, and orchestrator scripts.
@@ -228,6 +229,51 @@ soren_oc_http_send() {
 
     # All retries exhausted
     return 1
+}
+
+# Verify that a prompt was received by the opencode instance.
+# Queries the embedded server's session/message API for a user message
+# created after a given timestamp. This is a positive-confirmation signal
+# that doesn't depend on tmux capture-pane (which is unreliable during
+# TUI startup and can't distinguish "prompt queued" from "prompt lost").
+#
+# Usage: soren_oc_verify_prompt <port> <after_epoch_ms> [timeout-seconds]
+# Returns 0 if a user message appeared after the given timestamp, 1 otherwise.
+soren_oc_verify_prompt() {
+    local port="$1"
+    local after_ms="$2"
+    local timeout="${3:-15}"
+    local i
+
+    for (( i = 0; i < timeout; i++ )); do
+        sleep 1
+        # Get the most recently updated session
+        local session_id
+        session_id=$(curl -sf -m 3 "http://127.0.0.1:${port}/session" 2>/dev/null \
+            | jq -r 'sort_by(-.time.updated) | .[0].id // empty' 2>/dev/null) || continue
+        [[ -n "$session_id" ]] || continue
+
+        # Check for user messages created after our send timestamp
+        local has_new_msg
+        has_new_msg=$(curl -sf -m 3 "http://127.0.0.1:${port}/session/${session_id}/message?limit=5" 2>/dev/null \
+            | jq --argjson ts "$after_ms" \
+                '[.[] | select(.info.role == "user" and .info.time.created > $ts)] | length' 2>/dev/null) || continue
+        if [[ "$has_new_msg" =~ ^[0-9]+$ ]] && (( has_new_msg > 0 )); then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Get the current epoch time in milliseconds.
+# Usage: soren_epoch_ms
+soren_epoch_ms() {
+    # macOS date doesn't support %N; use perl for sub-second precision
+    if perl -e 'use Time::HiRes qw(time); printf "%d\n", time()*1000' 2>/dev/null; then
+        return
+    fi
+    # Fallback: seconds * 1000
+    echo $(( $(date +%s) * 1000 ))
 }
 
 # Execute a TUI command (e.g. session.compact) on a running instance.

@@ -110,7 +110,7 @@ Evidence: .soren/journal/.../screenshots/
 
 ### Squad Lead → Main Supervisor
 ```bash
-./tools/mailbox done "Feature X complete. Backend API, Frontend UI, all tests passing. Evidence at [path]"
+./tools/mailbox done "Feature X complete. Backend API, Frontend UI, all tests passing. Evidence at [path]. Commit: <sha>"
 ```
 
 ## Spawning Commands
