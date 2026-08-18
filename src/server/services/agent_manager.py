@@ -76,12 +76,32 @@ class AgentManager:
         else:
             sessions = await tmux_service.list_sessions()
 
+        # The registry is the source of truth for agent identity. A tmux
+        # window is only an agent if SOREN spawned it (registry entry) or it
+        # is a known system role. Windows a human opens in the session
+        # (shells, editors, htop) must never be presented as agents.
+        registry_keys = set(agent_registry.get_all_entries().keys())
+
+        def _is_known_agent_window(window: str, sess: str) -> bool:
+            if window in registry_keys or f"{sess}:{window}" in registry_keys:
+                return True
+            # System roles that may briefly exist before registration lands
+            if window == "supervisor" or window.startswith("supervisor-"):
+                return True
+            if window.startswith("sup-") or window == "sentry":
+                return True
+            return False
+
         for sess in sessions:
             windows = await tmux_service.list_windows(sess)
 
             for window in windows:
                 # Filter out system windows (like "monitor")
                 if window in settings.system_windows:
+                    continue
+
+                # Skip windows SOREN didn't spawn (human shells etc.)
+                if not _is_known_agent_window(window, sess):
                     continue
 
                 agent_type = AgentType.SUPERVISOR if self._is_supervisor(window, sess) else AgentType.WORKER

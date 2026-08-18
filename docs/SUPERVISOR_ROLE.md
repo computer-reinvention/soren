@@ -485,6 +485,10 @@ Frontend may be expecting it. Adding it now — will send updated contract.
 
 Any project with `active: yes` has a running supervisor you can message at `sup-<project-id>`.
 
+### Project Conventions Skills
+
+When a project is registered (`./tools/projects add`), a conventions skill is auto-generated at `.opencode/skills/project-<id>-conventions/SKILL.md` capturing the project's stack, key commands, its own rules file (AGENTS.md/CLAUDE.md), and recent commit style. **Load it via the skill tool before doing or delegating any cross-project work** — it is the fastest way to avoid violating a project's own conventions. The skill is deleted on `projects remove` and can be regenerated for all registered projects with `./tools/projects sync-skills` (useful after a project's rules or scripts change).
+
 ### Escalation
 
 Only escalate to Supervisor Prime when:

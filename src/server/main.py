@@ -25,6 +25,7 @@ from .routes import (
     sessions,
     thoughts,
     projects,
+    teams,
     tasks,
     heartbeat,
     prefs,
@@ -210,6 +211,7 @@ app.include_router(journal.router, prefix="/api/journal", tags=["journal"])
 app.include_router(filesystem.router, prefix="/api/filesystem", tags=["filesystem"])
 app.include_router(thoughts.router, prefix="/api/thoughts", tags=["thoughts"])
 app.include_router(projects.router, prefix="/api/projects", tags=["projects"])
+app.include_router(teams.router, prefix="/api/teams", tags=["teams"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(heartbeat.router, prefix="/api/heartbeat", tags=["heartbeat"])
 app.include_router(prefs.router, prefix="/api/prefs", tags=["prefs"])
