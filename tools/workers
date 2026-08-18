@@ -504,54 +504,42 @@ WTEOF
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
+
+    # Record timestamp before send for verification
+    local _send_ts
+    _send_ts=$(soren_epoch_ms)
+
     local send_success=false
     if soren_oc_http_send "$oc_port" "$instruction"; then
         send_success=true
     fi
 
-    # Verify the prompt actually landed by checking the TUI pane.
-    # SPAWN PATH (cold TUI): The TUI may take 20-30s to start processing
-    # after a fresh spawn. Poll for activity indicators over a longer window
-    # (up to 45s, checking every 3s) and exit early on first sign of activity.
-    # This replaces the old fixed 5s wait which caused false negatives on
-    # cold TUIs and triggered unnecessary tmux fallback.
-    local _activity_pattern='thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'
+    # SPAWN PATH (cold TUI) — verify prompt receipt via the embedded server's
+    # session/message API. This provides positive confirmation that the prompt
+    # was received by checking for a user message created after our send
+    # timestamp. Unlike capture-pane polling (which is unreliable during TUI
+    # startup and can't distinguish "prompt queued" from "prompt lost"), this
+    # gives a definitive yes/no answer.
+    #
+    # If HTTP send reported success, verify via API (up to 15s).
+    # If HTTP send failed OR API verification fails, fall back to tmux send-keys.
     if $send_success; then
-        local _poll_max=15   # 15 iterations * 3s = 45s max
-        local _poll_interval=3
-        local _poll_i
-        local _activity_found=false
-        for (( _poll_i = 0; _poll_i < _poll_max; _poll_i++ )); do
-            sleep "$_poll_interval"
-            local pane_check
-            pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -10 2>/dev/null || true)
-            if echo "$pane_check" | grep -qiE "$_activity_pattern"; then
-                _activity_found=true
-                break
-            fi
-        done
-        if ! $_activity_found; then
-            warn "Prompt may not have landed after $(( _poll_max * _poll_interval ))s — falling back to tmux send-keys"
+        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 15; then
+            info "Prompt receipt confirmed via session API"
+        else
+            warn "HTTP send returned success but session API did not confirm receipt — falling back to tmux send-keys"
             send_success=false
         fi
     fi
 
-    # Fallback: re-send via tmux send-keys. Guard against double-submission
-    # by checking whether the prompt text (or activity from it) has appeared
-    # in the pane since the HTTP send. A late-landing HTTP prompt would show
-    # the instruction text or activity indicators — skip the fallback in
-    # that case to avoid sending the task twice.
+    # Fallback: re-send via tmux send-keys.
+    # No double-submission guard needed here: the API verification above gives
+    # a definitive answer. If we reach this point, the prompt was NOT received
+    # (either HTTP send failed or API verification failed), so re-sending is safe.
     if ! $send_success; then
-        local _final_pane
-        _final_pane=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -15 2>/dev/null || true)
-        if echo "$_final_pane" | grep -qiE "$_activity_pattern" || \
-           echo "$_final_pane" | grep -qF "worker-contexts/${name}-context.md"; then
-            info "Activity detected late — HTTP prompt landed, skipping tmux fallback"
-        else
-            tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
-            sleep 0.1
-            tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
-        fi
+        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+        sleep 0.1
+        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
     fi
 
     # Link to task system if --task was provided

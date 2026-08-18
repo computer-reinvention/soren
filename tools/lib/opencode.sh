@@ -232,13 +232,20 @@ soren_oc_http_send() {
 }
 
 # Verify that a prompt was received by the opencode instance.
-# Queries the embedded server's session/message API for a user message
-# created after a given timestamp. This is a positive-confirmation signal
-# that doesn't depend on tmux capture-pane (which is unreliable during
-# TUI startup and can't distinguish "prompt queued" from "prompt lost").
+# Checks the embedded server's session API for a session CREATED after the
+# given timestamp — meaning the TUI accepted our submit-prompt and started
+# a new session to process it. This is a positive-confirmation signal that
+# doesn't depend on tmux capture-pane (which is unreliable during TUI
+# startup and can't distinguish "prompt queued" from "prompt lost").
+#
+# For spawn (cold TUI), submit-prompt triggers session creation; the new
+# session's time.created will be after our pre-send timestamp. The session
+# list is project-level (shared across agents), so we check time.created
+# rather than time.updated to avoid false positives from other agents'
+# ongoing sessions.
 #
 # Usage: soren_oc_verify_prompt <port> <after_epoch_ms> [timeout-seconds]
-# Returns 0 if a user message appeared after the given timestamp, 1 otherwise.
+# Returns 0 if any session was created after the given timestamp.
 soren_oc_verify_prompt() {
     local port="$1"
     local after_ms="$2"
@@ -247,18 +254,13 @@ soren_oc_verify_prompt() {
 
     for (( i = 0; i < timeout; i++ )); do
         sleep 1
-        # Get the most recently updated session
-        local session_id
-        session_id=$(curl -sf -m 3 "http://127.0.0.1:${port}/session" 2>/dev/null \
-            | jq -r 'sort_by(-.time.updated) | .[0].id // empty' 2>/dev/null) || continue
-        [[ -n "$session_id" ]] || continue
-
-        # Check for user messages created after our send timestamp
-        local has_new_msg
-        has_new_msg=$(curl -sf -m 3 "http://127.0.0.1:${port}/session/${session_id}/message?limit=5" 2>/dev/null \
+        # Check if any session was created after our pre-send timestamp.
+        # For cold TUI spawn: submit-prompt creates a new session.
+        local new_sessions
+        new_sessions=$(curl -sf -m 3 "http://127.0.0.1:${port}/session" 2>/dev/null \
             | jq --argjson ts "$after_ms" \
-                '[.[] | select(.info.role == "user" and .info.time.created > $ts)] | length' 2>/dev/null) || continue
-        if [[ "$has_new_msg" =~ ^[0-9]+$ ]] && (( has_new_msg > 0 )); then
+                '[.[] | select(.time.created > $ts)] | length' 2>/dev/null) || continue
+        if [[ "$new_sessions" =~ ^[0-9]+$ ]] && (( new_sessions > 0 )); then
             return 0
         fi
     done
