@@ -190,14 +190,57 @@ SOREN_SEND_QUEUE_DIR="${SOREN_SEND_QUEUE_DIR:-.soren/send-queue}"
 
 # Look up the opencode embedded-server port for a window (agent) name.
 # Internal helper for HTTP-based state checks and message delivery.
+#
+# Self-healing: registry ports can drift (concurrent starts, monitor
+# recovery). If the registered port isn't answering, inspect the pane's
+# opencode process for its actual --port and repair the registry.
 _tmux_oc_port() {
     local window="$1"
     local reg="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-.}}/.soren/agent_registry.json"
-    [[ -f "$reg" ]] || return 1
-    local port
-    port=$(jq -r --arg k "$window" '.[$k].oc_port // empty' "$reg" 2>/dev/null)
-    [[ -n "$port" && "$port" != "null" ]] || return 1
-    echo "$port"
+    local port=""
+    if [[ -f "$reg" ]]; then
+        port=$(jq -r --arg k "$window" '.[$k].oc_port // empty' "$reg" 2>/dev/null)
+        [[ "$port" == "null" ]] && port=""
+    fi
+
+    # Registered port that answers is authoritative
+    if [[ -n "$port" ]] && curl -sf -m 1 "http://127.0.0.1:${port}/global/health" >/dev/null 2>&1; then
+        echo "$port"
+        return 0
+    fi
+
+    # Self-heal: find the live opencode process in this window's pane tree
+    local pane_pid live_port="" pid p args
+    pane_pid=$(tmux list-panes -t "${SOREN_SESSION:-soren}:${window}" -F '#{pane_pid}' 2>/dev/null | head -1)
+    [[ -n "$pane_pid" ]] || { [[ -n "$port" ]] && echo "$port"; [[ -n "$port" ]]; return; }
+    for pid in $(pgrep -P "$pane_pid" 2>/dev/null); do
+        for p in "$pid" $(pgrep -P "$pid" 2>/dev/null); do
+            args=$(ps -o args= -p "$p" 2>/dev/null) || continue
+            if [[ "$args" == *opencode* && "$args" =~ --port[[:space:]=]+([0-9]+) ]]; then
+                live_port="${BASH_REMATCH[1]}"
+                break 2
+            fi
+        done
+    done
+
+    if [[ -n "$live_port" && "$live_port" != "$port" ]]; then
+        # Repair the registry (best effort, non-fatal)
+        if [[ -f "$reg" ]]; then
+            local tmp
+            tmp=$(mktemp)
+            if jq --arg k "$window" --argjson p "$live_port" '.[$k].oc_port = $p' "$reg" > "$tmp" 2>/dev/null; then
+                mv "$tmp" "$reg"
+                echo "[tmux_oc_port] Healed stale oc_port for ${window}: ${port:-none} -> ${live_port}" >&2
+            else
+                rm -f "$tmp"
+            fi
+        fi
+        echo "$live_port"
+        return 0
+    fi
+
+    [[ -n "${live_port:-$port}" ]] || return 1
+    echo "${live_port:-$port}"
 }
 
 # Detect the current state of a tmux pane running an opencode TUI.

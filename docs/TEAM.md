@@ -11,7 +11,7 @@ The team is designed around the principle that **specialized, adversarial review
 
 ## Current Roster
 
-> **EXAMPLE ROSTER — this template ships with no permanent workers.** Bootstrap your own team with `./tools/workers-init-role` or `./tools/teams setup-permanent`, then update this table.
+> **EXAMPLE ROSTER — this template ships with no permanent workers.** The role context files for this roster are versioned in `templates/team/*.md` (one per agent ID, e.g. `templates/team/perm-frontend-role.md`). Bootstrap the team with `./soren.sh team up` — it copies each role file into `.soren/worker-contexts/` (runtime, gitignored) and spawns the workers with `--permanent`. Then update this table if you customize the roster.
 
 ### Builders (3)
 

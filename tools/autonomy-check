@@ -59,50 +59,87 @@ highest_priority=""
 #───────────────────────────────────────────────────────────────────────────────
 
 if [[ -f "$SOREN_MAILBOX" ]] && [[ -s "$SOREN_MAILBOX" ]]; then
-    mailbox_count=$(wc -l < "$SOREN_MAILBOX" | tr -d ' ')
-    if ((mailbox_count > 0)); then
-        # Parse messages to extract senders and types
-        # Mailbox format: [timestamp] sender:name -> session:target: [TYPE] message
-        local_details=""
-        blocked_count=0
-        done_count=0
-        status_count=0
-        question_count=0
-        other_count=0
-        senders=()
+    # ── Step 1: Build a map of resolved message ids from status_update records ──
+    # Collect ids whose latest status is 'completed' or 'failed'.
+    # jq filters: select status_update records, keep only terminal statuses.
+    resolved_ids=""
+    if command -v jq &>/dev/null; then
+        resolved_ids=$(jq -r 'select(.type == "status_update" and (.status == "completed" or .status == "failed")) | .id' "$SOREN_MAILBOX" 2>/dev/null | sort -u || true)
+    fi
 
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            # Extract sender name (between ] and ->)
+    # ── Step 2: Count unread messages, excluding status_update records and resolved messages ──
+    mailbox_count=0
+    blocked_count=0
+    done_count=0
+    status_count=0
+    question_count=0
+    other_count=0
+    senders=()
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        # Try to parse as JSON to check if it's a status_update record
+        local_type=""
+        local_id=""
+        if command -v jq &>/dev/null; then
+            local_type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null || true)
+            local_id=$(echo "$line" | jq -r '.id // empty' 2>/dev/null || true)
+        fi
+
+        # Skip status_update records entirely — they are not messages
+        [[ "$local_type" == "status_update" ]] && continue
+
+        # Skip messages whose id appears in the resolved set (completed/failed)
+        if [[ -n "$local_id" ]] && [[ -n "$resolved_ids" ]]; then
+            if echo "$resolved_ids" | grep -qxF "$local_id"; then
+                continue
+            fi
+        fi
+
+        # This line is an actionable unread message — count it
+        ((mailbox_count++))
+
+        # Extract sender name
+        sender=""
+        if command -v jq &>/dev/null; then
+            sender=$(echo "$line" | jq -r '.from // empty' 2>/dev/null || true)
+        fi
+        if [[ -z "$sender" ]]; then
             sender=$(echo "$line" | sed -n 's/.*\] \([^:]*:[^ ]*\) ->.*/\1/p' | head -1)
             if [[ -z "$sender" ]]; then
                 sender=$(echo "$line" | sed -n 's/.*\] \([^ ]*\) ->.*/\1/p' | head -1)
             fi
-            [[ -n "$sender" ]] && senders+=("$sender")
+        fi
+        [[ -n "$sender" ]] && senders+=("$sender")
 
-            # Extract subject field, then match tag at the START of subject only
-            # JSON format: "subject":"[TAG] ..." → extract after "subject":"
-            # Plain text: -> target: [TAG] ... → extract after ": "
-            subject=""
+        # Extract subject field, then match tag at the START of subject only
+        subject=""
+        if command -v jq &>/dev/null; then
+            subject=$(echo "$line" | jq -r '.subject // empty' 2>/dev/null || true)
+        fi
+        if [[ -z "$subject" ]]; then
             if echo "$line" | grep -q '"subject"'; then
                 subject=$(echo "$line" | sed -n 's/.*"subject":"\([^"]*\)".*/\1/p')
             else
                 subject=$(echo "$line" | sed -n 's/.*-> [^:]*: *\(.*\)/\1/p')
             fi
+        fi
 
-            if echo "$subject" | grep -qE '^\[BLOCKED\]'; then
-                ((blocked_count++))
-            elif echo "$subject" | grep -qE '^\[DONE\]'; then
-                ((done_count++))
-            elif echo "$subject" | grep -qE '^\[STATUS\]'; then
-                ((status_count++))
-            elif echo "$subject" | grep -qE '^\[QUESTION\]'; then
-                ((question_count++))
-            else
-                ((other_count++))
-            fi
-        done < "$SOREN_MAILBOX"
+        if echo "$subject" | grep -qE '^\[BLOCKED\]'; then
+            ((blocked_count++))
+        elif echo "$subject" | grep -qE '^\[DONE\]'; then
+            ((done_count++))
+        elif echo "$subject" | grep -qE '^\[STATUS\]'; then
+            ((status_count++))
+        elif echo "$subject" | grep -qE '^\[QUESTION\]'; then
+            ((question_count++))
+        else
+            ((other_count++))
+        fi
+    done < "$SOREN_MAILBOX"
 
+    if ((mailbox_count > 0)); then
         # Build detail string
         details_parts=()
         ((blocked_count > 0)) && details_parts+=("${blocked_count} BLOCKED")

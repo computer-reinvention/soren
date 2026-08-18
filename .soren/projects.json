@@ -1,3 +1,43 @@
 {
-  "projects": []
+  "projects": [
+    {
+      "id": "trie",
+      "name": "trie",
+      "path": "/Users/pankajgarkoti/Desktop/code/trie",
+      "is_self": false,
+      "active": false,
+      "supervisor_agent_id": null,
+      "hooks_installed": true,
+      "added_at": "2026-08-18T16:26:47Z",
+      "git_remote": "git@github.com:computer-reinvention/trie.git",
+      "language": "python",
+      "description": ""
+    },
+    {
+      "id": "trie-app",
+      "name": "trie-app",
+      "path": "/Users/pankajgarkoti/Desktop/code/trie-app",
+      "is_self": false,
+      "active": false,
+      "supervisor_agent_id": null,
+      "hooks_installed": true,
+      "added_at": "2026-08-18T16:26:47Z",
+      "git_remote": "https://github.com/computer-reinvention/trie-app.git",
+      "language": "javascript",
+      "description": ""
+    },
+    {
+      "id": "trie-cloud",
+      "name": "trie-cloud",
+      "path": "/Users/pankajgarkoti/Desktop/code/trie-cloud",
+      "is_self": false,
+      "active": false,
+      "supervisor_agent_id": null,
+      "hooks_installed": true,
+      "added_at": "2026-08-18T16:26:47Z",
+      "git_remote": "https://github.com/computer-reinvention/trie-cloud.git",
+      "language": "python",
+      "description": ""
+    }
+  ]
 }

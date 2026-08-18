@@ -59,6 +59,8 @@ Thumbs.db
 .soren/.ui-check-flags/
 .soren/.reminder-sent-ids
 .soren/.auth-secret
+# Send queue (runtime message delivery state)
+.soren/send-queue/
 # Mailbox archives (historical, large)
 .soren/mailbox-archive/
 .soren/mailbox.archive-*
