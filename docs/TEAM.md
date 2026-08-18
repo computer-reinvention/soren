@@ -12,6 +12,8 @@ The team is designed around the principle that **specialized, adversarial review
 ## Current Roster
 
 > **EXAMPLE ROSTER — this template ships with no permanent workers.** The role context files for this roster are versioned in `templates/team/*.md` (one per agent ID, e.g. `templates/team/perm-frontend-role.md`). Bootstrap the team with `./soren.sh team up` — it copies each role file into `.soren/worker-contexts/` (runtime, gitignored) and spawns the workers with `--permanent`. Then update this table if you customize the roster.
+>
+> Each role file carries **machine-readable contract frontmatter** (agent_id, category, tier, domains, worktree/report policy) validated by `tools/contract` — `contract validate all` runs automatically before `team up` spawns workers, and `contract show <agent_id>` / `contract list` inspect the parsed contracts.
 
 ### Builders (3)
 

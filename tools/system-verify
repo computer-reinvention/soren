@@ -256,6 +256,23 @@ else
 fi
 
 #───────────────────────────────────────────────────────────────────────────────
+# 9. ROLE CONTRACTS — validate permanent-team contract frontmatter
+#───────────────────────────────────────────────────────────────────────────────
+section "Role Contracts"
+
+contract_tool="${SOREN_HOME}/tools/contract"
+if [[ -x "$contract_tool" ]]; then
+    if contract_out=$("$contract_tool" validate all 2>&1); then
+        pass "role contract frontmatter valid (tools/contract validate all)"
+    else
+        # Non-fatal: warn but don't fail the verification run.
+        echo -e "  ${YELLOW}⚠${NC} role contract validation failed — run 'tools/contract validate all' for details"
+    fi
+else
+    echo -e "  ${DIM}-${NC} tools/contract not found (skipped)"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
 # Summary
 #───────────────────────────────────────────────────────────────────────────────
 

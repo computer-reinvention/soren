@@ -246,6 +246,8 @@ cmd_team() {
                 full) roster=("${TEAM_FULL[@]}") ;;
                 *)    die "usage: soren.sh team up [core|full]" ;;
             esac
+            info "Validating role contracts..."
+            "${ROOT}/tools/contract" validate all || die "role contract validation failed — fix templates/team/*.md before spawning"
             warn "Spawning ${#roster[@]} permanent workers (opus tier, keep_awake — they stay resident)."
             mkdir -p "${ROOT}/.soren/worker-contexts"
             local id role_src role_dst spawned=0
