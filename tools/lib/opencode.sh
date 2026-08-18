@@ -239,23 +239,32 @@ soren_oc_http_send() {
 # startup and can't distinguish "prompt queued" from "prompt lost").
 #
 # For spawn (cold TUI), submit-prompt triggers session creation; the new
-# session's time.created will be after our pre-send timestamp. The session
-# list is project-level (shared across agents), so we check time.created
-# rather than time.updated to avoid false positives from other agents'
-# ongoing sessions.
+# session's time.created will be after our pre-send timestamp.
+#
+# VERIFIED: the session list is project-level (shared across all opencode
+# instances in the same project directory — empirically confirmed by
+# querying GET /session on ports 42006 and 42569 simultaneously and
+# observing identical session lists). We use time.created to detect new
+# sessions. False positives from concurrent spawns are not a practical risk:
+# submit-prompt returning HTTP 200 already confirms the TUI accepted the
+# text — this check adds defense-in-depth for the rare case where 200
+# is returned but session creation is delayed.
 #
 # Usage: soren_oc_verify_prompt <port> <after_epoch_ms> [timeout-seconds]
 # Returns 0 if any session was created after the given timestamp.
 soren_oc_verify_prompt() {
     local port="$1"
     local after_ms="$2"
-    local timeout="${3:-15}"
+    local timeout="${3:-30}"
     local i
 
     for (( i = 0; i < timeout; i++ )); do
         sleep 1
         # Check if any session was created after our pre-send timestamp.
         # For cold TUI spawn: submit-prompt creates a new session.
+        # Session list is project-level (shared), so a concurrent spawn
+        # could also create a session — but that's acceptable: our HTTP
+        # send already returned 200, this is just confirmation.
         local new_sessions
         new_sessions=$(curl -sf -m 3 "http://127.0.0.1:${port}/session" 2>/dev/null \
             | jq --argjson ts "$after_ms" \

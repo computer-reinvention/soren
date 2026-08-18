@@ -515,31 +515,35 @@ WTEOF
     fi
 
     # SPAWN PATH (cold TUI) — verify prompt receipt via the embedded server's
-    # session/message API. This provides positive confirmation that the prompt
-    # was received by checking for a user message created after our send
+    # session API. Checks for a new session created after our pre-send
     # timestamp. Unlike capture-pane polling (which is unreliable during TUI
-    # startup and can't distinguish "prompt queued" from "prompt lost"), this
-    # gives a definitive yes/no answer.
+    # startup), this provides positive confirmation.
     #
-    # If HTTP send reported success, verify via API (up to 15s).
-    # If HTTP send failed OR API verification fails, fall back to tmux send-keys.
+    # Timeout: 30s covers worst-case cold TUI startup (28s observed).
+    # If HTTP send failed OR API verification fails, fall back to tmux
+    # send-keys with a late-landing re-check to prevent double-submission.
     if $send_success; then
-        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 15; then
+        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 30; then
             info "Prompt receipt confirmed via session API"
         else
-            warn "HTTP send returned success but session API did not confirm receipt — falling back to tmux send-keys"
+            warn "HTTP send returned success but session API did not confirm receipt within 30s — falling back to tmux send-keys"
             send_success=false
         fi
     fi
 
     # Fallback: re-send via tmux send-keys.
-    # No double-submission guard needed here: the API verification above gives
-    # a definitive answer. If we reach this point, the prompt was NOT received
-    # (either HTTP send failed or API verification failed), so re-sending is safe.
+    # Late-landing guard: even though API verification timed out, the HTTP
+    # prompt may still land moments later (e.g. TUI finishes init at 31s).
+    # Sleep briefly and re-check before firing tmux to prevent double-send.
     if ! $send_success; then
-        tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
-        sleep 0.1
-        tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        sleep 2
+        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 1; then
+            info "HTTP prompt landed late — skipping tmux fallback"
+        else
+            tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
+            sleep 0.1
+            tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
+        fi
     fi
 
     # Link to task system if --task was provided
