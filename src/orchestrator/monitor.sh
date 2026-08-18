@@ -1397,9 +1397,17 @@ run_dashboard() {
             fi
         fi
 
-        # Router status - restart if dead (clean stale daemons first to prevent duplicates)
+        # Router status — adopt a live instance or restart if truly dead.
+        # Daemons are flock-single-instance: if one already runs (e.g. an
+        # orphan from a previous monitor), a respawn exits at the lock
+        # instantly and the watchdog loops forever on a phantom "death".
         if [[ -n "${ROUTER_PID:-}" ]] && kill -0 "$ROUTER_PID" 2>/dev/null; then
             printf "  Router:     ${GREEN}●${NC} running (PID: ${ROUTER_PID})\n"
+        elif live_pid=$(pgrep -f 'orchestrator/router\.sh' 2>/dev/null | head -1) && [[ -n "$live_pid" ]]; then
+            ROUTER_PID="$live_pid"
+            echo "$ROUTER_PID" > "${SOREN_PROJECT_ROOT}/.soren/run/router.pid" 2>/dev/null || true
+            printf "  Router:     ${GREEN}●${NC} adopted existing (PID: ${ROUTER_PID})\n"
+            log_status "DAEMON" "Adopted existing router (PID: ${ROUTER_PID})"
         else
             printf "  Router:     ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Router died (was PID: ${ROUTER_PID:-unknown}), restarting"
@@ -1407,9 +1415,14 @@ run_dashboard() {
             start_router || log_warn "Router restart failed"
         fi
 
-        # Journal nudge status - restart if dead
+        # Journal nudge status — adopt or restart
         if [[ -n "${JOURNAL_NUDGE_PID:-}" ]] && kill -0 "$JOURNAL_NUDGE_PID" 2>/dev/null; then
             printf "  J-Nudge:    ${GREEN}●${NC} running (PID: ${JOURNAL_NUDGE_PID})\n"
+        elif live_pid=$(pgrep -f 'orchestrator/journal-nudge\.sh' 2>/dev/null | head -1) && [[ -n "$live_pid" ]]; then
+            JOURNAL_NUDGE_PID="$live_pid"
+            echo "$JOURNAL_NUDGE_PID" > "${SOREN_PROJECT_ROOT}/.soren/run/journal-nudge.pid" 2>/dev/null || true
+            printf "  J-Nudge:    ${GREEN}●${NC} adopted existing (PID: ${JOURNAL_NUDGE_PID})\n"
+            log_status "DAEMON" "Adopted existing journal nudge (PID: ${JOURNAL_NUDGE_PID})"
         else
             printf "  J-Nudge:    ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Journal nudge died (was PID: ${JOURNAL_NUDGE_PID:-unknown}), restarting"
@@ -1417,9 +1430,14 @@ run_dashboard() {
             start_journal_nudge || log_warn "Journal nudge restart failed"
         fi
 
-        # Compact daemon status - restart if dead
+        # Compact daemon status — adopt or restart
         if [[ -n "${COMPACT_PID:-}" ]] && kill -0 "$COMPACT_PID" 2>/dev/null; then
             printf "  Compact:    ${GREEN}●${NC} running (PID: ${COMPACT_PID})\n"
+        elif live_pid=$(pgrep -f 'orchestrator/compact\.sh' 2>/dev/null | head -1) && [[ -n "$live_pid" ]]; then
+            COMPACT_PID="$live_pid"
+            echo "$COMPACT_PID" > "${SOREN_PROJECT_ROOT}/.soren/run/compact.pid" 2>/dev/null || true
+            printf "  Compact:    ${GREEN}●${NC} adopted existing (PID: ${COMPACT_PID})\n"
+            log_status "DAEMON" "Adopted existing compact daemon (PID: ${COMPACT_PID})"
         else
             printf "  Compact:    ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Compact daemon died (was PID: ${COMPACT_PID:-unknown}), restarting"
