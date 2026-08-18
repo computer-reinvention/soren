@@ -1411,7 +1411,7 @@ run_dashboard() {
         else
             printf "  Router:     ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Router died (was PID: ${ROUTER_PID:-unknown}), restarting"
-            cleanup_stale_daemons 2>/dev/null || true
+            cleanup_stale_daemons router 2>/dev/null || true
             start_router || log_warn "Router restart failed"
         fi
 
@@ -1426,7 +1426,7 @@ run_dashboard() {
         else
             printf "  J-Nudge:    ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Journal nudge died (was PID: ${JOURNAL_NUDGE_PID:-unknown}), restarting"
-            cleanup_stale_daemons 2>/dev/null || true
+            cleanup_stale_daemons journal-nudge 2>/dev/null || true
             start_journal_nudge || log_warn "Journal nudge restart failed"
         fi
 
@@ -1441,7 +1441,7 @@ run_dashboard() {
         else
             printf "  Compact:    ${YELLOW}●${NC} restarting...\n"
             log_status "DAEMON" "Compact daemon died (was PID: ${COMPACT_PID:-unknown}), restarting"
-            cleanup_stale_daemons 2>/dev/null || true
+            cleanup_stale_daemons compact 2>/dev/null || true
             start_compact_daemon || log_warn "Compact daemon restart failed"
         fi
 
@@ -2235,11 +2235,40 @@ attempt_recovery() {
 #───────────────────────────────────────────────────────────────────────────────
 
 # Kill stale daemon processes from previous monitor runs.
-# Reads PID files in .soren/run/, kills processes that aren't us,
-# then writes our own PID. Also kills any monitor.sh older than 1 hour.
+# Usage:
+#   cleanup_stale_daemons          — full cleanup: all pid files + stale processes (for startup/rollback)
+#   cleanup_stale_daemons <name>   — scoped cleanup: only the named daemon's pid file (for per-daemon restarts)
+#
+# The scoped mode prevents sibling-kill flap: restarting the router no longer
+# kills compact/journal-nudge and vice versa.
 cleanup_stale_daemons() {
+    local target_daemon="${1:-}"
     local run_dir="${SOREN_PROJECT_ROOT}/.soren/run"
     mkdir -p "$run_dir"
+
+    if [[ -n "$target_daemon" ]]; then
+        # ── Scoped cleanup: only the named daemon ──
+        local pid_file="$run_dir/${target_daemon}.pid"
+        if [[ -f "$pid_file" ]]; then
+            local old_pid
+            old_pid=$(cat "$pid_file" 2>/dev/null || echo "")
+            if [[ -n "$old_pid" && "$old_pid" != "$$" ]]; then
+                if kill -0 "$old_pid" 2>/dev/null; then
+                    _orch_log "[CLEANUP] Killing stale ${target_daemon} process (PID: ${old_pid})"
+                    kill "$old_pid" 2>/dev/null || true
+                    sleep 1
+                    if kill -0 "$old_pid" 2>/dev/null; then
+                        kill -9 "$old_pid" 2>/dev/null || true
+                    fi
+                fi
+            fi
+            rm -f "$pid_file"
+        fi
+        _orch_log "[CLEANUP] Scoped cleanup complete for ${target_daemon}"
+        return 0
+    fi
+
+    # ── Full cleanup: all pid files + stale processes (startup/rollback) ──
 
     # Kill processes tracked in PID files (except self)
     local pid_file
