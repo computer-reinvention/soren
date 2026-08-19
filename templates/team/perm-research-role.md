@@ -4,7 +4,7 @@ display_name: Nova
 category: support
 tier: opus
 domains: [research, websearch, documentation, synthesis]
-skills: [observability, data-wrangling]
+skills: [observability, data-wrangling, knowledge, memory]
 worktree_required: false
 protected_paths: forbidden
 report:

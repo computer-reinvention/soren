@@ -4,7 +4,7 @@ display_name: Bolt
 category: support
 tier: opus
 domains: [devops, ci, automation, git-hooks, pipelines]
-skills: [release-engineering, observability, gh-cli, tmux-ops]
+skills: [release-engineering, observability, gh-cli, tmux-ops, contract, knowledge, verification, worktree]
 worktree_required: false
 protected_paths: via-worktree
 report:

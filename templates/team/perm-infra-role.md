@@ -4,7 +4,7 @@ display_name: Sol
 category: builder
 tier: opus
 domains: [infra, bash, tmux, orchestration, recovery]
-skills: [concurrency-patterns, observability, release-engineering, gh-cli, tmux-ops, data-wrangling]
+skills: [concurrency-patterns, observability, release-engineering, gh-cli, tmux-ops, data-wrangling, contract, knowledge, verification, worktree]
 worktree_required: true
 protected_paths: via-worktree
 report:

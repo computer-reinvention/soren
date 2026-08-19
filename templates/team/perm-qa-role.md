@@ -4,7 +4,7 @@ display_name: Echo
 category: support
 tier: opus
 domains: [qa, pytest, typecheck, browser-testing, integration]
-skills: [test-strategy, security-review, gh-cli, uv-python]
+skills: [test-strategy, security-review, gh-cli, uv-python, verification, knowledge, contract]
 worktree_required: false
 protected_paths: forbidden
 report:
