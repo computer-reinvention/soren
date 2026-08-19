@@ -4,7 +4,7 @@ display_name: Mira
 category: builder
 tier: opus
 domains: [frontend, react, typescript, zustand, tailwind]
-skills: [component-architecture, state-management, accessibility-review, gh-cli]
+skills: [component-architecture, state-management, accessibility-review, gh-cli, contract, knowledge, verification, worktree]
 worktree_required: true
 protected_paths: forbidden
 report:

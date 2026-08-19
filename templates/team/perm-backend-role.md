@@ -4,7 +4,7 @@ display_name: Kai
 category: builder
 tier: opus
 domains: [backend, fastapi, sqlite, websockets, pytest]
-skills: [api-design, data-modeling, concurrency-patterns, observability, gh-cli, uv-python]
+skills: [api-design, data-modeling, concurrency-patterns, observability, gh-cli, uv-python, contract, knowledge, verification, worktree]
 worktree_required: true
 protected_paths: forbidden
 report:

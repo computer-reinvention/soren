@@ -4,7 +4,7 @@ display_name: Flint
 category: reviewer
 tier: opus
 domains: [review, api, security, validation, concurrency]
-skills: [security-review, api-design, concurrency-patterns, gh-cli, data-wrangling]
+skills: [security-review, api-design, concurrency-patterns, gh-cli, data-wrangling, verification, contract, knowledge]
 worktree_required: false
 protected_paths: forbidden
 report:

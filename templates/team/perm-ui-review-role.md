@@ -4,7 +4,7 @@ display_name: Sage
 category: reviewer
 tier: opus
 domains: [review, frontend, accessibility, responsive, dark-mode]
-skills: [accessibility-review, component-architecture, gh-cli]
+skills: [accessibility-review, component-architecture, gh-cli, verification, contract, knowledge]
 worktree_required: false
 protected_paths: forbidden
 report:
