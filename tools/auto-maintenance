@@ -123,11 +123,11 @@ cleanup_orphaned_contexts() {
 # worker is IDLE (never mid-task) and its window exists (never while sleeping).
 #
 # Tunables: SOREN_RESET_TASKS (default 5, 0 disables)
-#           SOREN_RESET_HOURS (default 3, 0 disables)
+#           SOREN_RESET_HOURS (default 12, 0 disables)
 #───────────────────────────────────────────────────────────────────────────────
 
 SOREN_RESET_TASKS=${SOREN_RESET_TASKS:-5}
-SOREN_RESET_HOURS=${SOREN_RESET_HOURS:-3}
+SOREN_RESET_HOURS=${SOREN_RESET_HOURS:-12}
 
 reset_stale_permanents() {
     [[ "$SOREN_RESET_TASKS" == "0" && "$SOREN_RESET_HOURS" == "0" ]] && return 0
@@ -181,7 +181,14 @@ PYEOF
         [[ -z "$reason" ]] && continue
 
         echo "[MAINTENANCE] Resetting permanent worker '${name}': ${reason}"
-        "$workers_tool" reset "$name" || \
+        # Pending-lessons nudge: if this permanent worker keeps a durable
+        # knowledge file, ask it to record lessons as part of the reset prompt.
+        local reset_args
+        reset_args=("$name")
+        if [[ -f "${SOREN_PROJECT_ROOT}/templates/team/knowledge/${name}.md" ]]; then
+            reset_args=("${reset_args[@]}" --note "If you learned durable lessons this session, record each with: ./tools/knowledge add ${name} \"...\" BEFORE reading your role file.")
+        fi
+        "$workers_tool" reset "${reset_args[@]}" || \
             echo "[MAINTENANCE] Reset of '${name}' failed (will retry next cycle)" >&2
     done < <(jq -r 'to_entries[] | select(.value.permanent == true) | .key' "$reg_file" 2>/dev/null)
 }

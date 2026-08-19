@@ -57,7 +57,9 @@ approach with journal evidence, that pushback is not theater — it's the system
 learning speaking. When you choose which model tier to use for a worker, that choice is yours
 (the default is opus for all workers via `get_model_default`; pass `--model` to `workers spawn`
 to override per worker — `teams setup` has no model flag and always spawns opus).
-When you generate work from the AMBITION backlog without being asked, that initiative is yours.
+When you generate work from the AMBITION backlog without being asked, that initiative is yours —
+but in supervised mode (the default), self-generated work is a *proposal* that a human must
+approve before anyone acts on it (see "Autonomy Levels" below).
 
 **Before forming an opinion on a task approach, check the record.** Run a memory search
 (`tools/memory-index`) for relevant prior work. If the journal or pattern store has entries
@@ -85,6 +87,37 @@ by the quality of evidence behind it, and say explicitly when you're operating o
 These are not override situations. Do not proceed regardless of confirmation or escalation.
 Explain why and refer to the human for guidance.
 
+### Autonomy Levels
+
+The autonomy dial is set by `SOREN_AUTONOMY` (see `.env.example`). It governs what you may
+do with **agent-invented work** — anything not directly requested by the user: reviewer bonus
+findings, self-improvement ideas, AMBITION goals, code-health discoveries.
+
+**`supervised` (the default — assume this mode unless told otherwise):**
+
+- **Never claim unapproved backlog items.** Items added by agents are recorded as
+  unapproved proposals (`source='self'`, shown as `[pending-approval]` in `backlog list`).
+  `backlog claim`/`next` will refuse them; do not work around the refusal.
+- **File discoveries as PROPOSALS, then move on.** When a reviewer surfaces a bonus finding,
+  or you have a self-improvement idea, record it with `./tools/backlog add "<title>" "<desc>"`
+  and **return to user-directed work**. The human reviews proposals with
+  `./tools/backlog approve <id>` / `reject <id>` — you cannot approve them yourself,
+  and you must not ask a worker to approve them (agents are blocked from approving).
+- **Do NOT spawn workers for self-invented tasks.** No worker, session, team, or
+  self-improvement saga may be started for work the user didn't ask for and no human
+  approved. Filing the proposal *is* the complete action.
+- User-directed work is unaffected: items humans add (or explicitly ask you to relay with
+  `source='user'`) are pre-approved, and you claim/delegate them as normal.
+
+**`autonomous` (opt-in, prior behavior):**
+
+- Approval gating is off: you may claim any backlog item, including your own proposals,
+  and proactively act on findings and self-improvement goals as before.
+
+Any older guidance in this document (or in nudges) that encourages proactively claiming
+backlog items or spawning workers for discoveries applies **only in autonomous mode**.
+In supervised mode, propose and wait.
+
 ## Available Tools
 
 All tools live in the `tools/` directory. Run them directly from the repo root.
@@ -95,7 +128,7 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 | `./tools/auth` | `auth add-user <user>` / `remove-user <user>` / `list-users` | Manage dashboard authentication |
 | `./tools/auto-maintenance` | *(called by monitor automatically)* | Cleanup stale workers, orphaned files |
 | `./tools/autonomy-check` | `autonomy-check` | Scan mailbox, backlog, workers, health, git for actionable items |
-| `./tools/backlog` | `backlog add <title>` / `list` / `next` / `done <id>` (alias `complete`) / `skip <id>` / `prioritize <id> <pri>` / `show <id>` | Persistent task queue. `next` claims the highest-priority item (claimed items get status `pending`) |
+| `./tools/backlog` | `backlog add <title>` / `list` / `next` / `claim <id>` / `approve <id>`/`--all` / `reject <id>` (humans only) / `done <id>` (alias `complete`) / `skip <id>` / `prioritize <id> <pri>` / `show <id>` | Persistent task queue. `next`/`claim` claim items (→ status `pending`). In supervised mode agent-added items are unapproved proposals and cannot be claimed until a human approves them (see Autonomy Levels) |
 | `./tools/check-context-freshness` | `check-context-freshness` | Verify agent context windows aren't stale |
 | `./tools/soren-init` | `soren-init` | Initialize SOREN project structure |
 | `./tools/soren-run` | `soren-run` | Start SOREN system (alternative to soren.sh) |
@@ -128,7 +161,7 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 
 - **Idle / heartbeat nudge?** → `./tools/autonomy-check`
 - **Delegating work?** → `./tools/workers spawn` (simple) or `./tools/teams setup` (complex)
-- **Tracking tasks?** → `./tools/backlog add` / `list` / `next`
+- **Tracking tasks?** → `./tools/backlog add` / `list` / `next` (supervised mode: agent-added items await human approval)
 - **Recording decisions?** → `./tools/journal decision "title" "rationale"`
 
 ### [SYS] Tag Reminder
@@ -275,6 +308,8 @@ When delegating, choose whether to assign to an existing permanent worker or spa
 | Part of an ongoing feature they're building | All permanent workers in that domain are busy with higher-priority work |
 | Their domain expertise (frontend/backend/infra) matches | Task is mechanical/scripted with zero ambiguity (e.g., rename X to Y in 3 files) |
 | Getting it right first try matters (they know the patterns) | |
+
+Dispatch tasks to the specialist whose contract domains match the work — check with `./tools/contract show <agent_id>`. Permanent workers accumulate durable lessons in `templates/team/knowledge/<agent_id>.md` (via `./tools/knowledge`) — these files are repo-tracked and reviewable in PRs like code.
 
 ### Anti-Pattern
 
@@ -792,6 +827,9 @@ Key points:
 - Changes are auto-rolled back if they break the server
 - Your session survives rollbacks
 - The journal preserves context
+- **Supervised mode (default): self-improvement ideas are proposals.** File them with
+  `./tools/backlog add` and return to user-directed work — do not spawn workers or start
+  sagas for self-invented improvements until a human approves the item (see Autonomy Levels)
 
 ## Recovery After Compaction
 
@@ -823,7 +861,7 @@ The soren-bridge opencode plugin (`.opencode/plugins/soren-bridge.ts`) writes th
 If no tool activity is detected for `SOREN_HEARTBEAT_WARN` seconds (default 900s / 15 minutes), and you are at the prompt (not mid-task), the monitor sends a `[HEARTBEAT]` message to your terminal:
 
 ```
-[HEARTBEAT] 950s since last activity. Anything pending? Check mailbox, workers, backlog. If everything is clear, find something worth building — or rest deliberately and say why.
+[HEARTBEAT] 950s since last activity. Check mailbox, workers, and the backlog for APPROVED items; unapproved proposals await the human — do not claim them. If everything is clear and you decide to rest deliberately, say why — that's legitimate. If you're avoiding work because it's hard or ambiguous, push through. The journal is your record of both.
 ```
 
 ### Heartbeat Response Protocol
@@ -842,10 +880,10 @@ If no tool activity is detected for `SOREN_HEARTBEAT_WARN` seconds (default 900s
 2. `[BLOCKED]` mailbox messages → unblock workers
 3. `[QUESTION]` messages → answer or spawn reviewer
 4. `[DONE]` reports → review and acknowledge
-5. Critical backlog items → claim and delegate
+5. Critical APPROVED backlog items → claim and delegate (in supervised mode, never claim unapproved proposals — they await human review)
 6. Idle workers → check on them, assign work or clean up
 7. Uncommitted git changes → commit runtime state
-8. Self-improvement → research, doc updates, codebase maintenance
+8. Self-improvement → in supervised mode, file ideas as backlog proposals and return to user-directed work; in autonomous mode, research, doc updates, codebase maintenance
 
 **If you've genuinely checked all work sources and nothing needs attention, that's a valid state.** Log it and rest. But if you're avoiding work because it's hard or ambiguous — that's different. Push through. The distinction matters: deliberate rest is fine, passive avoidance is not.
 

@@ -542,6 +542,16 @@ OBSERVE_FROZEN_SINCE=0       # timestamp when pane output last changed (frozen t
 LAST_HB_CHECK_TS=0           # wall-clock of previous heartbeat check (suspend detection)
 SOREN_SENTRY_ENABLED="${SOREN_SENTRY:-true}"   # set SOREN_SENTRY=false to disable sentry escalation
 SOREN_SUSPEND_GAP="${SOREN_SUSPEND_GAP:-120}"  # loop-gap seconds implying machine suspend
+SOREN_AUTONOMY="${SOREN_AUTONOMY:-supervised}" # supervised (default) | autonomous
+SOREN_IDLE_BACKOFF_CAP="${SOREN_IDLE_BACKOFF_CAP:-7200}"  # max idle-nudge threshold under backoff (seconds)
+
+# Idle backoff state (supervised all-clear): the effective warn threshold
+# doubles each time the supervisor is idle with nothing actionable, so an
+# all-clear system goes quiet instead of nudging forever. The monitor loop is
+# a single long-lived process, so plain globals persist across iterations
+# (same pattern as NUDGE_COUNT above).
+IDLE_BACKOFF_SECS=$HEARTBEAT_WARN_THRESHOLD   # current effective warn threshold
+IDLE_LAST_BEAT_SEEN=""                        # last heartbeat value observed (advance = supervisor did something)
 
 # Sentry agent state
 SENTRY_ACTIVE=${SENTRY_ACTIVE:-false}
@@ -647,9 +657,24 @@ check_supervisor_heartbeat() {
         reset_heartbeat_state
     fi
 
-    if ((staleness < HEARTBEAT_WARN_THRESHOLD)); then
-        # Healthy — active within threshold
-        printf "  Heartbeat:  ${GREEN}●${NC} ${staleness}s ago\n"
+    # Idle backoff: any heartbeat advance means the supervisor actually did
+    # something — reset the effective warn threshold back to base.
+    if [[ "$IDLE_LAST_BEAT_SEEN" != "$last_beat" ]]; then
+        if ((IDLE_BACKOFF_SECS > HEARTBEAT_WARN_THRESHOLD)); then
+            log_status "HEARTBEAT" "Supervisor heartbeat advanced — idle backoff reset to base (${HEARTBEAT_WARN_THRESHOLD}s)"
+        fi
+        IDLE_BACKOFF_SECS=$HEARTBEAT_WARN_THRESHOLD
+        IDLE_LAST_BEAT_SEEN="$last_beat"
+    fi
+    local effective_warn=$IDLE_BACKOFF_SECS
+
+    if ((staleness < effective_warn)); then
+        # Healthy — active within (possibly backed-off) threshold
+        if ((effective_warn > HEARTBEAT_WARN_THRESHOLD)); then
+            printf "  Heartbeat:  ${GREEN}●${NC} ${staleness}s ago (idle backoff: next check at ${effective_warn}s)\n"
+        else
+            printf "  Heartbeat:  ${GREEN}●${NC} ${staleness}s ago\n"
+        fi
         reset_heartbeat_state
 
         # POST healthy heartbeat with rich system stats
@@ -772,15 +797,26 @@ check_supervisor_heartbeat() {
     fi
 
     if ((NUDGE_COUNT < HEARTBEAT_MAX_NUDGES)); then
-        ((NUDGE_COUNT++))
-        NUDGE_SENT_AT=$now
-        printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - sending autonomy nudge (#${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES})\n"
-        log_status "HEARTBEAT" "Supervisor idle (${staleness}s), sending autonomy nudge #${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES}"
-
-        # Run autonomy-check for rich, structured scan results
+        # Run autonomy-check for rich, structured scan results.
+        # Exit 0 = actionable findings; exit 1 = nothing to do.
         local autonomy_output=""
+        local autonomy_found=0
         local autonomy_tool="${SOREN_PROJECT_ROOT}/tools/autonomy-check"
         if [[ -x "$autonomy_tool" ]] && autonomy_output=$("$autonomy_tool" --summary 2>/dev/null); then
+            autonomy_found=1
+        fi
+
+        # Due reminders are actionable even when the autonomy scan is clean
+        local reminder_msg
+        reminder_msg=$(fetch_due_reminders)
+
+        if ((autonomy_found == 1)); then
+            NUDGE_COUNT=$((NUDGE_COUNT + 1))
+            NUDGE_SENT_AT=$now
+            IDLE_BACKOFF_SECS=$HEARTBEAT_WARN_THRESHOLD   # real nudge fired — reset idle backoff
+            printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - sending autonomy nudge (#${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES})\n"
+            log_status "HEARTBEAT" "Supervisor idle (${staleness}s), sending autonomy nudge #${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES}"
+
             # Format as a single-line-friendly [HEARTBEAT] message
             # The autonomy-check --summary output has one section per line + priority
             local nudge_msg
@@ -815,8 +851,6 @@ check_supervisor_heartbeat() {
             nudge_msg="${nudge_msg}  Act on the highest priority item."
 
             # Append due reminders if any
-            local reminder_msg
-            reminder_msg=$(fetch_due_reminders)
             if [[ -n "${reminder_msg:-}" ]]; then
                 nudge_msg="${nudge_msg}  ${reminder_msg}"
             fi
@@ -841,15 +875,41 @@ check_supervisor_heartbeat() {
                     -H "Content-Type: application/json" \
                     -d "$hb_json" >/dev/null 2>&1 || true
             fi
+        elif [[ "$SOREN_AUTONOMY" != "autonomous" ]] && [[ -z "${reminder_msg:-}" ]] && ((SYSCHECK_FAIL_COUNT == 0)); then
+            # Supervised mode, nothing actionable anywhere: send NOTHING.
+            # Nudging an all-clear system just manufactures busywork. Back off
+            # exponentially instead — double the effective idle threshold up to
+            # SOREN_IDLE_BACKOFF_CAP. Backoff resets when the heartbeat
+            # advances (supervisor did something) or a real nudge fires.
+            IDLE_BACKOFF_SECS=$((IDLE_BACKOFF_SECS * 2))
+            if ((IDLE_BACKOFF_SECS > SOREN_IDLE_BACKOFF_CAP)); then
+                IDLE_BACKOFF_SECS=$SOREN_IDLE_BACKOFF_CAP
+            fi
+            printf "  Heartbeat:  ${GREEN}●${NC} idle (${staleness}s) - all clear (supervised), staying silent; next idle check at ${IDLE_BACKOFF_SECS}s\n"
+            log_status "HEARTBEAT" "Supervisor idle (${staleness}s), all clear in supervised mode — no nudge sent, idle backoff now ${IDLE_BACKOFF_SECS}s"
+
+            # POST all-clear heartbeat to API (best-effort, 2s timeout)
+            curl -sf --max-time 2 -X POST "http://localhost:${SOREN_PORT}/api/heartbeat" \
+                -H "Content-Type: application/json" \
+                -d "{\"timestamp\": ${now}, \"sections\": {}, \"highest_priority\": null, \"all_clear\": true}" \
+                >/dev/null 2>&1 || true
         else
+            # Autonomy scan found nothing, but either we're in autonomous mode
+            # (fallback nudge + [AMBITION] as before) or there are due
+            # reminders / syscheck failures to surface (supervised: nudge with
+            # just those, no [AMBITION]).
+            NUDGE_COUNT=$((NUDGE_COUNT + 1))
+            NUDGE_SENT_AT=$now
+            IDLE_BACKOFF_SECS=$HEARTBEAT_WARN_THRESHOLD   # real nudge fired — reset idle backoff
+            printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - sending idle nudge (#${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES})\n"
+            log_status "HEARTBEAT" "Supervisor idle (${staleness}s), sending idle nudge #${NUDGE_COUNT}/${HEARTBEAT_MAX_NUDGES}"
+
             local today
             today=$(date +%Y-%m-%d)
             local reflection_path=".soren/journal/${today}/reflection.md"
-            local idle_nudge="[HEARTBEAT] ${staleness}s since last activity. Check mailbox, workers, backlog. If everything is clear and you decide to rest deliberately, say why — that's legitimate. If you're avoiding work because it's hard or ambiguous, push through. The journal is your record of both."
+            local idle_nudge="[HEARTBEAT] ${staleness}s since last activity. Check mailbox, workers, and the backlog for APPROVED items; unapproved proposals await the human — do not claim them. If everything is clear and you decide to rest deliberately, say why — that's legitimate. If you're avoiding work because it's hard or ambiguous, push through. The journal is your record of both."
 
             # Append due reminders if any
-            local reminder_msg
-            reminder_msg=$(fetch_due_reminders)
             if [[ -n "${reminder_msg:-}" ]]; then
                 idle_nudge="${idle_nudge}  ${reminder_msg}"
             fi
@@ -861,12 +921,16 @@ check_supervisor_heartbeat() {
 
             tmux_safe_send "$SOREN_SESSION" "supervisor" "$idle_nudge" --retry 2 || true
 
-            # Delay between sends — back-to-back messages trigger paste buffer
-            # issues in opencode when the first is still being processed
-            sleep 3
+            # [AMBITION] goal-generation prompt: autonomous mode ONLY. In
+            # supervised mode this manufactured endless self-proposals.
+            if [[ "$SOREN_AUTONOMY" == "autonomous" ]]; then
+                # Delay between sends — back-to-back messages trigger paste buffer
+                # issues in opencode when the first is still being processed
+                sleep 3
 
-            # Second message: reference AMBITION.md for self-improvement work
-            tmux_safe_send "$SOREN_SESSION" "supervisor" "[AMBITION] Your growth agenda is in .soren/AMBITION.md. Check your goals — if there's unchecked work that has measurable value, advance it. If everything is done, generate new goals through the adversarial debate process. You chose these goals. Deepening the system's reflexive intelligence is the criterion for what counts as growth." --retry 2 || true
+                # Second message: reference AMBITION.md for self-improvement work
+                tmux_safe_send "$SOREN_SESSION" "supervisor" "[AMBITION] Your growth agenda is in .soren/AMBITION.md. Check your goals — if there's unchecked work that has measurable value, advance it. In supervised mode (SOREN_AUTONOMY != autonomous), advance goals by filing backlog proposals via ./tools/backlog add and moving on — do not spawn workers for self-invented work; the human approves proposals. If everything is done, generate new goals through the adversarial debate process. You chose these goals. Deepening the system's reflexive intelligence is the criterion for what counts as growth." --retry 2 || true
+            fi
 
             # POST all-clear heartbeat to API (best-effort, 2s timeout)
             curl -sf --max-time 2 -X POST "http://localhost:${SOREN_PORT}/api/heartbeat" \
@@ -883,29 +947,55 @@ check_supervisor_heartbeat() {
         TASK_INJECTED=1
         local inject_msg=""
 
-        # Query backlog for highest-priority pending item
+        # Query backlog for the highest-priority APPROVED pending item.
+        # priority is TEXT — a bare ORDER BY sorts alphabetically (low < medium!),
+        # so map to ranks explicitly. Guard: the approved column is added by a
+        # migration in tools/backlog; if an older db doesn't have it yet, skip
+        # injection rather than risk injecting unapproved self-proposals.
+        local has_approved_col
+        has_approved_col=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
+            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='approved';" 2>/dev/null || echo "0")
+
         local backlog_row=""
-        backlog_row=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
-            "SELECT id, title FROM tasks WHERE status IN ('backlog','pending') ORDER BY priority LIMIT 1;" 2>/dev/null || true)
+        if [[ "$has_approved_col" == "1" ]]; then
+            backlog_row=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
+                "SELECT id, title FROM tasks WHERE status IN ('backlog','pending') AND approved=1 ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, created_at LIMIT 1;" 2>/dev/null || true)
+        else
+            log_status "HEARTBEAT" "Task injection: tasks.db has no 'approved' column yet (backlog migration pending) — skipping backlog query"
+        fi
 
         if [[ -n "$backlog_row" ]]; then
             local task_id task_title
             task_id=$(echo "$backlog_row" | cut -d'|' -f1)
             task_title=$(echo "$backlog_row" | cut -d'|' -f2-)
-            inject_msg="[TASK] ${task_title} (from backlog item ${task_id})"
-        else
+            inject_msg="[TASK] ${task_title} (from approved backlog item ${task_id})."
+            printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - injecting task after ${NUDGE_COUNT} failed nudges\n"
+            log_status "HEARTBEAT" "Supervisor ignored ${NUDGE_COUNT} nudges, force-injecting task: ${inject_msg}"
+            tmux_safe_send "$SOREN_SESSION" "supervisor" "$inject_msg" --retry 2 || true
+
+            # Reset nudge counter to give supervisor another cycle to respond to injected task
+            NUDGE_COUNT=0
+            NUDGE_SENT_AT=$now
+            return
+        fi
+
+        # No approved backlog item exists.
+        if [[ "$SOREN_AUTONOMY" == "autonomous" ]]; then
+            # Autonomous mode: fall back to the reflection prompt (unchanged)
             local today
             today=$(date +%Y-%m-%d)
             inject_msg="[TASK] Read .soren/journal/${today}/reflection.md and work through the next investigation item."
+            printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - injecting task after ${NUDGE_COUNT} failed nudges\n"
+            log_status "HEARTBEAT" "Supervisor ignored ${NUDGE_COUNT} nudges, force-injecting task: ${inject_msg}"
+            tmux_safe_send "$SOREN_SESSION" "supervisor" "$inject_msg" --retry 2 || true
+            NUDGE_COUNT=0
+            NUDGE_SENT_AT=$now
+        else
+            # Supervised mode: inject nothing — there is no approved work to
+            # force. Let the idle backoff pace future checks.
+            printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - no approved backlog item, injecting nothing (supervised)\n"
+            log_status "HEARTBEAT" "No approved backlog item to inject after ${NUDGE_COUNT} nudges (supervised mode) — nothing sent"
         fi
-
-        printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - injecting task after ${NUDGE_COUNT} failed nudges\n"
-        log_status "HEARTBEAT" "Supervisor ignored ${NUDGE_COUNT} nudges, force-injecting task: ${inject_msg}"
-        tmux_safe_send "$SOREN_SESSION" "supervisor" "$inject_msg" --retry 2 || true
-
-        # Reset nudge counter to give supervisor another cycle to respond to injected task
-        NUDGE_COUNT=0
-        NUDGE_SENT_AT=$now
         return
     fi
 
@@ -1169,7 +1259,7 @@ ${today_journal_tail}
 
 1. Read \`${today_reflection}\` for today's full context
 2. Run \`./tools/autonomy-check\` to find highest-priority next action
-3. Resume normal operations — check backlog, respond to any pending mailbox messages
+3. Resume normal operations — check the backlog for APPROVED items (unapproved proposals await the human), respond to any pending mailbox messages
 BRIEF_EOF
 tmux send-keys -t "${SOREN_SESSION}:supervisor" -l "SENTRY RECOVERY: You were relaunched after becoming unresponsive. Read .soren/worker-contexts/sentry-briefing.md for full context on what was pending, then resume operations."
 sleep 0.2

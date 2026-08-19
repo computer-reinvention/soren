@@ -372,6 +372,23 @@ FORBIDDEN (high risk):
 └── /api/webhooks/health endpoint # Health check
 ```
 
+### The Autonomy Dial
+
+`SOREN_AUTONOMY` controls how much agent-invented work happens without a human
+(see `.env.example`):
+
+- **`supervised` (default)** — agent-added backlog items (`SOREN_AGENT=true`) are
+  recorded as unapproved proposals (`source='self'`, `approved=0`). They cannot be
+  claimed until a human runs `./tools/backlog approve <id>` (or `approve --all`);
+  agents can never approve or reject items. Discoveries — reviewer bonus findings,
+  self-improvement ideas — get *proposed*, not acted on, and no workers are spawned
+  for self-invented tasks.
+- **`autonomous`** — the prior ungated behavior: agents may claim any backlog item,
+  including their own proposals, and act on findings proactively.
+
+This keeps self-improvement available while ensuring a human stays in the loop for
+work the system invents for itself.
+
 ---
 
 ## The Immortal Supervisor Pattern

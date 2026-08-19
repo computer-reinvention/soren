@@ -29,7 +29,22 @@ IGNORE_PATTERNS=(
     'healthcheck'
     'GET /api/webhooks/health'
     'INFO:'
+    # Router delivery-retry lines are benign by design: the router logs
+    # "<ts> | FAILED | from -> to | window not found" and retries (router.sh:308-310).
+    'window not found'
+    '\| FAILED \|'
 )
+
+# Only these interrupt the supervisor via mailbox; other matches (plain
+# ERROR/FAILED) are appended to the digest file instead.
+CRITICAL_PATTERN='CRITICAL|Traceback|Exception'
+
+# Signature dedup: suppress re-alerts for the same normalized error line
+LOG_SIG_DEDUP_HOURS="${SOREN_LOG_ALERT_DEDUP_HOURS:-6}"
+LOG_SIG_DEDUP_SECS=$((LOG_SIG_DEDUP_HOURS * 3600))
+LOG_SIG_PRUNE_SECS=172800                        # drop signatures older than 48h
+AGENT_ALERT_COOLDOWN_SECS=$LOG_SIG_DEDUP_SECS    # per-agent discrepancy alert cooldown
+DIGEST_FILE="${SOREN_PROJECT_ROOT:-.}/.soren/run/log-digest.txt"
 
 # Cross-platform helpers
 get_inode() {
@@ -40,6 +55,68 @@ get_inode() {
 get_file_size() {
     local file="$1"
     stat -c %s "$file" 2>/dev/null || stat -f %z "$file" 2>/dev/null || echo "0"
+}
+
+# Normalize an error line into a stable signature: strip the leading
+# timestamp-ish prefix, collapse hex ids (>=8 chars) and numbers.
+normalize_error_line() {
+    printf '%s' "$1" | sed -E \
+        -e 's/^[^A-Za-z]+//' \
+        -e 's/[0-9a-fA-F]{8,}/<HEX>/g' \
+        -e 's/[0-9]+/<N>/g'
+}
+
+# md5 of a string (GNU md5sum / macOS md5)
+sig_hash() {
+    if command -v md5sum &>/dev/null; then
+        printf '%s' "$1" | md5sum | cut -d' ' -f1
+    else
+        printf '%s' "$1" | md5
+    fi
+}
+
+# Return 0 if this signature alerted within the dedup window
+sig_recently_seen() {
+    local log_file="$1" sig="$2"
+    local sig_file="${MARKER_DIR}/$(basename "$log_file").sigs"
+    [[ -f "$sig_file" ]] || return 1
+    local now h ts
+    now=$(date +%s)
+    while read -r h ts; do
+        [[ "$h" == "$sig" ]] || continue
+        [[ "$ts" =~ ^[0-9]+$ ]] || continue
+        if ((now - ts < LOG_SIG_DEDUP_SECS)); then
+            return 0
+        fi
+    done < "$sig_file"
+    return 1
+}
+
+# Record a signature (lines of "hash epoch"); opportunistically prune
+# entries older than LOG_SIG_PRUNE_SECS and stale duplicates of this hash.
+sig_record() {
+    local log_file="$1" sig="$2"
+    mkdir -p "$MARKER_DIR"
+    local sig_file="${MARKER_DIR}/$(basename "$log_file").sigs"
+    local now h ts
+    now=$(date +%s)
+    if [[ -f "$sig_file" ]]; then
+        local tmp_file="${sig_file}.tmp"
+        : > "$tmp_file"
+        while read -r h ts; do
+            [[ -n "$h" ]] || continue
+            [[ "$ts" =~ ^[0-9]+$ ]] || continue
+            if ((now - ts > LOG_SIG_PRUNE_SECS)); then
+                continue
+            fi
+            if [[ "$h" == "$sig" ]]; then
+                continue
+            fi
+            echo "$h $ts" >> "$tmp_file"
+        done < "$sig_file"
+        mv "$tmp_file" "$sig_file"
+    fi
+    echo "$sig $now" >> "$sig_file"
 }
 
 get_marker() {
@@ -116,13 +193,43 @@ analyze_log() {
     errors=$(echo "$new_content" | grep -E "$error_regex" 2>/dev/null | grep -vE "$ignore_regex" 2>/dev/null || true)
 
     if [[ -n "$errors" ]]; then
-        local error_count
-        error_count=$(echo "$errors" | wc -l | xargs)
+        # Signature dedup + severity routing:
+        #   critical (CRITICAL/Traceback/Exception) → mailbox alert (interrupts supervisor)
+        #   everything else (plain ERROR/FAILED)    → digest file, no mailbox send
+        local critical_lines="" digest_lines=""
+        local err_line norm_line sig
+        while IFS= read -r err_line; do
+            [[ -z "$err_line" ]] && continue
+            norm_line=$(normalize_error_line "$err_line")
+            sig=$(sig_hash "$norm_line")
+            if sig_recently_seen "$log_file" "$sig"; then
+                continue
+            fi
+            sig_record "$log_file" "$sig"
+            if echo "$err_line" | grep -qE "$CRITICAL_PATTERN"; then
+                critical_lines="${critical_lines}${err_line}"$'\n'
+            else
+                digest_lines="${digest_lines}${err_line}"$'\n'
+            fi
+        done <<< "$errors"
 
-        if should_alert "$log_file"; then
+        if [[ -n "$digest_lines" ]]; then
+            local digest_ts digest_count
+            digest_ts=$(date -Iseconds)
+            digest_count=$(printf '%s' "$digest_lines" | wc -l | xargs)
+            mkdir -p "$(dirname "$DIGEST_FILE")"
+            printf '%s' "$digest_lines" | while IFS= read -r dline; do
+                echo "[${digest_ts}] $(basename "$log_file"): ${dline}" >> "$DIGEST_FILE"
+            done
+            log_info "Routed $digest_count non-critical error(s) from $(basename "$log_file") to digest"
+        fi
+
+        if [[ -n "$critical_lines" ]] && should_alert "$log_file"; then
+            local error_count
+            error_count=$(printf '%s' "$critical_lines" | wc -l | xargs)
             local timestamp
             timestamp=$(date -Iseconds)
-            local summary="[LOG ALERT] $(basename "$log_file"): ${error_count} errors detected"
+            local summary="[LOG ALERT] $(basename "$log_file"): ${error_count} critical errors detected"
             local alert_file=".soren/journal/$(date +%Y-%m-%d)/attachments/log-alert-$(date +%H%M%S).md"
             mkdir -p "$(dirname "$alert_file")"
 
@@ -135,13 +242,13 @@ analyze_log() {
 ## Errors Found
 
 \`\`\`
-$errors
+$critical_lines
 \`\`\`
 EOF
             mailbox_lock
             jq -cn --arg id "$(uuidgen | tr '[:upper:]' '[:lower:]')" --arg ts "$timestamp" --arg from "system:log-watcher" --arg to "soren:supervisor" --arg subject "$summary" --arg body "$alert_file" --arg status "submitted" '{id:$id,ts:$ts,from:$from,to:$to,subject:$subject,body:$body,status:$status}' >> "$SOREN_MAILBOX"
             mailbox_unlock
-            log_info "Reported $error_count errors from $(basename "$log_file")"
+            log_info "Reported $error_count critical errors from $(basename "$log_file")"
         fi
     fi
 
@@ -174,6 +281,20 @@ check_agent_discrepancies() {
         [[ "$agent_status" == "SLEEPING" ]] && continue
 
         if ! echo "$actual_windows" | grep -q "^${window_name}$"; then
+            # Per-agent alert cooldown — a stale registry entry alerts once
+            # per cooldown window, not on every cycle forever.
+            local agent_key cooldown_file now_ts last_ts
+            agent_key=$(printf '%s' "$agent" | tr -c 'A-Za-z0-9._-' '_')
+            cooldown_file="${MARKER_DIR}/agent-${agent_key}.cooldown"
+            now_ts=$(date +%s)
+            last_ts=$(cat "$cooldown_file" 2>/dev/null || echo 0)
+            [[ "$last_ts" =~ ^[0-9]+$ ]] || last_ts=0
+            if ((now_ts - last_ts < AGENT_ALERT_COOLDOWN_SECS)); then
+                continue
+            fi
+            mkdir -p "$MARKER_DIR"
+            echo "$now_ts" > "$cooldown_file"
+
             local timestamp
             timestamp=$(date -Iseconds)
             mailbox_lock
@@ -197,7 +318,7 @@ main() {
             check_agent_discrepancies
         fi
 
-        ((check_count++))
+        check_count=$((check_count + 1))
         sleep "$CHECK_INTERVAL"
     done
 }
