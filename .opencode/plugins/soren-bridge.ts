@@ -20,6 +20,7 @@
  */
 import type { Plugin } from "@opencode-ai/plugin"
 import { appendFile } from "node:fs/promises"
+import { readFileSync, statSync } from "node:fs"
 
 const env = process.env
 const ACTIVE = env.SOREN_AGENT === "true" && !!env.SOREN_AGENT_NAME
@@ -45,6 +46,46 @@ const PROTECTED_PATHS = [
 ]
 
 let cwdForResolve = SOREN_HOME // refined with the plugin's directory at init
+
+// ── Per-agent role contracts (compiled by `tools/contract compile`) ─────────
+// .soren/run/contracts.json is the runtime source of truth for role policy.
+// Loaded lazily with mtime-based cache invalidation. A missing or unparseable
+// file fails OPEN: agents fall back to the uniform policy (never crash).
+const CONTRACTS_PATH = `${SOREN_HOME}/.soren/run/contracts.json`
+type RoleContract = { protected_paths?: string; [k: string]: unknown }
+let contractsCache: { mtimeMs: number; data: Record<string, RoleContract> | null } | null = null
+
+function loadContracts(): Record<string, RoleContract> | null {
+  try {
+    const st = statSync(CONTRACTS_PATH)
+    if (contractsCache && contractsCache.mtimeMs === st.mtimeMs) return contractsCache.data
+    const parsed = JSON.parse(readFileSync(CONTRACTS_PATH, "utf8"))
+    const data =
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, RoleContract>)
+        : null
+    contractsCache = { mtimeMs: st.mtimeMs, data }
+    return data
+  } catch {
+    contractsCache = null
+    return null
+  }
+}
+
+/** True when this agent's compiled contract says protected_paths: "forbidden". */
+function contractForbidsProtected(): boolean {
+  const contracts = loadContracts()
+  if (!contracts) return false
+  const c = contracts[AGENT]
+  return !!c && typeof c === "object" && c.protected_paths === "forbidden"
+}
+
+/** Path is a protected path inside this agent's worktree copy. */
+function isProtectedWorktreePath(abs: string): boolean {
+  if (!WORKTREE || !abs.startsWith(WORKTREE + "/")) return false
+  const rel = abs.slice(WORKTREE.length + 1)
+  return PROTECTED_PATHS.some((p) => (p.endsWith("/") ? rel.startsWith(p) : rel === p))
+}
 
 function resolvePath(p: string): string {
   if (!p) return ""
@@ -219,6 +260,19 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
           )
         }
 
+        // Layer 2b: role-contract rule. Agents whose compiled contract
+        // (.soren/run/contracts.json) declares protected_paths: "forbidden"
+        // may not touch protected paths EVEN INSIDE their worktree. Agents
+        // without a contract entry keep the uniform policy above.
+        if (abs && isProtectedWorktreePath(abs) && contractForbidsProtected()) {
+          throw new Error(
+            `[SOREN] Contract rule violated (protected_paths: forbidden): the role contract for '${AGENT}' ` +
+              `forbids editing recovery-critical path ${abs.slice(WORKTREE.length + 1)} even inside a worktree. ` +
+              `Hand this change to an agent whose contract allows via-worktree edits. ` +
+              `Manual override: SOREN_PROTECTED_OVERRIDE=1.`,
+          )
+        }
+
         // Layer 3: supervisor edits only its memory files
         if (AGENT === "supervisor") {
           const allowed =
@@ -256,6 +310,16 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
           throw new Error(
             `[SOREN] Protected path: this command appears to modify recovery-critical files in the live checkout. ` +
               `Work in a worktree (workers spawn --worktree); the supervisor merges after review. ` +
+              `Manual override: SOREN_PROTECTED_OVERRIDE=1.`,
+          )
+        }
+        // Contract rule: protected_paths "forbidden" agents lose the
+        // worktree exemption for write-shaped commands on protected paths.
+        if (contractForbidsProtected()) {
+          throw new Error(
+            `[SOREN] Contract rule violated (protected_paths: forbidden): the role contract for '${AGENT}' ` +
+              `forbids modifying recovery-critical paths even inside a worktree — this command appears to do so. ` +
+              `Hand this change to an agent whose contract allows via-worktree edits. ` +
               `Manual override: SOREN_PROTECTED_OVERRIDE=1.`,
           )
         }

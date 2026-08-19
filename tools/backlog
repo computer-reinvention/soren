@@ -10,11 +10,19 @@
 #   backlog add "<title>" "<desc>" [pri] [src]    - Add with description
 #   backlog list                                  - Show backlog items by priority
 #   backlog next                                  - Claim highest-priority backlog item
+#   backlog claim <id>                            - Claim a specific backlog item
+#   backlog approve <id> | --all                  - Approve item(s) (humans only)
+#   backlog reject <id>                           - Reject item (humans only)
 #   backlog done <id> [remarks]                   - Mark item done with optional remarks
 #   backlog complete <id> [remarks]               - Alias for done
 #   backlog skip <id>                             - Mark item done (skipped)
 #   backlog prioritize <id> <priority>            - Change priority (1-5)
 #   backlog show <id>                             - Show full details
+#
+# Autonomy gating (SOREN_AUTONOMY=supervised|autonomous, default supervised):
+#   Agent-added items (SOREN_AGENT=true) are proposals (approved=0). In
+#   supervised mode they cannot be claimed until a human approves them.
+#   Set SOREN_AUTONOMY=autonomous to restore ungated behavior.
 #
 # Storage: .soren/tasks.db (SQLite — tasks with status='backlog')
 # Designed for supervisor agents to maintain autonomous work queues.
@@ -52,6 +60,24 @@ ensure_db() {
     if ! sqlite3 "$DB" "SELECT remarks FROM tasks LIMIT 0;" 2>/dev/null; then
         sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN remarks TEXT DEFAULT '';" 2>/dev/null || true
     fi
+    # Migrate: add approved column if missing (autonomy gating).
+    # Existing user-sourced items are grandfathered as approved.
+    local has_approved
+    has_approved=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='approved';")
+    if [[ "$has_approved" == "0" ]]; then
+        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN approved INTEGER DEFAULT 0;"
+        sqlite3 "$DB" "UPDATE tasks SET approved=1 WHERE source='user';"
+    fi
+}
+
+# True when running inside an agent context (supervisor/worker/sentry).
+is_agent() {
+    [[ "${SOREN_AGENT:-}" == "true" ]]
+}
+
+# True when autonomy gating is active (default: supervised).
+is_supervised() {
+    [[ "${SOREN_AUTONOMY:-supervised}" != "autonomous" ]]
 }
 
 gen_uuid() {
@@ -95,6 +121,7 @@ status_label() {
         backlog)     echo -e "${CYAN}backlog${NC}" ;;
         pending)     echo -e "${YELLOW}pending${NC}" ;;
         done)        echo -e "${GREEN}done${NC}" ;;
+        rejected)    echo -e "${RED}rejected${NC}" ;;
         *)           echo "$1" ;;
     esac
 }
@@ -133,7 +160,7 @@ cmd_add() {
     [[ -z "$title" ]] && die "usage: backlog add \"<title>\" [priority 1-5]"
     shift
 
-    local description="" priority_num="3" source="system"
+    local description="" priority_num="3" source=""
 
     # Parse remaining args: if next is a number 1-5, it's priority.
     # Otherwise it's a description (legacy format: "<desc>" [pri] [src]).
@@ -155,6 +182,18 @@ cmd_add() {
         fi
     fi
 
+    # Autonomy gating: agent-invented items are unapproved proposals.
+    # Agents may only pass source='user' when relaying an explicit user request.
+    local approved=1
+    if is_agent; then
+        if [[ "$source" != "user" ]]; then
+            source="self"
+            approved=0
+        fi
+    else
+        [[ -z "$source" ]] && source="user"
+    fi
+
     ensure_db
 
     local id priority_text now
@@ -162,17 +201,20 @@ cmd_add() {
     priority_text=$(pri_num_to_text "$priority_num")
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, status, priority, source, created_at, updated_at)
-        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', '$now', '$now');"
+    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, status, priority, source, approved, created_at, updated_at)
+        VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', $approved, '$now', '$now');"
 
     ok "Added $(short_id "$id"): ${title} ($(priority_label "$priority_num"))"
+    if [[ "$approved" == "0" ]]; then
+        echo -e "${DIM}pending-approval — a human must run: ./tools/backlog approve $(short_id "$id")${NC}"
+    fi
 }
 
 cmd_list() {
     ensure_db
 
     local rows
-    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, source, title FROM tasks WHERE status='backlog' ORDER BY
+    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, source, approved, title FROM tasks WHERE status='backlog' ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -191,26 +233,61 @@ cmd_list() {
     printf "${DIM}%-10s  %-12s  %-12s  %-14s  %s${NC}\n" "ID" "PRIORITY" "STATUS" "SOURCE" "TITLE"
     echo -e "${DIM}──────────  ────────────  ────────────  ──────────────  ─────────────────────────${NC}"
 
-    local count=0
-    while IFS="$SEP" read -r id priority source title; do
-        printf "%-10s  %-12b  %-12b  %-14s  %s\n" \
+    local count=0 pending_count=0
+    while IFS="$SEP" read -r id priority source approved title; do
+        local approval_tag=""
+        if [[ "$approved" != "1" ]]; then
+            approval_tag=" ${DIM}[pending-approval]${NC}"
+            ((pending_count++)) || true
+        fi
+        printf "%-10s  %-12b  %-12b  %-14s  %s%b\n" \
             "$(short_id "$id")" \
             "$(priority_label "$priority")" \
             "$(status_label "backlog")" \
             "$source" \
-            "$title"
+            "$title" \
+            "$approval_tag"
         ((count++))
     done <<< "$rows"
 
     echo ""
     echo -e "${DIM}${count} item(s)${NC}"
+    if ((pending_count > 0)); then
+        echo -e "${DIM}${pending_count} awaiting human approval — ./tools/backlog approve <id> (or --all)${NC}"
+    fi
+}
+
+# Shared claim transition: backlog → pending (with history entry)
+do_claim() {
+    local id="$1" title="$2" description="$3" priority="$4"
+
+    local now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    sqlite3 "$DB" "UPDATE tasks SET status='pending', updated_at='$now' WHERE id='$id';"
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', 'backlog', 'pending', '$now');"
+
+    echo -e "${BOLD}Claimed item: $(short_id "$id")${NC}"
+    echo -e "  Title:    ${title}"
+    echo -e "  Priority: $(priority_label "$priority")"
+    if [[ -n "$description" ]]; then
+        echo -e "  Description: ${description}"
+    fi
+    echo ""
+    ok "Marked $(short_id "$id") as pending"
 }
 
 cmd_next() {
     ensure_db
 
+    # In supervised mode only approved items are claimable.
+    local approval_filter=""
+    if is_supervised; then
+        approval_filter="AND approved=1"
+    fi
+
     local row
-    row=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, title, description, priority FROM tasks WHERE status='backlog' ORDER BY
+    row=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, title, description, priority FROM tasks WHERE status='backlog' $approval_filter ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -220,6 +297,13 @@ cmd_next() {
         END, created_at LIMIT 1;")
 
     if [[ -z "$row" ]]; then
+        local unapproved=0
+        if is_supervised; then
+            unapproved=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
+        fi
+        if ((unapproved > 0)); then
+            die "no approved backlog items — ${unapproved} item(s) awaiting human approval — run: ./tools/backlog approve <id> (or set SOREN_AUTONOMY=autonomous)"
+        fi
         echo -e "${DIM}No backlog items${NC}"
         return 1
     fi
@@ -227,20 +311,90 @@ cmd_next() {
     local id title description priority
     IFS="$SEP" read -r id title description priority <<< "$row"
 
+    do_claim "$id" "$title" "$description" "$priority"
+}
+
+cmd_claim() {
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog claim <id>"
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    local status
+    status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    [[ "$status" == "backlog" ]] || die "item $(short_id "$id") is not in the backlog (status: ${status})"
+
+    # In supervised mode, unapproved proposals cannot be claimed.
+    if is_supervised; then
+        local approved
+        approved=$(sqlite3 "$DB" "SELECT approved FROM tasks WHERE id='$id';")
+        if [[ "$approved" != "1" ]]; then
+            die "item $(short_id "$id") awaiting human approval — run: ./tools/backlog approve $(short_id "$id") (or set SOREN_AUTONOMY=autonomous)"
+        fi
+    fi
+
+    local title description priority
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    description=$(sqlite3 "$DB" "SELECT description FROM tasks WHERE id='$id';")
+    priority=$(sqlite3 "$DB" "SELECT priority FROM tasks WHERE id='$id';")
+
+    do_claim "$id" "$title" "$description" "$priority"
+}
+
+cmd_approve() {
+    if is_agent; then
+        die "agents cannot approve backlog items"
+    fi
+
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog approve <id> | backlog approve --all"
+
+    ensure_db
+
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "UPDATE tasks SET status='pending', updated_at='$now' WHERE id='$id';"
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', 'backlog', 'pending', '$now');"
-
-    echo -e "${BOLD}Next item: $(short_id "$id")${NC}"
-    echo -e "  Title:    ${title}"
-    echo -e "  Priority: $(priority_label "$priority")"
-    if [[ -n "$description" ]]; then
-        echo -e "  Description: ${description}"
+    if [[ "$id_input" == "--all" ]]; then
+        local count
+        count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
+        sqlite3 "$DB" "UPDATE tasks SET approved=1, updated_at='$now' WHERE status='backlog' AND approved=0;"
+        ok "Approved ${count} backlog item(s)"
+        return
     fi
-    echo ""
-    ok "Marked $(short_id "$id") as pending"
+
+    local id
+    id=$(resolve_id "$id_input")
+    sqlite3 "$DB" "UPDATE tasks SET approved=1, updated_at='$now' WHERE id='$id';"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Approved $(short_id "$id"): ${title}"
+}
+
+cmd_reject() {
+    if is_agent; then
+        die "agents cannot approve backlog items"
+    fi
+
+    local id_input="${1:-}"
+    [[ -z "$id_input" ]] && die "usage: backlog reject <id>"
+
+    ensure_db
+    local id
+    id=$(resolve_id "$id_input")
+
+    local now old_status
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+
+    sqlite3 "$DB" "UPDATE tasks SET status='rejected', approved=0, updated_at='$now' WHERE id='$id';"
+    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'rejected', '$now');"
+
+    local title
+    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    ok "Rejected $(short_id "$id"): ${title}"
 }
 
 cmd_done() {
@@ -326,12 +480,13 @@ cmd_show() {
 
     _qf() { sqlite3 "$DB" "SELECT $1 FROM tasks WHERE id='$id';"; }
 
-    local title description priority status source remarks created_at completed_at
+    local title description priority status source approved remarks created_at completed_at
     title=$(_qf "title")
     description=$(_qf "description")
     priority=$(_qf "priority")
     status=$(_qf "status")
     source=$(_qf "source")
+    approved=$(_qf "approved")
     remarks=$(_qf "remarks")
     created_at=$(_qf "created_at")
     completed_at=$(_qf "completed_at")
@@ -345,6 +500,11 @@ cmd_show() {
     echo -e "  Priority:    $(priority_label "$priority")"
     echo -e "  Status:      $(status_label "$status")"
     echo -e "  Source:      ${source}"
+    if [[ "$approved" == "1" ]]; then
+        echo -e "  Approved:    ${GREEN}yes${NC}"
+    else
+        echo -e "  Approved:    ${DIM}no (pending-approval)${NC}"
+    fi
     echo -e "  Created:     ${created_at}"
     if [[ -n "$completed_at" ]]; then
         echo -e "  Completed:   ${completed_at}"
@@ -365,7 +525,11 @@ COMMANDS:
     add "<title>" [priority] [src]       Add item (priority 1-5, source: user|system|self)
     add "<title>" "<desc>" [pri] [src]   Add with description
     list                                 List backlog items, sorted by priority
-    next                                 Claim highest-priority item (→ pending)
+                                         (unapproved items show a pending-approval tag)
+    next                                 Claim highest-priority claimable item (→ pending)
+    claim <id>                           Claim a specific item (→ pending)
+    approve <id> | --all                 Approve proposal(s) for claiming (humans only)
+    reject <id>                          Reject a proposal (→ rejected; humans only)
     done <id> [remarks]                  Mark item done with optional remarks
     complete <id> [remarks]              Alias for done
     skip <id>                            Mark item done (skipped)
@@ -377,11 +541,23 @@ IDS:
     Items use UUID identifiers. You can use a prefix (e.g. first 8 chars)
     as long as it uniquely identifies the item.
 
+AUTONOMY GATING:
+    Items added by agents (SOREN_AGENT=true) are recorded as source='self'
+    proposals with approved=0. In supervised mode (SOREN_AUTONOMY unset or
+    != autonomous, the default) unapproved items cannot be claimed until a
+    human runs 'backlog approve <id>' (or 'approve --all'). Agents can never
+    approve or reject items. Items added by humans default to source='user'
+    and are pre-approved. SOREN_AUTONOMY=autonomous disables claim gating.
+
 EXAMPLES:
     backlog add "Fix auth bug" 1
     backlog add "Run test suite" "Full pytest run" 3
     backlog list
     backlog next
+    backlog claim 7966ee6a
+    backlog approve 7966ee6a
+    backlog approve --all
+    backlog reject 368208bc
     backlog done 7966ee6a "Fixed in commit abc123"
     backlog skip 368208bc
     backlog prioritize 206c8978 1
@@ -389,10 +565,12 @@ EXAMPLES:
 
 STORAGE:
     .soren/tasks.db — tasks with status='backlog' in the unified tasks table.
-    Claimed items (via next) transition to status='pending'.
+    Claimed items (via next/claim) transition to status='pending'.
 
 ENVIRONMENT:
-    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+    SOREN_HOME       Project root (default: git rev-parse --show-toplevel)
+    SOREN_AUTONOMY   supervised (default) | autonomous — claim gating mode
+    SOREN_AGENT      set to 'true' in agent shells; forces proposals on add
 EOF
 }
 
@@ -408,6 +586,9 @@ main() {
         add)        cmd_add "$@" ;;
         list)       cmd_list "$@" ;;
         next)       cmd_next "$@" ;;
+        claim)      cmd_claim "$@" ;;
+        approve)    cmd_approve "$@" ;;
+        reject)     cmd_reject "$@" ;;
         done)       cmd_done "$@" ;;
         complete)   cmd_done "$@" ;;
         skip)       cmd_skip "$@" ;;

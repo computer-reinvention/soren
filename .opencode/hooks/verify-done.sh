@@ -85,23 +85,64 @@ log_verify() {
 }
 
 # --- Retry tracking for auto-fix ---
-RETRY_DIR="$PROJECT_ROOT/.soren/.fix-retries"
+# Keyed by agent AND a task discriminator (TASK_KEY) so one flaky task can't
+# burn another task's retry budget, and REJECT/FIX cycles stay bounded per
+# task instead of resetting across rounds.
+RETRY_DIR="${RETRY_DIR:-$PROJECT_ROOT/.soren/.fix-retries}"
 MAX_RETRIES=2
 mkdir -p "$RETRY_DIR" 2>/dev/null || true
 
+# Set in the background subshell after commit-hash extraction.
+TASK_KEY=""
+
+_md5_stdin() {
+    # Portable md5-of-stdin: md5sum (Linux), md5 -q (macOS), openssl fallback
+    if command -v md5sum >/dev/null 2>&1; then
+        md5sum | awk '{print $1}'
+    elif command -v md5 >/dev/null 2>&1; then
+        md5 -q
+    else
+        openssl md5 2>/dev/null | awk '{print $NF}'
+    fi
+}
+
+compute_task_key() {
+    # $1 = commit hash (may be empty). Prefer the reported commit hash as the
+    # task discriminator; otherwise md5 of the normalized [DONE] summary
+    # (first line, lowercased, whitespace-squeezed).
+    if [[ -n "${1:-}" ]]; then
+        echo "$1"
+    else
+        printf '%s' "$done_msg" | head -n 1 \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -s '[:space:]' ' ' \
+            | sed 's/^ *//;s/ *$//' \
+            | _md5_stdin
+    fi
+}
+
+retry_file() {
+    echo "$RETRY_DIR/${agent}-${TASK_KEY:-default}"
+}
+
+escalation_latch() {
+    echo "$(retry_file).escalated"
+}
+
 get_retry_count() {
-    local file="$RETRY_DIR/${agent}"
+    local file
+    file=$(retry_file)
     if [[ -f "$file" ]]; then cat "$file"; else echo "0"; fi
 }
 
 increment_retry() {
     local count
     count=$(get_retry_count)
-    echo $((count + 1)) > "$RETRY_DIR/${agent}"
+    echo $((count + 1)) > "$(retry_file)"
 }
 
 clear_retry() {
-    rm -f "$RETRY_DIR/${agent}"
+    rm -f "$(retry_file)" "$(escalation_latch)"
 }
 
 should_auto_fix() {
@@ -133,6 +174,11 @@ escalate_to_supervisor() {
         "$details" \
         2>/dev/null || true
     log_verify "ESCALATED to supervisor after $count failed auto-fix attempts: $failure_type"
+    # Escalation latch: while this file exists, further [DONE] reports for the
+    # same task key get NO auto FIX-REQUEST (just a status.log line). Cleared
+    # by the supervisor/human deleting it, or by `tools/workers send <agent>`
+    # (a new dispatch means the supervisor intervened).
+    touch "$(escalation_latch)" 2>/dev/null || true
     # Log failure to API for tracking
     curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/messages/verify-result" \
       -H "Content-Type: application/json" \
@@ -142,7 +188,9 @@ escalate_to_supervisor() {
         \"commit_sha\": $(printf '%s' "${commit_hash:-unknown}" | jq -Rs .),
         \"details\": $(printf '%s' "$failure_type: $count auto-fix attempts exhausted" | jq -Rs .)
       }" >/dev/null 2>&1 || true
-    clear_retry
+    # Reset the counter but KEEP the escalation latch (clear_retry would
+    # delete both).
+    rm -f "$(retry_file)"
 }
 
 # --- Lesson extraction for Accumulated Knowledge ---
@@ -227,7 +275,43 @@ extract_lesson() {
         commit_hash="${BASH_REMATCH[1]}"
     fi
 
+    # Per-task retry key: all retry/latch state below is scoped to this key.
+    TASK_KEY=$(compute_task_key "$commit_hash")
+
+    # Escalation latch: this task key already exhausted its retries and was
+    # escalated. Do NOT restart the FIX-REQUEST cycle — wait for a supervisor
+    # to intervene (delete the latch or dispatch via `workers send`).
+    if [[ -f "$(escalation_latch)" ]]; then
+        log_verify "escalation latched, awaiting supervisor (agent $agent, key ${TASK_KEY})"
+        exit 0
+    fi
+
     if [[ -z "$commit_hash" ]]; then
+        # Contract exemption first: the compiled role contracts
+        # (.soren/run/contracts.json, written by tools/contract compile) are
+        # the runtime source of truth. done_requires_commit=false means this
+        # agent legitimately reports DONE without a commit. Missing file or
+        # missing entry -> fall through to the existing behavior unchanged.
+        contract_exempt=false
+        contracts_json="$PROJECT_ROOT/.soren/run/contracts.json"
+        if [[ -f "$contracts_json" ]]; then
+            # NOTE: no `// empty` here — jq's alternative operator would swallow
+            # a literal `false`, which is exactly the value we're looking for.
+            drc=$(jq -r --arg a "$agent" '.[$a].done_requires_commit' "$contracts_json" 2>/dev/null) || drc=""
+            [[ "$drc" == "false" ]] && contract_exempt=true
+        fi
+        if [[ "$contract_exempt" == "true" ]]; then
+            log_verify "SKIP: contract-exempt DONE from $agent (done_requires_commit=false in contracts.json)"
+            retry_count_at_verify=$(get_retry_count)
+            clear_retry
+            "$MAILBOX_TOOL" send "$supervisor" \
+                "[VERIFIED] $agent: task complete (contract-exempt, no commit required)" \
+                "Contract-exempt completion: ${done_msg:0:200}" \
+                2>/dev/null || true
+            extract_lesson "$retry_count_at_verify" "" || true
+            exit 0
+        fi
+
         # Skip verification for research-only DONE messages (no code changes expected)
         # NOTE: plain assignments here — `local` is illegal outside a function
         # (this runs in a backgrounded subshell, not a function body).

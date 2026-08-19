@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+#===============================================================================
+# knowledge - Durable per-agent working knowledge for permanent workers
+#
+# Permanent workers are specialized but amnesiac — context resets wipe
+# everything learned. Knowledge files are git-versioned markdown that
+# survives resets and compounds over time.
+#
+# Usage:
+#   knowledge add <agent_id> "<lesson>" [--section <s>]  - Append a dated lesson
+#   knowledge show <agent_id> [--brief]                  - Show a knowledge file
+#   knowledge list                                       - Table of all files
+#   knowledge distill <agent_id>                         - Print distill instructions
+#
+# Sections: patterns (default) | pitfalls | decisions | domain
+#
+# Storage: templates/team/knowledge/<agent_id>.md (repo-tracked — versioned,
+# reviewable, survives context resets and rollbacks).
+#===============================================================================
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+KNOWLEDGE_DIR="${SOREN_HOME}/templates/team/knowledge"
+ROLES_DIR="${SOREN_HOME}/templates/team"
+
+# Warn threshold: non-header, non-blank lines before suggesting a distill
+LARGE_THRESHOLD=150
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+#-------------------------------------------------------------------------------
+# Helpers
+#-------------------------------------------------------------------------------
+
+knowledge_file() {
+    echo "${KNOWLEDGE_DIR}/$1.md"
+}
+
+# An agent_id is valid if a role template exists for it OR a knowledge file
+# already exists (covers retired roles whose knowledge is still worth keeping).
+validate_agent_id() {
+    local agent_id="$1"
+    [[ -f "${ROLES_DIR}/${agent_id}-role.md" ]] && return 0
+    [[ -f "$(knowledge_file "$agent_id")" ]] && return 0
+
+    local known=""
+    local f base
+    for f in "${ROLES_DIR}"/perm-*-role.md; do
+        [[ -f "$f" ]] || continue
+        base="$(basename "$f")"
+        known="${known} ${base%-role.md}"
+    done
+    die "unknown agent: ${agent_id} — no role template (${ROLES_DIR}/${agent_id}-role.md) or knowledge file. Known:${known}"
+}
+
+# Map a --section value to its markdown header
+section_header() {
+    case "$1" in
+        patterns)  echo "## Patterns" ;;
+        pitfalls)  echo "## Pitfalls" ;;
+        decisions) echo "## Decisions" ;;
+        domain)    echo "## Domain Map" ;;
+        *)         return 1 ;;
+    esac
+}
+
+# Create a knowledge file from the standard template
+create_from_template() {
+    local agent_id="$1"
+    local file="$2"
+    mkdir -p "$KNOWLEDGE_DIR"
+    cat > "$file" << EOF
+# Working Knowledge — ${agent_id}
+> Durable memory. Survives context resets. Append via ./tools/knowledge add ${agent_id} "...". Distill when large.
+
+## Domain Map
+
+## Patterns
+## Pitfalls
+## Decisions
+EOF
+    warn "created ${file#"$SOREN_HOME"/} from template (no role seed — Domain Map is empty)"
+}
+
+# Count content lines: not headers, not blockquotes, not blank
+content_line_count() {
+    awk 'NF && $0 !~ /^#/ && $0 !~ /^>/' "$1" | wc -l | tr -d ' '
+}
+
+# Count dated entries
+entry_count() {
+    grep -c '^- \[' "$1" 2>/dev/null || true
+}
+
+#-------------------------------------------------------------------------------
+# Commands
+#-------------------------------------------------------------------------------
+
+cmd_add() {
+    local agent_id="" lesson="" section="patterns"
+    local args=()
+
+    # Parse args: --section may appear anywhere
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --section)
+                [[ $# -ge 2 ]] || die "--section requires a value: patterns|pitfalls|decisions|domain"
+                section="$2"
+                shift 2
+                ;;
+            --section=*)
+                section="${1#--section=}"
+                shift
+                ;;
+            *)
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    agent_id="${args[0]:-}"
+    lesson="${args[1]:-}"
+    [[ -z "$agent_id" || -z "$lesson" ]] && die "usage: knowledge add <agent_id> \"<lesson>\" [--section patterns|pitfalls|decisions|domain]"
+
+    local header
+    header=$(section_header "$section") || die "invalid section: ${section} (use patterns|pitfalls|decisions|domain)"
+
+    validate_agent_id "$agent_id"
+
+    local file
+    file=$(knowledge_file "$agent_id")
+    [[ -f "$file" ]] || create_from_template "$agent_id" "$file"
+
+    # Refuse exact duplicates (fixed-string match anywhere in the file)
+    if grep -qF -- "$lesson" "$file"; then
+        die "duplicate lesson — already recorded in ${file#"$SOREN_HOME"/}"
+    fi
+
+    local entry
+    entry="- [$(date +%Y-%m-%d)] ${lesson}"
+
+    # Ensure the section header exists (older/hand-edited files)
+    if ! grep -qxF -- "$header" "$file"; then
+        printf '\n%s\n' "$header" >> "$file"
+    fi
+
+    # Insert the entry at the end of the target section (before the next
+    # "## " header, skipping trailing blank lines). bash 3.2 / awk portable.
+    local tmp
+    tmp="${file}.tmp.$$"
+    KHEADER="$header" KENTRY="$entry" awk '
+        BEGIN { sec = ENVIRON["KHEADER"]; entry = ENVIRON["KENTRY"] }
+        { lines[NR] = $0 }
+        END {
+            n = NR; start = 0
+            for (i = 1; i <= n; i++) if (lines[i] == sec) { start = i; break }
+            end = n
+            for (i = start + 1; i <= n; i++) if (lines[i] ~ /^## /) { end = i - 1; break }
+            while (end > start && lines[end] ~ /^[[:space:]]*$/) end--
+            for (i = 1; i <= end; i++) print lines[i]
+            print entry
+            for (i = end + 1; i <= n; i++) print lines[i]
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+
+    ok "Recorded under ${header#\#\# } in ${file#"$SOREN_HOME"/}: ${lesson:0:60}"
+
+    local count
+    count=$(content_line_count "$file")
+    if [[ "$count" -gt "$LARGE_THRESHOLD" ]]; then
+        warn "knowledge file large (${count} content lines) — run: ./tools/knowledge distill ${agent_id}"
+    fi
+}
+
+cmd_show() {
+    local agent_id="" brief=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --brief) brief=1; shift ;;
+            *)       agent_id="$1"; shift ;;
+        esac
+    done
+    [[ -z "$agent_id" ]] && die "usage: knowledge show <agent_id> [--brief]"
+
+    validate_agent_id "$agent_id"
+
+    local file
+    file=$(knowledge_file "$agent_id")
+    if [[ ! -f "$file" ]]; then
+        echo -e "${DIM}No knowledge file yet for ${agent_id} — first add creates it${NC}"
+        return
+    fi
+
+    if [[ "$brief" -eq 1 ]]; then
+        echo -e "${BOLD}Working Knowledge — ${agent_id} (last 15 entries)${NC}"
+        local entries
+        entries=$(grep '^- \[' "$file" || true)
+        if [[ -z "$entries" ]]; then
+            echo -e "${DIM}No dated entries yet${NC}"
+        else
+            echo "$entries" | tail -15
+        fi
+        return
+    fi
+
+    # Trim the header (title line, blockquote, leading blanks)
+    awk 'body { print; next } /^(# |> )/ { next } /^[[:space:]]*$/ { next } { body = 1; print }' "$file"
+}
+
+cmd_list() {
+    if [[ ! -d "$KNOWLEDGE_DIR" ]]; then
+        echo -e "${DIM}No knowledge directory: ${KNOWLEDGE_DIR}${NC}"
+        return
+    fi
+
+    local found=0
+    local f agent_id entries last_date
+    echo -e "${BOLD}Working Knowledge:${NC}"
+    echo ""
+    printf "${DIM}%-22s  %-8s  %s${NC}\n" "AGENT" "ENTRIES" "LAST UPDATED"
+    echo -e "${DIM}──────────────────────  ────────  ────────────${NC}"
+
+    for f in "${KNOWLEDGE_DIR}"/*.md; do
+        [[ -f "$f" ]] || continue
+        found=1
+        agent_id="$(basename "$f" .md)"
+        entries=$(entry_count "$f")
+        last_date=$(grep -o '^\- \[[0-9-]*\]' "$f" 2>/dev/null | grep -o '[0-9-]*' | sort | tail -1 || true)
+        [[ -z "$last_date" ]] && last_date="—"
+        printf "%-22s  %-8s  %s\n" "$agent_id" "$entries" "$last_date"
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        echo -e "${DIM}No knowledge files in ${KNOWLEDGE_DIR}${NC}"
+    fi
+}
+
+cmd_distill() {
+    local agent_id="${1:-}"
+    [[ -z "$agent_id" ]] && die "usage: knowledge distill <agent_id>"
+
+    validate_agent_id "$agent_id"
+
+    local file
+    file=$(knowledge_file "$agent_id")
+    [[ -f "$file" ]] || die "no knowledge file for ${agent_id} yet — nothing to distill"
+
+    local entries count
+    entries=$(entry_count "$file")
+    count=$(content_line_count "$file")
+
+    echo -e "${BOLD}Distill instructions — ${agent_id}${NC}"
+    echo ""
+    echo -e "  File:    ${file#"$SOREN_HOME"/}"
+    echo -e "  Entries: ${entries} dated entries, ${count} content lines"
+    echo ""
+    echo "This tool does NOT auto-summarize. Distilling is an editing task"
+    echo "performed by the agent (you), because judgment about what is still"
+    echo "true belongs to the specialist, not a script. Do this:"
+    echo ""
+    echo "  1. Read the whole file top to bottom."
+    echo "  2. Merge duplicate/overlapping lessons into one entry each."
+    echo "  3. Drop entries that are obsolete (code changed, tool removed,"
+    echo "     rule superseded). When in doubt, keep it."
+    echo "  4. Keep hard-won invariants verbatim — especially anything learned"
+    echo "     from a production failure or a rejected review."
+    echo "  5. Keep the section structure (Domain Map / Patterns / Pitfalls /"
+    echo "     Decisions) and the '- [YYYY-MM-DD] ...' entry format."
+    echo "  6. Target under 100 lines total."
+    echo "  7. Commit the edit with a descriptive message, e.g.:"
+    echo "     git add ${file#"$SOREN_HOME"/} && git commit -m \"chore(knowledge): distill ${agent_id}\""
+    echo ""
+    echo -e "${DIM}Run this as a normal task: verify with 'knowledge show ${agent_id}', then commit.${NC}"
+}
+
+cmd_help() {
+    cat << 'EOF'
+knowledge - Durable per-agent working knowledge for permanent workers
+
+USAGE:
+    knowledge <command> [arguments]
+
+COMMANDS:
+    add <agent_id> "<lesson>" [--section <s>]   Append a dated lesson
+                                                 sections: patterns (default),
+                                                 pitfalls, decisions, domain
+    show <agent_id> [--brief]                    Show knowledge (--brief: last 15 entries)
+    list                                         Table: agent, entry count, last updated
+    distill <agent_id>                           Print distill instructions (agent edits by hand)
+    help                                         Show this help
+
+EXAMPLES:
+    knowledge add perm-backend "mailbox service uses async file locking — never bypass with raw writes"
+    knowledge add perm-frontend "dark mode regressions cluster in activity/ — always emulate colorScheme dark" --section pitfalls
+    knowledge add perm-infra "chose flock over mkdir locks for tools/lock" --section decisions
+    knowledge show perm-backend
+    knowledge show perm-qa --brief
+    knowledge list
+    knowledge distill perm-backend
+
+STORAGE:
+    templates/team/knowledge/<agent_id>.md — repo-tracked markdown.
+    Versioned, reviewable, survives context resets and rollbacks.
+    agent_id must match a role template (templates/team/<agent_id>-role.md)
+    or an existing knowledge file.
+
+ENVIRONMENT:
+    SOREN_HOME    Project root (default: git rev-parse --show-toplevel)
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        add)     cmd_add "$@" ;;
+        show)    cmd_show "$@" ;;
+        list)    cmd_list "$@" ;;
+        distill) cmd_distill "$@" ;;
+        help|--help|-h) cmd_help ;;
+        *)       die "unknown command: $cmd (try 'knowledge help')" ;;
+    esac
+}
+
+main "$@"

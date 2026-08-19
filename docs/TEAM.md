@@ -9,6 +9,8 @@ SOREN runs a **permanent worker team** — long-lived opencode agents that persi
 
 The team is designed around the principle that **specialized, adversarial review produces better output than generalist workers**. Builders build, reviewers break — and they're different agents.
 
+Each permanent worker also maintains a **working knowledge file** (`templates/team/knowledge/<agent_id>.md`) — git-versioned, per-agent durable memory managed via `./tools/knowledge`. Context resets wipe a worker's conversation, but knowledge files survive them, so expertise compounds across resets instead of being relearned from scratch. `./soren.sh team up` injects each worker's knowledge file into their role context at spawn, so workers get role + accumulated knowledge in one read.
+
 ## Current Roster
 
 > **EXAMPLE ROSTER — this template ships with no permanent workers.** The role context files for this roster are versioned in `templates/team/*.md` (one per agent ID, e.g. `templates/team/perm-frontend-role.md`). Bootstrap the team with `./soren.sh team up` — it copies each role file into `.soren/worker-contexts/` (runtime, gitignored) and spawns the workers with `--permanent`. Then update this table if you customize the roster.
@@ -70,6 +72,7 @@ This gives them:
 - **Context reset** — `workers reset <name>` gracefully restarts without losing identity
 - **Proactive reset policy (auto-enforced)** — `tools/auto-maintenance` resets IDLE permanent workers after 5 completed tasks or 3 hours since last reset, whichever first (tune with `SOREN_RESET_TASKS`/`SOREN_RESET_HOURS`, 0 disables). Task counts come from `mailbox done` reports; never fires mid-task or while sleeping
 - **Cleanup immunity** — `auto-maintenance` and `cleanup_stale` skip permanent workers
+- **Durable working knowledge** — each permanent worker has `templates/team/knowledge/<agent_id>.md`, appended via `./tools/knowledge add` after verified tasks and skimmed via `./tools/knowledge show` at task start. Resets preserve these files (they're repo-tracked), so lessons, pitfalls, and decisions carry across every reset. Workers distill their own file when it grows large (`./tools/knowledge distill`)
 
 ### Task Assignment
 

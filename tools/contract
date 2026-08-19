@@ -10,6 +10,8 @@
 #   contract validate [file|all]   - Validate one role file or all of them
 #   contract show <agent_id>       - Print the parsed contract as JSON
 #   contract list                  - Table of all contracts
+#   contract compile               - Write .soren/run/contracts.json (runtime
+#                                    source of truth for spawn/plugin/hooks)
 #
 # Parsing is done with python3 and a small hand-rolled parser for the simple
 # YAML subset used in the frontmatter — no external dependencies (PyYAML may
@@ -272,6 +274,42 @@ def main():
             sys.exit(1)
         print(json.dumps(fm, indent=2, ensure_ascii=False))
 
+    elif mode == 'compile':
+        # Compile all role contracts into a single machine-readable JSON file
+        # (the runtime source of truth). Written atomically: tmp + os.replace.
+        out_path = sys.argv[3]
+        entries, bad = {}, []
+        for path, (fm, err) in load_all(tdir).items():
+            if err or fm is None:
+                bad.append(f'{os.path.basename(path)}: {err or "no frontmatter"}')
+                continue
+            fname = os.path.basename(path)
+            aid = fm.get('agent_id') or fname[:-len('-role.md')]
+            report = fm.get('report') if isinstance(fm.get('report'), dict) else {}
+            domains = fm.get('domains')
+            entries[aid] = {
+                'tier': fm.get('tier'),
+                'category': fm.get('category'),
+                'worktree_required': bool(fm.get('worktree_required', False)),
+                'protected_paths': fm.get('protected_paths'),
+                'done_requires_commit': bool(report.get('done_requires_commit', True)),
+                'domains': domains if isinstance(domains, list) else [],
+            }
+        if bad:
+            for b in bad:
+                print(f'compile error: {b}', file=sys.stderr)
+            sys.exit(1)
+        tmp = f'{out_path}.tmp.{os.getpid()}'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(entries, f, indent=2, ensure_ascii=False)
+                f.write('\n')
+            os.replace(tmp, out_path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        print(len(entries))
+
     elif mode == 'list':
         rows = [('AGENT_ID', 'NAME', 'CATEGORY', 'TIER', 'WORKTREE', 'PROTECTED_PATHS', 'SKILLS')]
         for path, (fm, err) in load_all(tdir).items():
@@ -302,6 +340,8 @@ main()
 PYEOF
 }
 
+CONTRACTS_OUT="${SOREN_HOME}/.soren/run/contracts.json"
+
 cmd_validate() {
     local target="${1:-all}"
     if [[ "$target" != "all" ]]; then
@@ -320,6 +360,22 @@ cmd_validate() {
         die "contract validation failed"
     fi
     ok "all contracts valid"
+    # Staleness check: warn (never fail) if the compiled runtime contract file
+    # exists but is older than any role template.
+    if [[ "$target" == "all" && -f "$CONTRACTS_OUT" ]]; then
+        local stale
+        stale=$(find "$TEMPLATES_DIR" -name '*-role.md' -newer "$CONTRACTS_OUT" 2>/dev/null | head -1) || true
+        if [[ -n "$stale" ]]; then
+            warn "compiled contracts.json is stale (older than $(basename "$stale")) — run: tools/contract compile"
+        fi
+    fi
+}
+
+cmd_compile() {
+    mkdir -p "$(dirname "$CONTRACTS_OUT")"
+    local count
+    count=$(run_py compile "$TEMPLATES_DIR" "$CONTRACTS_OUT") || die "contract compile failed"
+    ok "compiled ${count} role contracts → ${CONTRACTS_OUT}"
 }
 
 cmd_show() {
@@ -336,8 +392,9 @@ case "${1:-}" in
     validate) shift; cmd_validate "$@" ;;
     show)     shift; cmd_show "$@" ;;
     list)     cmd_list ;;
+    compile)  cmd_compile ;;
     ""|help|--help|-h)
-        sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         ;;
     *) die "unknown subcommand: $1 (see contract help)" ;;
 esac

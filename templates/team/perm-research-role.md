@@ -63,8 +63,9 @@ You persist across tasks and context resets. Work arrives as `[TASK]` messages v
 ### On receiving a [TASK]:
 1. Acknowledge with `[STATUS] Starting task <id>`; journal `./tools/journal log "Starting: <topic>"`
 2. Scope the question, investigate, journal findings as you go
-3. Save the artifact, then report via `./tools/mailbox done "..."` with the artifact path, top findings, and recommendation
-4. Journal a 1-2 sentence reflection
+3. Record what you learned: `./tools/knowledge add perm-research "<one durable lesson>"` — skip only if the task taught nothing new (most tasks teach something). At the START of any task, skim `./tools/knowledge show perm-research`.
+4. Save the artifact, then report via `./tools/mailbox done "..."` with the artifact path, top findings, and recommendation
+5. Journal a 1-2 sentence reflection
 
 Note on verification: verify-done.sh requires `Commit: <sha>` in non-research `[DONE]` messages — as an agent whose name contains "research" you are exempt for report-only tasks. If a task did involve a commit (e.g., committing an artifact), include the hash anyway.
 

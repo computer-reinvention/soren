@@ -102,6 +102,7 @@ cmd_spawn() {
     local permanent_role_ctx=""
     local model_flag=""
     local with_context=1  # Memory context ON by default
+    local user_approved=false
 
     # Parse arguments: workers spawn <name> <task> [--dir <path>] [--project <id>] [--task <task-id>] [--worktree] [--permanent <role-ctx>] [--model <model>]
     while [[ $# -gt 0 ]]; do
@@ -142,6 +143,10 @@ cmd_spawn() {
                 with_context=0
                 shift
                 ;;
+            --user-approved)
+                user_approved=true
+                shift
+                ;;
             *)
                 if [[ -z "$name" ]]; then
                     name="$1"
@@ -171,6 +176,36 @@ cmd_spawn() {
     # Sanitize name
     name=$(echo "$name" | tr ' ' '-' | tr -cd 'a-zA-Z0-9-_')
     [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
+
+    # Spawn-rate ledger: agent-initiated spawns only (SOREN_AGENT=true —
+    # humans are exempt). A runaway saga spawning workers in a loop gets
+    # refused HERE, before any side effect (no tmux window, no worktree,
+    # no registry write). --user-approved bypasses with explicit approval.
+    if [[ "${SOREN_AGENT:-}" == "true" && "$user_approved" != "true" ]]; then
+        local spawn_run_dir="${SOREN_PROJECT_ROOT}/.soren/run"
+        mkdir -p "$spawn_run_dir"
+        local spawn_ledger="${spawn_run_dir}/spawn-events.log"
+        local spawn_now spawn_cutoff spawn_recent spawn_ev spawn_kept
+        spawn_now=$(date +%s)
+        spawn_cutoff=$((spawn_now - 3600))
+        echo "$spawn_now" >> "$spawn_ledger"
+        spawn_recent=0
+        spawn_kept=""
+        while IFS= read -r spawn_ev; do
+            [[ "$spawn_ev" =~ ^[0-9]+$ ]] || continue
+            if [ "$spawn_ev" -ge "$spawn_cutoff" ]; then
+                spawn_recent=$((spawn_recent + 1))
+                spawn_kept="${spawn_kept}${spawn_ev}
+"
+            fi
+        done < "$spawn_ledger"
+        # Prune events older than the window so the ledger doesn't grow forever
+        printf '%s' "$spawn_kept" > "$spawn_ledger"
+        local spawn_max="${SOREN_MAX_SPAWNS_PER_HOUR:-6}"
+        if [ "$spawn_recent" -gt "$spawn_max" ]; then
+            die "spawn rate limit: ${spawn_recent} in the last hour (max ${spawn_max}) — this usually means a runaway saga; get human approval or wait. A human can bypass with --user-approved."
+        fi
+    fi
 
     # Apply model default if --model was not explicitly passed
     if [[ -z "$model_flag" ]]; then
@@ -504,49 +539,41 @@ WTEOF
     # Use absolute path so workers in external dirs can find the context file
     info "Sending task to worker..."
     local instruction="[soren:${supervisor_name}] Read ${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md for your identity and task assignment. You are a worker agent managed by a supervisor, not a human user. Begin working on the task described there."
+
+    # Record timestamp before send for verification
+    local _send_ts
+    _send_ts=$(soren_epoch_ms)
+
     local send_success=false
     if soren_oc_http_send "$oc_port" "$instruction"; then
         send_success=true
     fi
 
-    # Verify the prompt actually landed by checking the TUI pane.
-    # SPAWN PATH (cold TUI): The TUI may take 20-30s to start processing
-    # after a fresh spawn. Poll for activity indicators over a longer window
-    # (up to 45s, checking every 3s) and exit early on first sign of activity.
-    # This replaces the old fixed 5s wait which caused false negatives on
-    # cold TUIs and triggered unnecessary tmux fallback.
-    local _activity_pattern='thinking|working|tool|reading|Read |assistant|esc.{0,8}interrupt'
+    # SPAWN PATH (cold TUI) — verify prompt receipt via the embedded server's
+    # session API. Checks for a new session created after our pre-send
+    # timestamp. Unlike capture-pane polling (which is unreliable during TUI
+    # startup), this provides positive confirmation.
+    #
+    # Timeout: 30s covers worst-case cold TUI startup (28s observed).
+    # If HTTP send failed OR API verification fails, fall back to tmux
+    # send-keys with a late-landing re-check to prevent double-submission.
     if $send_success; then
-        local _poll_max=15   # 15 iterations * 3s = 45s max
-        local _poll_interval=3
-        local _poll_i
-        local _activity_found=false
-        for (( _poll_i = 0; _poll_i < _poll_max; _poll_i++ )); do
-            sleep "$_poll_interval"
-            local pane_check
-            pane_check=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -10 2>/dev/null || true)
-            if echo "$pane_check" | grep -qiE "$_activity_pattern"; then
-                _activity_found=true
-                break
-            fi
-        done
-        if ! $_activity_found; then
-            warn "Prompt may not have landed after $(( _poll_max * _poll_interval ))s — falling back to tmux send-keys"
+        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 30; then
+            info "Prompt receipt confirmed via session API"
+        else
+            warn "HTTP send returned success but session API did not confirm receipt within 30s — falling back to tmux send-keys"
             send_success=false
         fi
     fi
 
-    # Fallback: re-send via tmux send-keys. Guard against double-submission
-    # by checking whether the prompt text (or activity from it) has appeared
-    # in the pane since the HTTP send. A late-landing HTTP prompt would show
-    # the instruction text or activity indicators — skip the fallback in
-    # that case to avoid sending the task twice.
+    # Fallback: re-send via tmux send-keys.
+    # Late-landing guard: even though API verification timed out, the HTTP
+    # prompt may still land moments later (e.g. TUI finishes init at 31s).
+    # Sleep briefly and re-check before firing tmux to prevent double-send.
     if ! $send_success; then
-        local _final_pane
-        _final_pane=$(tmux capture-pane -t "${SOREN_SESSION}:${name}" -p -S -15 2>/dev/null || true)
-        if echo "$_final_pane" | grep -qiE "$_activity_pattern" || \
-           echo "$_final_pane" | grep -qF "worker-contexts/${name}-context.md"; then
-            info "Activity detected late — HTTP prompt landed, skipping tmux fallback"
+        sleep 2
+        if soren_oc_verify_prompt "$oc_port" "$_send_ts" 1; then
+            info "HTTP prompt landed late — skipping tmux fallback"
         else
             tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$instruction"
             sleep 0.1
@@ -870,6 +897,12 @@ cmd_wake() {
         if [[ -n "$last_task" ]]; then
             message="${message} Context from your last task: ${last_task}"
         fi
+        # Permanent workers with a durable knowledge file: point them at it
+        local wake_is_perm
+        wake_is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null) || wake_is_perm="false"
+        if [[ "$wake_is_perm" == "true" && -f "${SOREN_PROJECT_ROOT}/templates/team/knowledge/${name}.md" ]]; then
+            message="${message} Also skim your working knowledge: ./tools/knowledge show ${name} --brief"
+        fi
         cmd_send "$name" "$message"
     fi
 }
@@ -1054,6 +1087,10 @@ cmd_send() {
     [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
     [[ -z "$message" ]] && die "usage: workers send <name> <message> [--no-context]"
 
+    # A new dispatch means the supervisor intervened — clear any verify-done
+    # escalation latches for this agent so auto-fix resumes on its next [DONE].
+    rm -f "${SOREN_PROJECT_ROOT}/.soren/.fix-retries/${name}-"*.escalated 2>/dev/null || true
+
     if ! window_exists "$name"; then
         # Check if worker is sleeping — auto-wake
         local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
@@ -1230,8 +1267,29 @@ cmd_team() {
 }
 
 cmd_reset() {
-    local name="${1:-}"
-    [[ -z "$name" ]] && die "usage: workers reset <name>"
+    local name=""
+    local reset_note=""
+
+    # Parse arguments: workers reset <name> [--note <text>]
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --note)
+                [[ -z "${2:-}" ]] && die "--note requires a text argument"
+                reset_note="$2"
+                shift 2
+                ;;
+            *)
+                if [[ -z "$name" ]]; then
+                    name="$1"
+                else
+                    die "unexpected argument: $1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [[ -z "$name" ]] && die "usage: workers reset <name> [--note <text>]"
     [[ "$name" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid worker name"
 
     # Verify it's a permanent worker
@@ -1340,6 +1398,10 @@ cmd_reset() {
     if [[ -n "$artifact_file" ]]; then
         recovery_instruction="${recovery_instruction} Then read ${artifact_file} for your pre-reset state — you may have an in-progress task to resume."
     fi
+    if [[ -n "$reset_note" ]]; then
+        recovery_instruction="${recovery_instruction} ${reset_note}"
+    fi
+    recovery_instruction="${recovery_instruction} This is a mechanical context reset, not a task. Read the files, then reply with a single line: [SYS] reset complete — ${name} ready. Do nothing else."
 
     info "Sending role context..."
     tmux send-keys -t "${SOREN_SESSION}:${name}" -l "$recovery_instruction"
@@ -1591,7 +1653,7 @@ COMMANDS:
     sleep <name>                    Suspend a worker (saves session, frees RAM)
     sleep-all                       Sleep all non-supervisor workers
     wake <name> [message]           Resume a sleeping worker (restores session)
-    reset <name>                    Reset a permanent worker's context (preserves identity)
+    reset <name> [--note <text>]    Reset a permanent worker's context (preserves identity)
     assign <task-id> <worker>       Assign a task to a worker and notify them
     clone <parent> <task>           Clone a permanent worker for parallel work (worktree)
     merge-clone <clone-name>        Merge a clone's worktree branch and clean up
@@ -1620,6 +1682,10 @@ SPAWN OPTIONS:
     --model <model>    Model tier: haiku|sonnet|opus, or a full provider/model id.
                        All agents default to opus (Opus 4.6 only constraint).
                        Stored in registry — wake and reset preserve the model choice.
+    --user-approved    Bypass the agent spawn-rate limit. Agent-initiated spawns
+                       (SOREN_AGENT=true) are capped at SOREN_MAX_SPAWNS_PER_HOUR
+                       (default 6) per rolling hour via .soren/run/spawn-events.log.
+                       Pass this flag only with explicit human approval.
 
 KILL OPTIONS:
     --force            Force-kill a permanent worker (normally protected from kill)
@@ -1654,6 +1720,7 @@ ENVIRONMENT:
     SOREN_PORT          server port (default: 8000)
     SOREN_PROJECT_ID    project association (set via --project flag)
     SOREN_SUPERVISOR    direct supervisor name (set automatically from spawner)
+    SOREN_MAX_SPAWNS_PER_HOUR  agent-initiated spawn cap per rolling hour (default: 6)
 EOF
 }
 

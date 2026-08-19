@@ -462,6 +462,31 @@ All tags used in the SOREN system, consolidated for quick reference.
 
 **One line is enough.** `journal log "..."` takes 2 seconds. Do it often.
 
+## Working Knowledge (permanent workers)
+
+**Permanent workers are specialized but amnesiac** — context resets (every ~5 tasks / 3 hours) wipe everything you learned in-session. Working knowledge files are the fix: per-agent, git-versioned markdown at `templates/team/knowledge/<agent_id>.md` that survives resets, rollbacks, and restarts. They are **the difference between a specialist and a fresh spawn** — a specialist with an empty knowledge file is just a generalist with a personality.
+
+The journal is a chronological record of *what happened*; your knowledge file is a distilled record of *what stays true*. Both matter; they are not the same thing.
+
+```bash
+# At the START of any task — 10 seconds, loads your accumulated expertise
+./tools/knowledge show <your-agent-id>
+
+# After [VERIFIED] (or after completing verification yourself) — record one durable lesson
+./tools/knowledge add <your-agent-id> "mailbox writes need the async lock — raw appends corrupt the queue"
+
+# File-specific sections (default: patterns)
+./tools/knowledge add <your-agent-id> "..." --section pitfalls    # things that bit you
+./tools/knowledge add <your-agent-id> "..." --section decisions   # choices + rationale
+./tools/knowledge add <your-agent-id> "..." --section domain      # ownership/map changes
+```
+
+**When to add:** after your work is verified — one lesson per task is the habit. Skip only if the task genuinely taught nothing new (most tasks teach something). Good entries are durable invariants ("X breaks when Y"), not task narration ("fixed the login bug" — that's the journal's job).
+
+**When to distill:** when the tool warns the file is large (>~150 content lines), run `./tools/knowledge distill <your-agent-id>` and follow the printed instructions — merge duplicates, drop obsolete entries, keep hard-won invariants, target <100 lines, commit the edit. Distilling is a normal task you perform by hand; the tool never auto-summarizes.
+
+Ephemeral workers don't maintain knowledge files — if you learned something worth keeping, journal it and mention it in your `[DONE]` so the supervisor can route it to the right permanent worker.
+
 ## Saving Artifacts
 
 When completing research, investigation, or analysis tasks, save the full findings as artifacts — mailbox messages and journal logs are summaries, artifacts are the full detail.

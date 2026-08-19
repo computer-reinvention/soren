@@ -248,9 +248,13 @@ cmd_team() {
             esac
             info "Validating role contracts..."
             "${ROOT}/tools/contract" validate all || die "role contract validation failed — fix templates/team/*.md before spawning"
-            warn "Spawning ${#roster[@]} permanent workers (opus tier, keep_awake — they stay resident)."
+            info "Compiling role contracts..."
+            "${ROOT}/tools/contract" compile || die "contract compile failed"
+            local contracts="${ROOT}/.soren/run/contracts.json"
+            [[ -f "$contracts" ]] || die "compiled contracts missing: $contracts"
+            warn "Spawning ${#roster[@]} permanent workers (contract-driven tier/worktree, keep_awake — they stay resident)."
             mkdir -p "${ROOT}/.soren/worker-contexts"
-            local id role_src role_dst spawned=0
+            local id role_src role_dst spawned=0 tier wt_req spawn_desc knowledge_src
             for id in "${roster[@]}"; do
                 role_src="${ROOT}/templates/team/${id}-role.md"
                 role_dst="${ROOT}/.soren/worker-contexts/${id}-role.md"
@@ -260,9 +264,36 @@ cmd_team() {
                     continue
                 fi
                 cp "$role_src" "$role_dst"
-                info "Spawning $id..."
-                "${ROOT}/tools/workers" spawn "$id" "permanent role bootstrap" \
-                    --permanent "$role_dst" || { warn "spawn failed for $id"; continue; }
+                # Inject durable working knowledge (if any) so spawned workers
+                # get role + accumulated knowledge in a single read.
+                knowledge_src="${ROOT}/templates/team/knowledge/${id}.md"
+                if [[ -f "$knowledge_src" ]]; then
+                    {
+                        printf '\n---\n\n## Accumulated Working Knowledge (durable — survives resets)\n\n'
+                        cat "$knowledge_src"
+                    } >> "$role_dst"
+                    info "  knowledge injected into ${id} role context"
+                fi
+                # Contract is the law: tier and worktree policy come from the
+                # compiled contracts.json, not hardcoded policy. The tier name
+                # is passed to `workers spawn --model` as-is; the tier→provider
+                # model mapping (SOREN_MODEL_OPUS/SONNET/HAIKU overrides) is
+                # applied downstream in tools/lib/opencode.sh (soren_oc_model).
+                tier=$(jq -r --arg id "$id" '.[$id].tier // "opus"' "$contracts" 2>/dev/null) || tier="opus"
+                case "$tier" in
+                    haiku|sonnet|opus) ;;
+                    *) warn "$id: unknown tier '$tier' in contract — defaulting to opus"; tier="opus" ;;
+                esac
+                wt_req=$(jq -r --arg id "$id" '.[$id].worktree_required // false' "$contracts" 2>/dev/null) || wt_req="false"
+                local spawn_args
+                spawn_args=("$id" "permanent role bootstrap" --permanent "$role_dst" --model "$tier")
+                spawn_desc="tier=$tier"
+                if [[ "$wt_req" == "true" ]]; then
+                    spawn_args=("${spawn_args[@]}" --worktree)
+                    spawn_desc="$spawn_desc worktree=yes"
+                fi
+                info "Spawning $id ($spawn_desc)..."
+                "${ROOT}/tools/workers" spawn "${spawn_args[@]}" || { warn "spawn failed for $id"; continue; }
                 spawned=$((spawned+1))
             done
             ok "Team up: ${spawned} spawned. Check: ./soren.sh team status"
