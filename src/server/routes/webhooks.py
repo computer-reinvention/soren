@@ -5,13 +5,13 @@ from pathlib import Path
 import json
 import logging
 import os
-import sqlite3
 import subprocess
 import time
 import uuid
 
 from ..config import settings
 from ..models.webhook import WebhookPayload, WebhookResponse
+from ..services import db
 from ..services.agent_registry import agent_registry
 from ..services import budget_guard
 from ..services.mailbox import mailbox_service
@@ -139,22 +139,21 @@ async def health_scorecard():
 
     # Tasks completed today
     tasks_completed_today = 0
-    tasks_db = settings.soren_dir / "tasks.db"
-    if tasks_db.exists():
+    try:
+        conn = db.connect()
         try:
-            conn = sqlite3.connect(str(tasks_db))
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=5000")
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            row = conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status IN ('done','verified') "
-                "AND completed_at LIKE ?",
-                (f"{today}%",),
-            ).fetchone()
-            tasks_completed_today = row[0] if row else 0
+            if db.table_exists(conn, "tasks"):
+                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM tasks WHERE status IN ('done','verified') "
+                    "AND completed_at LIKE ?",
+                    (f"{today}%",),
+                ).fetchone()
+                tasks_completed_today = row[0] if row else 0
+        finally:
             conn.close()
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     # Budget usage
     budget_status = budget_guard.get_budget_status()

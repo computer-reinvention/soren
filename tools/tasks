@@ -21,14 +21,16 @@
 #   tasks import-backlog [<backlog-id>]
 #   tasks help
 #
-# Storage: .soren/tasks.db (SQLite with WAL mode)
+# Storage: .soren/soren.db (consolidated SQLite DB, WAL mode; override SOREN_DB)
 # Designed for agents to manage hierarchical work breakdown.
 #===============================================================================
 
 set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-DB="${SOREN_HOME}/.soren/tasks.db"
+
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_HOME}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -52,9 +54,10 @@ SEP="$(printf '\x1f')"  # Unit separator (ASCII 31) — safe for field splitting
 #-------------------------------------------------------------------------------
 
 ensure_db() {
-    mkdir -p "$(dirname "$DB")"
-    if [[ ! -f "$DB" ]]; then
-        sqlite3 "$DB" <<'SQL'
+    mkdir -p "$(dirname "$SOREN_DB_PATH")"
+    # The DB file is shared with other domains — create just our tables
+    # (IF NOT EXISTS makes this idempotent whether or not the file existed).
+    soren_db <<'SQL'
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -71,27 +74,26 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at TEXT DEFAULT ''
 );
 SQL
-    fi
     # Migrate: add priority column if missing
     local has_priority
-    has_priority=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='priority';")
+    has_priority=$(soren_db "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='priority';")
     if [[ "$has_priority" == "0" ]]; then
-        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium';"
+        soren_db "ALTER TABLE tasks ADD COLUMN priority TEXT DEFAULT 'medium';"
     fi
     # Migrate: add source column if missing
     local has_source
-    has_source=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='source';")
+    has_source=$(soren_db "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='source';")
     if [[ "$has_source" == "0" ]]; then
-        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'system';"
+        soren_db "ALTER TABLE tasks ADD COLUMN source TEXT DEFAULT 'system';"
     fi
     # Migrate: add linked_workers column if missing
     local has_linked
-    has_linked=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='linked_workers';")
+    has_linked=$(soren_db "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='linked_workers';")
     if [[ "$has_linked" == "0" ]]; then
-        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN linked_workers TEXT DEFAULT '';"
+        soren_db "ALTER TABLE tasks ADD COLUMN linked_workers TEXT DEFAULT '';"
     fi
     # Migrate: create status history table if missing
-    sqlite3 "$DB" <<'SQL'
+    soren_db <<'SQL'
 CREATE TABLE IF NOT EXISTS task_status_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL,
@@ -100,9 +102,9 @@ CREATE TABLE IF NOT EXISTS task_status_history (
     changed_at TEXT NOT NULL
 );
 SQL
-    sqlite3 "$DB" 'PRAGMA journal_mode=WAL;' > /dev/null 2>&1
+    soren_db 'PRAGMA journal_mode=WAL;' > /dev/null 2>&1
     # Migrate: create task_dependencies table for DAG support
-    sqlite3 "$DB" <<'SQL'
+    soren_db <<'SQL'
 CREATE TABLE IF NOT EXISTS task_dependencies (
     task_id    TEXT NOT NULL,
     depends_on TEXT NOT NULL,
@@ -220,7 +222,7 @@ cmd_add() {
     # Validate parent exists if given
     if [[ -n "$parent" ]]; then
         local parent_exists
-        parent_exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$parent';")
+        parent_exists=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$parent';")
         [[ "$parent_exists" == "0" ]] && die "parent task not found: $parent"
     fi
 
@@ -240,7 +242,7 @@ cmd_add() {
         status="assigned"
     fi
 
-    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, project, assigned_to, status, priority, source, parent_id, resources, created_at, updated_at)
+    soren_db "INSERT INTO tasks (id, title, description, project, assigned_to, status, priority, source, parent_id, resources, created_at, updated_at)
         VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$desc" | sed "s/'/''/g")', '$project', '$assign', '$status', '$priority', '$source', '$parent', '$(echo "$res_json" | sed "s/'/''/g")', '$now', '$now');"
 
     ok "Created ${id}: ${title}"
@@ -312,7 +314,7 @@ cmd_list() {
 
     # Order by priority weight then creation time
     local rows
-    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE $where ORDER BY
+    rows=$(soren_db -separator "$SEP" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE $where ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -366,7 +368,7 @@ cmd_tree() {
 
     # Get all tasks
     local all_tasks
-    all_tasks=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, parent_id, priority, title FROM tasks WHERE $where ORDER BY
+    all_tasks=$(soren_db -separator "$SEP" "SELECT id, status, parent_id, priority, title FROM tasks WHERE $where ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -442,7 +444,7 @@ cmd_show() {
     ensure_db
 
     # Query individual fields to avoid multiline JSON breaking read
-    _qf() { sqlite3 "$DB" "SELECT $1 FROM tasks WHERE id='$id';"; }
+    _qf() { soren_db "SELECT $1 FROM tasks WHERE id='$id';"; }
 
     local exists
     exists=$(_qf "COUNT(*)")
@@ -499,7 +501,7 @@ cmd_show() {
 
     # Show status history
     local history
-    history=$(sqlite3 -separator "$SEP" "$DB" "SELECT old_status, new_status, changed_at FROM task_status_history WHERE task_id='$id' ORDER BY changed_at;")
+    history=$(soren_db -separator "$SEP" "SELECT old_status, new_status, changed_at FROM task_status_history WHERE task_id='$id' ORDER BY changed_at;")
     if [[ -n "$history" ]]; then
         echo ""
         echo -e "  ${BOLD}Status History:${NC}"
@@ -514,7 +516,7 @@ cmd_show() {
 
     # Show children
     local children
-    children=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, title FROM tasks WHERE parent_id='$id' ORDER BY
+    children=$(soren_db -separator "$SEP" "SELECT id, status, priority, title FROM tasks WHERE parent_id='$id' ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -542,7 +544,7 @@ cmd_update() {
     ensure_db
 
     local exists
-    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    exists=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$id';")
     [[ "$exists" == "0" ]] && die "task not found: $id"
 
     local now
@@ -554,7 +556,7 @@ cmd_update() {
 
         # Warn about incomplete children
         local undone_children
-        undone_children=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE parent_id='$id' AND status NOT IN ('done', 'failed');")
+        undone_children=$(soren_db "SELECT COUNT(*) FROM tasks WHERE parent_id='$id' AND status NOT IN ('done', 'failed');")
         if [[ "$undone_children" -gt 0 ]]; then
             warn "${undone_children} child task(s) are not done"
         fi
@@ -562,15 +564,15 @@ cmd_update() {
 
     # Record status history
     local old_status
-    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    old_status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
 
-    sqlite3 "$DB" "UPDATE tasks SET status='$new_status', updated_at='$now'${completed_clause} WHERE id='$id';"
+    soren_db "UPDATE tasks SET status='$new_status', updated_at='$now'${completed_clause} WHERE id='$id';"
 
     # Insert status history entry
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', '$new_status', '$now');"
+    soren_db "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', '$new_status', '$now');"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Updated ${id}: ${title} → $(status_color "$new_status")"
 }
 
@@ -584,7 +586,7 @@ cmd_assign() {
     ensure_db
 
     local exists
-    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    exists=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$id';")
     [[ "$exists" == "0" ]] && die "task not found: $id"
 
     local now
@@ -592,16 +594,16 @@ cmd_assign() {
 
     # If currently pending, auto-advance to assigned
     local current_status
-    current_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    current_status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
     local status_clause=""
     if [[ "$current_status" == "pending" ]]; then
         status_clause=", status='assigned'"
     fi
 
-    sqlite3 "$DB" "UPDATE tasks SET assigned_to='$agent', updated_at='$now'${status_clause} WHERE id='$id';"
+    soren_db "UPDATE tasks SET assigned_to='$agent', updated_at='$now'${status_clause} WHERE id='$id';"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Assigned ${id}: ${title} → ${agent}"
 }
 
@@ -622,7 +624,7 @@ cmd_link() {
     ensure_db
 
     local exists
-    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    exists=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$id';")
     [[ "$exists" == "0" ]] && die "task not found: $id"
 
     local now
@@ -630,7 +632,7 @@ cmd_link() {
 
     # Get current linked workers
     local current
-    current=$(sqlite3 "$DB" "SELECT linked_workers FROM tasks WHERE id='$id';")
+    current=$(soren_db "SELECT linked_workers FROM tasks WHERE id='$id';")
 
     # Append worker if not already linked
     if [[ -z "$current" ]]; then
@@ -642,10 +644,10 @@ cmd_link() {
         return
     fi
 
-    sqlite3 "$DB" "UPDATE tasks SET linked_workers='$current', updated_at='$now' WHERE id='$id';"
+    soren_db "UPDATE tasks SET linked_workers='$current', updated_at='$now' WHERE id='$id';"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Linked worker '${worker_name}' to ${id}: ${title}"
 }
 
@@ -656,7 +658,7 @@ cmd_for_project() {
     ensure_db
 
     local rows
-    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, assigned_to, linked_workers, title FROM tasks WHERE project='$project_id' ORDER BY
+    rows=$(soren_db -separator "$SEP" "SELECT id, status, priority, assigned_to, linked_workers, title FROM tasks WHERE project='$project_id' ORDER BY
         CASE status
             WHEN 'blocked' THEN 1
             WHEN 'failed' THEN 2
@@ -701,9 +703,9 @@ cmd_for_project() {
 
     # Summary stats
     local active_count done_count blocked_count
-    active_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status NOT IN ('done', 'failed');")
-    done_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='done';")
-    blocked_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='blocked';")
+    active_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status NOT IN ('done', 'failed');")
+    done_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='done';")
+    blocked_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE project='$project_id' AND status='blocked';")
     echo -e "${DIM}${count} task(s) | Active: ${active_count} | Done: ${done_count} | Blocked: ${blocked_count}${NC}"
 }
 
@@ -714,7 +716,7 @@ cmd_delete() {
     ensure_db
 
     local exists
-    exists=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$id';")
+    exists=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$id';")
     [[ "$exists" == "0" ]] && die "task not found: $id"
 
     # Count children for reporting
@@ -735,7 +737,7 @@ _count_descendants() {
     local parent_id="$1"
     local count=0
     local children
-    children=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE parent_id='$parent_id';")
+    children=$(soren_db "SELECT id FROM tasks WHERE parent_id='$parent_id';")
 
     for child_id in $children; do
         ((count++))
@@ -749,20 +751,20 @@ _count_descendants() {
 _delete_recursive() {
     local parent_id="$1"
     local children
-    children=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE parent_id='$parent_id';")
+    children=$(soren_db "SELECT id FROM tasks WHERE parent_id='$parent_id';")
 
     for child_id in $children; do
         _delete_recursive "$child_id"
     done
 
-    sqlite3 "$DB" "DELETE FROM tasks WHERE id='$parent_id';"
+    soren_db "DELETE FROM tasks WHERE id='$parent_id';"
 }
 
 cmd_dashboard() {
     ensure_db
 
     local total
-    total=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks;")
+    total=$(soren_db "SELECT COUNT(*) FROM tasks;")
 
     if [[ "$total" == "0" ]]; then
         echo -e "${DIM}No tasks in system${NC}"
@@ -776,7 +778,7 @@ cmd_dashboard() {
     # Status breakdown
     echo -e "${BOLD}By Status:${NC}"
     local statuses
-    statuses=$(sqlite3 -separator "$SEP" "$DB" "SELECT status, COUNT(*) FROM tasks GROUP BY status ORDER BY
+    statuses=$(soren_db -separator "$SEP" "SELECT status, COUNT(*) FROM tasks GROUP BY status ORDER BY
         CASE status
             WHEN 'blocked' THEN 1
             WHEN 'failed' THEN 2
@@ -797,7 +799,7 @@ cmd_dashboard() {
     # Priority breakdown (non-done only)
     echo -e "${BOLD}By Priority (active):${NC}"
     local priorities
-    priorities=$(sqlite3 -separator "$SEP" "$DB" "SELECT COALESCE(NULLIF(priority,''), 'medium'), COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY priority ORDER BY
+    priorities=$(soren_db -separator "$SEP" "SELECT COALESCE(NULLIF(priority,''), 'medium'), COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY priority ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -817,7 +819,7 @@ cmd_dashboard() {
     # By assignee (non-done only)
     echo -e "${BOLD}By Assignee (active):${NC}"
     local assignees
-    assignees=$(sqlite3 -separator "$SEP" "$DB" "SELECT CASE WHEN assigned_to = '' THEN '(unassigned)' ELSE assigned_to END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY assigned_to ORDER BY COUNT(*) DESC;")
+    assignees=$(soren_db -separator "$SEP" "SELECT CASE WHEN assigned_to = '' THEN '(unassigned)' ELSE assigned_to END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') GROUP BY assigned_to ORDER BY COUNT(*) DESC;")
     if [[ -n "$assignees" ]]; then
         while IFS="$SEP" read -r agent cnt; do
             printf "  %-20s  %s\n" "$agent" "$cnt"
@@ -829,7 +831,7 @@ cmd_dashboard() {
 
     # By project (non-done only, if projects exist)
     local projects
-    projects=$(sqlite3 -separator "$SEP" "$DB" "SELECT CASE WHEN project = '' THEN '(none)' ELSE project END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') AND project != '' GROUP BY project ORDER BY COUNT(*) DESC;")
+    projects=$(soren_db -separator "$SEP" "SELECT CASE WHEN project = '' THEN '(none)' ELSE project END, COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed') AND project != '' GROUP BY project ORDER BY COUNT(*) DESC;")
     if [[ -n "$projects" ]]; then
         echo -e "${BOLD}By Project (active):${NC}"
         while IFS="$SEP" read -r proj cnt; do
@@ -856,7 +858,7 @@ cmd_dashboard() {
 
     # Attention needed: blocked, failed, or critical+pending
     local attention
-    attention=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, assigned_to, title FROM tasks WHERE status IN ('blocked', 'failed') OR (priority = 'critical' AND status NOT IN ('done', 'failed')) ORDER BY
+    attention=$(soren_db -separator "$SEP" "SELECT id, status, priority, assigned_to, title FROM tasks WHERE status IN ('blocked', 'failed') OR (priority = 'critical' AND status NOT IN ('done', 'failed')) ORDER BY
         CASE status WHEN 'failed' THEN 1 WHEN 'blocked' THEN 2 ELSE 3 END,
         CASE priority WHEN 'critical' THEN 1 ELSE 2 END;")
     if [[ -n "$attention" ]]; then
@@ -870,15 +872,15 @@ cmd_dashboard() {
 
     # Summary line
     local active_count done_count
-    active_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
-    done_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status = 'done';")
+    active_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
+    done_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status = 'done';")
     local failed_count
-    failed_count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status = 'failed';")
+    failed_count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status = 'failed';")
     echo -e "${DIM}Total: ${total} | Active: ${active_count} | Done: ${done_count} | Failed: ${failed_count}${NC}"
 }
 
 cmd_import_backlog() {
-    warn "import-backlog is deprecated — backlog is now a status field in tasks.db."
+    warn "import-backlog is deprecated — backlog is now a status field in the tasks table."
     echo -e "${DIM}Use 'backlog add' to create backlog items, or 'tasks add --status backlog'.${NC}"
 }
 
@@ -928,7 +930,7 @@ cmd_global() {
                 # Count active tasks for this supervisor's project
                 local sup_tasks=0
                 if [[ -n "$spid" && "$spid" != "-" ]]; then
-                    sup_tasks=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE project='$spid' AND status NOT IN ('done', 'failed');")
+                    sup_tasks=$(soren_db "SELECT COUNT(*) FROM tasks WHERE project='$spid' AND status NOT IN ('done', 'failed');")
                 fi
                 printf "  %-20s  %-22s  project: %-12s  %b  tasks: %s\n" "$sname" "$srole" "$spid" "$window_status" "$sup_tasks"
             done <<< "$sup_entries"
@@ -955,7 +957,7 @@ cmd_global() {
                 fi
                 # Find tasks assigned to this worker
                 local worker_tasks
-                worker_tasks=$(sqlite3 "$DB" "SELECT id || ':' || status FROM tasks WHERE (assigned_to='$wname' OR linked_workers LIKE '%$wname%') AND status NOT IN ('done', 'failed') LIMIT 3;" | tr '\n' ' ')
+                worker_tasks=$(soren_db "SELECT id || ':' || status FROM tasks WHERE (assigned_to='$wname' OR linked_workers LIKE '%$wname%') AND status NOT IN ('done', 'failed') LIMIT 3;" | tr '\n' ' ')
                 printf "  %-24s  project: %-12s  %b  %s\n" "$wname" "$wpid" "$wstatus" "${worker_tasks:--}"
             done <<< "$worker_entries"
             echo ""
@@ -970,7 +972,7 @@ cmd_global() {
 
     # --- In-Flight Tasks ---
     local inflight
-    inflight=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE status IN ('in-progress', 'assigned', 'review') ORDER BY
+    inflight=$(soren_db -separator "$SEP" "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE status IN ('in-progress', 'assigned', 'review') ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -993,7 +995,7 @@ cmd_global() {
 
     # --- Blocked ---
     local blocked
-    blocked=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, project, assigned_to, title FROM tasks WHERE status='blocked' ORDER BY
+    blocked=$(soren_db -separator "$SEP" "SELECT id, priority, project, assigned_to, title FROM tasks WHERE status='blocked' ORDER BY
         CASE priority WHEN 'critical' THEN 1 WHEN 'high' THEN 2 ELSE 3 END;")
     echo -e "${BOLD}${RED}Blocked:${NC}"
     if [[ -n "$blocked" ]]; then
@@ -1008,12 +1010,12 @@ cmd_global() {
 
     # --- Summary ---
     local total active done_c failed_c blocked_c pending_c
-    total=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks;")
-    active=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
-    done_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='done';")
-    failed_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='failed';")
-    blocked_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='blocked';")
-    pending_c=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='pending';")
+    total=$(soren_db "SELECT COUNT(*) FROM tasks;")
+    active=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'failed');")
+    done_c=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='done';")
+    failed_c=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='failed';")
+    blocked_c=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='blocked';")
+    pending_c=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='pending';")
     echo -e "${DIM}Total: ${total} | Active: ${active} | Pending: ${pending_c} | Blocked: ${blocked_c} | Done: ${done_c} | Failed: ${failed_c}${NC}"
 }
 
@@ -1024,8 +1026,8 @@ cmd_depends() {
 
     # Verify both exist
     local t1 t2
-    t1=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$task_id';")
-    t2=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE id='$dep_id';")
+    t1=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$task_id';")
+    t2=$(soren_db "SELECT COUNT(*) FROM tasks WHERE id='$dep_id';")
     [[ "$t1" == "0" ]] && die "task not found: $task_id"
     [[ "$t2" == "0" ]] && die "dependency task not found: $dep_id"
 
@@ -1043,13 +1045,13 @@ while stack:
     visited.add(c)
     stack.extend(r[0] for r in conn.execute('SELECT depends_on FROM task_dependencies WHERE task_id=?', (c,)).fetchall())
 print('no')
-" "$DB" "$dep_id" "$task_id" 2>/dev/null)
+" "$SOREN_DB_PATH" "$dep_id" "$task_id" 2>/dev/null)
 
     if [[ "$has_cycle" == "yes" || "$task_id" == "$dep_id" ]]; then
         die "cycle detected: adding $task_id → $dep_id would create a dependency cycle"
     fi
 
-    sqlite3 "$DB" "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on) VALUES ('$task_id', '$dep_id');"
+    soren_db "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on) VALUES ('$task_id', '$dep_id');"
     ok "$task_id depends on $dep_id"
     echo -e "  ${DIM}$task_id will not start until $dep_id is done/verified${NC}"
 }
@@ -1060,10 +1062,10 @@ cmd_undepends() {
     ensure_db
 
     local rows
-    rows=$(sqlite3 "$DB" "SELECT COUNT(*) FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';")
+    rows=$(soren_db "SELECT COUNT(*) FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';")
     [[ "$rows" == "0" ]] && die "no dependency edge $task_id → $dep_id"
 
-    sqlite3 "$DB" "DELETE FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';"
+    soren_db "DELETE FROM task_dependencies WHERE task_id='$task_id' AND depends_on='$dep_id';"
     ok "Removed dependency: $task_id no longer depends on $dep_id"
 }
 
@@ -1082,7 +1084,7 @@ cmd_ready() {
 
     # Tasks with at least one unmet dep
     local blocked_ids
-    blocked_ids=$(sqlite3 "$DB" "
+    blocked_ids=$(soren_db "
         SELECT DISTINCT d.task_id FROM task_dependencies d
         JOIN tasks t ON d.depends_on = t.id
         WHERE t.status NOT IN ('done', 'verified')
@@ -1097,7 +1099,7 @@ cmd_ready() {
     fi
 
     local rows
-    rows=$(sqlite3 -separator "$SEP" "$DB" \
+    rows=$(soren_db -separator "$SEP" \
         "SELECT id, status, priority, project, assigned_to, title FROM tasks WHERE $where$excl ORDER BY created_at;")
 
     if [[ -z "$rows" ]]; then
@@ -1168,7 +1170,7 @@ while queue:
             queue.append(dep)
 result.extend(sorted(t for t in task_ids if t not in set(result)))
 print('\n'.join(result))
-" "$DB" "$proj_arg" 2>/dev/null)
+" "$SOREN_DB_PATH" "$proj_arg" 2>/dev/null)
 
     if [[ -z "$ordered" ]]; then
         echo -e "${DIM}No active tasks${NC}"
@@ -1183,13 +1185,13 @@ print('\n'.join(result))
     while IFS= read -r tid; do
         [[ -z "$tid" ]] && continue
         local row
-        row=$(sqlite3 -separator "$SEP" "$DB" \
+        row=$(soren_db -separator "$SEP" \
             "SELECT status, priority, assigned_to, title FROM tasks WHERE id='$tid';")
         if [[ -n "$row" ]]; then
             IFS="$SEP" read -r status pri assigned ttl <<< "$row"
             # Mark as READY or BLOCKED
             local has_unmet
-            has_unmet=$(sqlite3 "$DB" "
+            has_unmet=$(soren_db "
                 SELECT COUNT(*) FROM task_dependencies d
                 JOIN tasks t ON d.depends_on = t.id
                 WHERE d.task_id='$tid' AND t.status NOT IN ('done','verified');")
@@ -1306,7 +1308,7 @@ EXAMPLES:
     tasks delete t_a3f8k2m9
 
 STORAGE:
-    .soren/tasks.db — SQLite database with WAL mode for concurrent access.
+    .soren/soren.db — consolidated SQLite database (WAL mode, SOREN_DB overrides).
     Status history tracked in task_status_history table.
 
 ENVIRONMENT:

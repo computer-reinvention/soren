@@ -6,7 +6,6 @@ Prototype: pure numpy cosine similarity search. Hybrid FTS5 + vector search is a
 
 import hashlib
 import json
-import sqlite3
 import struct
 import uuid
 import logging
@@ -17,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from ..config import settings
+from .db import get_db, get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +59,13 @@ class MemoryStore:
     EMBEDDING_DIM = 384
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (settings.soren_dir / "memories.db")
+        self.db_path = db_path or get_db_path()
         self._ensure_db()
 
     @contextmanager
     def _conn(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
+        with get_db(self.db_path) as conn:
             yield conn
-            conn.commit()
-        finally:
-            conn.close()
 
     def _ensure_db(self):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 """Failure pattern logging — tracks recurring agent/system failures in SQLite.
 
-Schema lives in the shared conversations.db alongside messages and agent_events.
+Schema lives in the consolidated soren.db (via conversation_store) alongside
+messages and agent_events.
 """
 
 from datetime import datetime, timezone

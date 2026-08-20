@@ -1,16 +1,14 @@
 import json
-import sqlite3
 from collections import defaultdict
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
 from ..config import settings
+from ..services import db
 from ..services import quality_metrics as qm
 
 router = APIRouter()
 
-_TASKS_DB = settings.soren_dir / "tasks.db"
 _COMPACT_EFFECTIVENESS_FILE = settings.soren_dir / ".compact-effectiveness"
 
 
@@ -30,14 +28,10 @@ async def get_task_duration_stats():
 
     Derived from the duration_seconds column on completed tasks.
     """
-    if not _TASKS_DB.exists():
-        return {"agents": {}, "overall_avg": None}
-
-    conn = sqlite3.connect(str(_TASKS_DB))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn = db.connect()
     try:
+        if not db.table_exists(conn, "tasks"):
+            return {"agents": {}, "overall_avg": None}
         # Check if duration_seconds column exists
         cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
         if "duration_seconds" not in cols:

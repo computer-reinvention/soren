@@ -2,7 +2,7 @@
 #===============================================================================
 # backlog - Manage backlog items in the SOREN tasks database
 #
-# Backlog is a status field on tasks in .soren/tasks.db.
+# Backlog is a status field on tasks in the consolidated .soren/soren.db.
 # This CLI provides a convenient interface for managing backlog items.
 #
 # Usage:
@@ -24,14 +24,16 @@
 #   supervised mode they cannot be claimed until a human approves them.
 #   Set SOREN_AUTONOMY=autonomous to restore ungated behavior.
 #
-# Storage: .soren/tasks.db (SQLite — tasks with status='backlog')
+# Storage: .soren/soren.db (consolidated SQLite DB — tasks with status='backlog')
 # Designed for supervisor agents to maintain autonomous work queues.
 #===============================================================================
 
 set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-DB="${SOREN_HOME}/.soren/tasks.db"
+
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_HOME}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -53,20 +55,25 @@ warn() { echo -e "${YELLOW}!${NC} $1"; }
 #-------------------------------------------------------------------------------
 
 ensure_db() {
-    [[ -f "$DB" ]] || die "tasks database not found: $DB"
+    [[ -f "$SOREN_DB_PATH" ]] || die "database not found: $SOREN_DB_PATH"
+    # The DB file is shared with other domains — require the tasks table
+    # (created by tools/tasks or tools/migrate-state), not just the file.
+    local has_tasks
+    has_tasks=$(soren_db "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks';")
+    [[ "$has_tasks" == "1" ]] || die "tasks table not found in $SOREN_DB_PATH (run ./tools/tasks dashboard or tools/migrate-state first)"
     # Ensure the remarks column exists (may be missing from older schemas).
     # ALTER TABLE ... ADD COLUMN is a no-op if the column already exists in
     # SQLite >= 3.35; for older versions we check first.
-    if ! sqlite3 "$DB" "SELECT remarks FROM tasks LIMIT 0;" 2>/dev/null; then
-        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN remarks TEXT DEFAULT '';" 2>/dev/null || true
+    if ! soren_db "SELECT remarks FROM tasks LIMIT 0;" 2>/dev/null; then
+        soren_db "ALTER TABLE tasks ADD COLUMN remarks TEXT DEFAULT '';" 2>/dev/null || true
     fi
     # Migrate: add approved column if missing (autonomy gating).
     # Existing user-sourced items are grandfathered as approved.
     local has_approved
-    has_approved=$(sqlite3 "$DB" "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='approved';")
+    has_approved=$(soren_db "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='approved';")
     if [[ "$has_approved" == "0" ]]; then
-        sqlite3 "$DB" "ALTER TABLE tasks ADD COLUMN approved INTEGER DEFAULT 0;"
-        sqlite3 "$DB" "UPDATE tasks SET approved=1 WHERE source='user';"
+        soren_db "ALTER TABLE tasks ADD COLUMN approved INTEGER DEFAULT 0;"
+        soren_db "UPDATE tasks SET approved=1 WHERE source='user';"
     fi
 }
 
@@ -135,7 +142,7 @@ short_id() {
 resolve_id() {
     local partial="$1"
     local matches
-    matches=$(sqlite3 "$DB" "SELECT id FROM tasks WHERE id LIKE '$(echo "$partial" | sed "s/'/''/g")%';")
+    matches=$(soren_db "SELECT id FROM tasks WHERE id LIKE '$(echo "$partial" | sed "s/'/''/g")%';")
 
     if [[ -z "$matches" ]]; then
         die "item not found: ${partial}"
@@ -201,7 +208,7 @@ cmd_add() {
     priority_text=$(pri_num_to_text "$priority_num")
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "INSERT INTO tasks (id, title, description, status, priority, source, approved, created_at, updated_at)
+    soren_db "INSERT INTO tasks (id, title, description, status, priority, source, approved, created_at, updated_at)
         VALUES ('$id', '$(echo "$title" | sed "s/'/''/g")', '$(echo "$description" | sed "s/'/''/g")', 'backlog', '$priority_text', '$(echo "$source" | sed "s/'/''/g")', $approved, '$now', '$now');"
 
     ok "Added $(short_id "$id"): ${title} ($(priority_label "$priority_num"))"
@@ -214,7 +221,7 @@ cmd_list() {
     ensure_db
 
     local rows
-    rows=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, priority, source, approved, title FROM tasks WHERE status='backlog' ORDER BY
+    rows=$(soren_db -separator "$SEP" "SELECT id, priority, source, approved, title FROM tasks WHERE status='backlog' ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -264,8 +271,8 @@ do_claim() {
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "UPDATE tasks SET status='pending', updated_at='$now' WHERE id='$id';"
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', 'backlog', 'pending', '$now');"
+    soren_db "UPDATE tasks SET status='pending', updated_at='$now' WHERE id='$id';"
+    soren_db "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', 'backlog', 'pending', '$now');"
 
     echo -e "${BOLD}Claimed item: $(short_id "$id")${NC}"
     echo -e "  Title:    ${title}"
@@ -287,7 +294,7 @@ cmd_next() {
     fi
 
     local row
-    row=$(sqlite3 -separator "$SEP" "$DB" "SELECT id, title, description, priority FROM tasks WHERE status='backlog' $approval_filter ORDER BY
+    row=$(soren_db -separator "$SEP" "SELECT id, title, description, priority FROM tasks WHERE status='backlog' $approval_filter ORDER BY
         CASE priority
             WHEN 'critical' THEN 1
             WHEN 'high' THEN 2
@@ -299,7 +306,7 @@ cmd_next() {
     if [[ -z "$row" ]]; then
         local unapproved=0
         if is_supervised; then
-            unapproved=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
+            unapproved=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
         fi
         if ((unapproved > 0)); then
             die "no approved backlog items — ${unapproved} item(s) awaiting human approval — run: ./tools/backlog approve <id> (or set SOREN_AUTONOMY=autonomous)"
@@ -323,22 +330,22 @@ cmd_claim() {
     id=$(resolve_id "$id_input")
 
     local status
-    status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
     [[ "$status" == "backlog" ]] || die "item $(short_id "$id") is not in the backlog (status: ${status})"
 
     # In supervised mode, unapproved proposals cannot be claimed.
     if is_supervised; then
         local approved
-        approved=$(sqlite3 "$DB" "SELECT approved FROM tasks WHERE id='$id';")
+        approved=$(soren_db "SELECT approved FROM tasks WHERE id='$id';")
         if [[ "$approved" != "1" ]]; then
             die "item $(short_id "$id") awaiting human approval — run: ./tools/backlog approve $(short_id "$id") (or set SOREN_AUTONOMY=autonomous)"
         fi
     fi
 
     local title description priority
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
-    description=$(sqlite3 "$DB" "SELECT description FROM tasks WHERE id='$id';")
-    priority=$(sqlite3 "$DB" "SELECT priority FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
+    description=$(soren_db "SELECT description FROM tasks WHERE id='$id';")
+    priority=$(soren_db "SELECT priority FROM tasks WHERE id='$id';")
 
     do_claim "$id" "$title" "$description" "$priority"
 }
@@ -358,18 +365,18 @@ cmd_approve() {
 
     if [[ "$id_input" == "--all" ]]; then
         local count
-        count=$(sqlite3 "$DB" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
-        sqlite3 "$DB" "UPDATE tasks SET approved=1, updated_at='$now' WHERE status='backlog' AND approved=0;"
+        count=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;")
+        soren_db "UPDATE tasks SET approved=1, updated_at='$now' WHERE status='backlog' AND approved=0;"
         ok "Approved ${count} backlog item(s)"
         return
     fi
 
     local id
     id=$(resolve_id "$id_input")
-    sqlite3 "$DB" "UPDATE tasks SET approved=1, updated_at='$now' WHERE id='$id';"
+    soren_db "UPDATE tasks SET approved=1, updated_at='$now' WHERE id='$id';"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Approved $(short_id "$id"): ${title}"
 }
 
@@ -387,13 +394,13 @@ cmd_reject() {
 
     local now old_status
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    old_status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
 
-    sqlite3 "$DB" "UPDATE tasks SET status='rejected', approved=0, updated_at='$now' WHERE id='$id';"
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'rejected', '$now');"
+    soren_db "UPDATE tasks SET status='rejected', approved=0, updated_at='$now' WHERE id='$id';"
+    soren_db "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'rejected', '$now');"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Rejected $(short_id "$id"): ${title}"
 }
 
@@ -412,13 +419,13 @@ cmd_done() {
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     local old_status
-    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    old_status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
 
-    sqlite3 "$DB" "UPDATE tasks SET status='done', remarks='$(echo "$remarks" | sed "s/'/''/g")', completed_at='$now', updated_at='$now' WHERE id='$id';"
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
+    soren_db "UPDATE tasks SET status='done', remarks='$(echo "$remarks" | sed "s/'/''/g")', completed_at='$now', updated_at='$now' WHERE id='$id';"
+    soren_db "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Completed $(short_id "$id"): ${title}"
 }
 
@@ -434,13 +441,13 @@ cmd_skip() {
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     local old_status
-    old_status=$(sqlite3 "$DB" "SELECT status FROM tasks WHERE id='$id';")
+    old_status=$(soren_db "SELECT status FROM tasks WHERE id='$id';")
 
-    sqlite3 "$DB" "UPDATE tasks SET status='done', remarks='skipped', completed_at='$now', updated_at='$now' WHERE id='$id';"
-    sqlite3 "$DB" "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
+    soren_db "UPDATE tasks SET status='done', remarks='skipped', completed_at='$now', updated_at='$now' WHERE id='$id';"
+    soren_db "INSERT INTO task_status_history (task_id, old_status, new_status, changed_at) VALUES ('$id', '$old_status', 'done', '$now');"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Skipped $(short_id "$id"): ${title}"
 }
 
@@ -463,10 +470,10 @@ cmd_prioritize() {
     priority_text=$(pri_num_to_text "$priority_num")
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-    sqlite3 "$DB" "UPDATE tasks SET priority='$priority_text', updated_at='$now' WHERE id='$id';"
+    soren_db "UPDATE tasks SET priority='$priority_text', updated_at='$now' WHERE id='$id';"
 
     local title
-    title=$(sqlite3 "$DB" "SELECT title FROM tasks WHERE id='$id';")
+    title=$(soren_db "SELECT title FROM tasks WHERE id='$id';")
     ok "Reprioritized $(short_id "$id"): ${title} → $(priority_label "$priority_num")"
 }
 
@@ -478,7 +485,7 @@ cmd_show() {
     local id
     id=$(resolve_id "$id_input")
 
-    _qf() { sqlite3 "$DB" "SELECT $1 FROM tasks WHERE id='$id';"; }
+    _qf() { soren_db "SELECT $1 FROM tasks WHERE id='$id';"; }
 
     local title description priority status source approved remarks created_at completed_at
     title=$(_qf "title")
@@ -564,7 +571,7 @@ EXAMPLES:
     backlog show 7966ee6a
 
 STORAGE:
-    .soren/tasks.db — tasks with status='backlog' in the unified tasks table.
+    .soren/soren.db — tasks with status='backlog' in the unified tasks table.
     Claimed items (via next/claim) transition to status='pending'.
 
 ENVIRONMENT:

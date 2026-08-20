@@ -1,4 +1,4 @@
-"""Tasks API routes — read/update tasks from .soren/tasks.db (shared with tools/tasks CLI)."""
+"""Tasks API routes — read/update tasks in .soren/soren.db (shared with tools/tasks CLI)."""
 
 import json
 import logging
@@ -12,15 +12,13 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from ..config import settings
+from ..services import db
 from ..services import task_dag
 from ..services import blocker_detector
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-DB_PATH = settings.soren_dir / "tasks.db"
 
 VALID_STATUSES = {"backlog", "pending", "assigned", "in-progress", "review", "done", "verified", "blocked", "failed"}
 VALID_PRIORITIES = {"critical", "high", "medium", "low"}
@@ -106,27 +104,24 @@ _migrated = False
 
 @contextmanager
 def _get_connection():
-    """Get a database connection with WAL mode and proper cleanup."""
+    """Get a consolidated-DB connection (standard pragmas) with proper cleanup."""
     global _migrated
-    if not DB_PATH.exists():
-        raise HTTPException(status_code=404, detail="tasks.db not found — no tasks created yet")
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    if not _migrated:
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
-        if "duration_seconds" not in cols:
-            conn.execute("ALTER TABLE tasks ADD COLUMN duration_seconds INTEGER")
-        # Backfill duration for completed tasks missing it
-        conn.execute(
-            """UPDATE tasks SET duration_seconds = CAST((julianday(completed_at) - julianday(created_at)) * 86400 AS INTEGER)
-            WHERE status IN ('done', 'verified', 'failed')
-            AND completed_at IS NOT NULL AND length(completed_at) > 0
-            AND duration_seconds IS NULL"""
-        )
-        _migrated = True
+    conn = db.connect()
     try:
+        if not db.table_exists(conn, "tasks"):
+            raise HTTPException(status_code=404, detail="tasks table not found — no tasks created yet")
+        if not _migrated:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()]
+            if "duration_seconds" not in cols:
+                conn.execute("ALTER TABLE tasks ADD COLUMN duration_seconds INTEGER")
+            # Backfill duration for completed tasks missing it
+            conn.execute(
+                """UPDATE tasks SET duration_seconds = CAST((julianday(completed_at) - julianday(created_at)) * 86400 AS INTEGER)
+                WHERE status IN ('done', 'verified', 'failed')
+                AND completed_at IS NOT NULL AND length(completed_at) > 0
+                AND duration_seconds IS NULL"""
+            )
+            _migrated = True
         yield conn
         conn.commit()
     finally:

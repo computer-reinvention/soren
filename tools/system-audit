@@ -13,6 +13,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "tools/lib/db.sh"
+
 # --- Defaults ---
 SOREN_PORT="${SOREN_PORT:-8000}"
 BASE_URL="http://localhost:${SOREN_PORT}"
@@ -306,17 +309,17 @@ check_git_status() {
 }
 
 check_memory_store() {
-    if [[ ! -f ".soren/memories.db" ]]; then
-        add_result "memory_store" "BROKEN" "Memory store .soren/memories.db not found"
+    if [[ ! -f "$SOREN_DB_PATH" ]]; then
+        add_result "memory_store" "BROKEN" "Database ${SOREN_DB_PATH} not found"
         return
     fi
     local size entries
-    size=$(du -h .soren/memories.db 2>/dev/null | awk '{print $1}')
-    entries=$(sqlite3 .soren/memories.db "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "unknown")
+    size=$(du -h "$SOREN_DB_PATH" 2>/dev/null | awk '{print $1}')
+    entries=$(soren_db "SELECT COUNT(*) FROM memories;" 2>/dev/null || echo "unknown")
     if [[ "$entries" == "unknown" || "$entries" == "0" ]]; then
-        add_result "memory_store" "DEGRADED" "Memory store exists (${size}) but ${entries} entries"
+        add_result "memory_store" "DEGRADED" "Memory store exists (db: ${size}) but ${entries} entries"
     else
-        add_result "memory_store" "HEALTHY" "Memory store: ${entries} entries (${size})"
+        add_result "memory_store" "HEALTHY" "Memory store: ${entries} entries (db: ${size})"
     fi
 }
 

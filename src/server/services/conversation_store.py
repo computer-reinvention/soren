@@ -2,6 +2,8 @@
 
 Provides durability across server restarts and archives worker conversations
 before they are killed.
+
+Tables live in the consolidated .soren/soren.db (see services/db.py).
 """
 
 import sqlite3
@@ -14,9 +16,9 @@ from contextlib import contextmanager
 
 from pydantic import BaseModel
 
-from ..config import settings
 from ..models.message import Message, MessageType, TaskStatus
 from ..middleware.redact import redact_sensitive
+from .db import get_db, get_db_path
 
 
 class ArchivedAgent(BaseModel):
@@ -42,7 +44,7 @@ class ConversationStore:
     """SQLite-based persistent storage for messages and agent archives."""
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (settings.soren_dir / "conversations.db")
+        self.db_path = db_path or get_db_path()
         self._ensure_db()
 
     def _ensure_db(self):
@@ -126,16 +128,9 @@ class ConversationStore:
 
     @contextmanager
     def _get_connection(self):
-        """Get a database connection with proper cleanup."""
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        try:
+        """Get a database connection with standard pragmas and proper cleanup."""
+        with get_db(self.db_path) as conn:
             yield conn
-            conn.commit()
-        finally:
-            conn.close()
 
     def store_message(self, message: Message, parent_message_id: Optional[str] = None) -> None:
         """Store a message in the database."""

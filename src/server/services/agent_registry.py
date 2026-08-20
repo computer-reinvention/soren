@@ -1,6 +1,7 @@
 """SQLite-backed agent registry.
 
 Replaces the previous JSON + fcntl implementation.
+- Lives in the consolidated .soren/soren.db (agents table) — see services/db.py
 - WAL mode for safe concurrent reads
 - Atomic writes — no partial-write corruption
 - Write-through JSON cache at .soren/agent_registry.json for shell-script
@@ -18,9 +19,10 @@ from pathlib import Path
 from typing import Optional, Set, Dict, Any
 from datetime import datetime
 
+from .db import apply_connection_pragmas, get_db_path
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(".soren/agent_registry.db")
 JSON_CACHE_PATH = Path(".soren/agent_registry.json")
 
 # Well-known agent IDs
@@ -51,19 +53,43 @@ class AgentRegistry:
     are denormalised columns for fast SQL queries without JSON parsing.
     """
 
-    def __init__(self):
-        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: Optional[Path] = None):
         self._lock = threading.Lock()
+        self._conn: Optional[sqlite3.Connection] = None
+        self.db_path = Path(db_path) if db_path else get_db_path()
+        self._open(import_json=True)
+
+    def _open(self, import_json: bool = False):
+        """Open the persistent connection to self.db_path with standard pragmas."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(
-            str(DB_PATH),
+            str(self.db_path),
+            timeout=5,
             check_same_thread=False,
             isolation_level=None,   # autocommit — we manage transactions explicitly
         )
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        # WAL + busy_timeout + synchronous + foreign_keys — set once on this
+        # long-lived connection (per-call connections re-apply them each time).
+        apply_connection_pragmas(self._conn)
         self._create_schema()
-        self._migrate_from_json()
+        if import_json:
+            self._migrate_from_json()
+
+    def reconnect(self, db_path: Optional[Path] = None):
+        """Close and reopen the persistent connection (used by tests).
+
+        Skips the one-time JSON import — that bootstrap only runs at process
+        startup so a reconnect never re-imports stale cache data.
+        """
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except sqlite3.Error:
+                    pass
+                self._conn = None
+        self.db_path = Path(db_path) if db_path else get_db_path()
+        self._open(import_json=False)
 
     def _create_schema(self):
         with self._lock:
@@ -83,8 +109,17 @@ class AgentRegistry:
             """)
 
     def _migrate_from_json(self):
-        """One-time import from agent_registry.json → SQLite (runs only when DB is empty)."""
+        """One-time import from agent_registry.json → SQLite (runs only when DB is empty).
+
+        Skipped when the legacy .soren/agent_registry.db still exists: the JSON
+        file is only a derived write-through cache of it (and may be stale), and
+        ./tools/migrate-state copies the authoritative rows from the legacy DB.
+        This path remains for fresh installs upgrading from the JSON-only era.
+        """
         if not JSON_CACHE_PATH.exists():
+            return
+        legacy_db = JSON_CACHE_PATH.with_name("agent_registry.db")
+        if legacy_db.exists() and legacy_db.resolve() != self.db_path.resolve():
             return
         count = self._conn.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         if count > 0:

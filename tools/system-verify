@@ -116,8 +116,7 @@ section "Critical Files"
 
 for f in \
     .soren/mailbox \
-    .soren/conversations.db \
-    .soren/tasks.db \
+    .soren/soren.db \
     .soren/agent_registry.json \
     .soren/projects.json \
     tools/workers \

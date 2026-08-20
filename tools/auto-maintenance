@@ -23,6 +23,9 @@ SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PORT="${SOREN_PORT:-8000}"
 WORKER_IDLE_THRESHOLD=${WORKER_IDLE_THRESHOLD:-1800}  # 30 minutes in seconds
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
+
 CONTEXT_DIR="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
 
 # Protected window names — never touch these
@@ -253,7 +256,7 @@ PYEOF
             jq --arg k "$name" 'del(.[$k])' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
         fi
         # Mirror into SQLite registry if present
-        sqlite3 "${SOREN_PROJECT_ROOT}/.soren/agent_registry.db" \
+        soren_db \
             "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
 
         # Clean context files

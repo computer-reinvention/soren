@@ -16,43 +16,48 @@ from src.server.services.failure_log import _ensure_table as _ensure_failure_tab
 
 @pytest.fixture(autouse=True)
 def setup_test_environment(tmp_path, monkeypatch):
-    """Redirect ALL persistent stores to temp directory during tests.
+    """Redirect ALL persistent stores to a temp consolidated DB during tests.
 
-    Prevents test data from polluting production databases
-    (conversations.db, memories.db, agent_registry.db).
+    Everything lands in one file — <tmp>/.soren/soren.db — mirroring the
+    production layout, and preventing test data from polluting the real
+    .soren/soren.db.
     """
     original_path = settings.mailbox_path
     original_soren_dir = settings.soren_dir
+    original_db_path = settings.db_path
 
     # Set up temp paths
     test_soren_dir = tmp_path / ".soren"
     test_soren_dir.mkdir(parents=True, exist_ok=True)
     test_mailbox = test_soren_dir / "mailbox"
+    test_db = test_soren_dir / "soren.db"
 
-    # Override settings
+    # Override settings — services resolve the DB path dynamically via
+    # services/db.py:get_db_path(), so this redirects every per-call consumer
+    # (auth, tasks routes, heartbeat, task_dag, blocker_detector, quality, ...)
     settings.soren_dir = test_soren_dir
     settings.mailbox_path = test_mailbox
+    settings.db_path = test_db
 
     # Also update the mailbox service instance
     mailbox_service.mailbox_path = test_mailbox
 
-    # --- Conversation store: redirect to temp DB ---
+    # --- Conversation store: redirect instance to the temp consolidated DB ---
     original_conv_db = conversation_store.db_path
-    conversation_store.db_path = test_soren_dir / "conversations.db"
+    conversation_store.db_path = test_db
     conversation_store._ensure_db()
     _ensure_failure_table()  # failure_log lives in same DB, needed by verify-result
 
-    # --- Memory store: redirect to temp DB ---
+    # --- Memory store: redirect instance to the temp consolidated DB ---
     original_mem_db = memory_store.db_path
-    memory_store.db_path = test_soren_dir / "memories.db"
+    memory_store.db_path = test_db
     memory_store._ensure_db()
 
-    # --- Agent registry: redirect DB and JSON cache to temp ---
-    monkeypatch.setattr(registry_module, "DB_PATH", test_soren_dir / "agent_registry.db")
+    # --- Agent registry: reconnect the persistent connection to the temp DB ---
     monkeypatch.setattr(registry_module, "JSON_CACHE_PATH", test_soren_dir / "agent_registry.json")
+    registry_module.agent_registry.reconnect(test_db)
 
-    # Redirect auth DB and secret to temp directory
-    monkeypatch.setattr(auth_module, "AUTH_DB_PATH", test_soren_dir / "auth.db")
+    # Redirect auth secret to temp directory (users table follows settings.db_path)
     monkeypatch.setattr(auth_module, "AUTH_SECRET_PATH", test_soren_dir / ".auth-secret")
 
     # Initialise auth DB and create a test user
@@ -64,9 +69,11 @@ def setup_test_environment(tmp_path, monkeypatch):
     # Restore original paths
     settings.mailbox_path = original_path
     settings.soren_dir = original_soren_dir
+    settings.db_path = original_db_path
     mailbox_service.mailbox_path = original_path
     conversation_store.db_path = original_conv_db
     memory_store.db_path = original_mem_db
+    registry_module.agent_registry.reconnect()
 
 
 def _auth_headers() -> dict:
