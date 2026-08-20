@@ -22,6 +22,9 @@ source "${SOREN_HOME}/tools/lib/opencode.sh"
 # Shared project scanning helpers (stack/command detection)
 source "${SOREN_HOME}/tools/lib/scan-project.sh"
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_HOME}/tools/lib/db.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -555,10 +558,10 @@ cmd_activate() {
            "project_id": $pid
        }'
 
-    # Also register in SQLite (agent_registry.db) so the API serves the correct data
-    local db_file="${SOREN_HOME}/.soren/agent_registry.db"
+    # Also register in SQLite (shared soren.db) so the API serves the correct data
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${sup_name}', '${agent_id}', 'IN_PROGRESS', json('{\"type\":\"project-supervisor\",\"role\":\"project-supervisor\",\"project_id\":\"${id}\",\"display_name\":\"${sup_name}\",\"created_by\":\"tools/projects\",\"created_at\":\"${now}\",\"agent_id\":\"${agent_id}\"}'));"
+        soren_db "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${sup_name}', '${agent_id}', 'IN_PROGRESS', json('{\"type\":\"project-supervisor\",\"role\":\"project-supervisor\",\"project_id\":\"${id}\",\"display_name\":\"${sup_name}\",\"created_by\":\"tools/projects\",\"created_at\":\"${now}\",\"agent_id\":\"${agent_id}\"}'));"
     fi
 
     # Allocate a dedicated port for the supervisor's embedded opencode server
@@ -945,9 +948,9 @@ cmd_deactivate() {
     fi
 
     # Set SLEEPING in SQLite (preserve for archived view, don't delete)
-    local db_file="${SOREN_HOME}/.soren/agent_registry.db"
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${sup_name}';"
+        soren_db "UPDATE agents SET status='SLEEPING' WHERE key='${sup_name}';"
     fi
 
     # Remove heartbeat file

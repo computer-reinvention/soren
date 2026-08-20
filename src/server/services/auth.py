@@ -1,4 +1,8 @@
-"""Authentication service: SQLite-backed user store with bcrypt + JWT."""
+"""Authentication service: SQLite-backed user store with bcrypt + JWT.
+
+The users table lives in the consolidated .soren/soren.db (see services/db.py).
+tools/auth wraps these functions, so the CLI follows automatically.
+"""
 import sqlite3
 import secrets
 import string
@@ -9,9 +13,10 @@ from pathlib import Path
 import bcrypt
 import jwt
 
+from .db import connect as _db_connect, get_db_path
+
 logger = logging.getLogger(__name__)
 
-AUTH_DB_PATH = Path(".soren/auth.db")
 AUTH_SECRET_PATH = Path(".soren/.auth-secret")
 TOKEN_EXPIRY_DAYS = 7
 
@@ -28,14 +33,14 @@ def _get_secret() -> str:
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(AUTH_DB_PATH))
-    conn.row_factory = sqlite3.Row
-    return conn
+    # Per-call connection to the consolidated DB. WAL/busy_timeout (previously
+    # missing here) are applied on every connect by the central db module.
+    return _db_connect()
 
 
 def init_db() -> None:
     """Create the users table if it doesn't exist."""
-    AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    get_db_path().parent.mkdir(parents=True, exist_ok=True)
     with _get_conn() as conn:
         conn.execute(
             """

@@ -38,11 +38,12 @@ git_branch=$(git -C "$GIT_TARGET" branch --show-current 2>/dev/null || echo "unk
 uncommitted=$(git -C "$GIT_TARGET" diff --name-only 2>/dev/null || echo "")
 staged=$(git -C "$GIT_TARGET" diff --cached --name-only 2>/dev/null || echo "")
 
-# Capture current task from tasks.db
+# Capture current task from the tasks table (consolidated soren.db)
+# shellcheck source=/dev/null
+source "${PROJECT_ROOT}/tools/lib/db.sh"
 current_task=""
-DB="${PROJECT_ROOT}/.soren/tasks.db"
-if [[ -f "$DB" ]]; then
-    current_task=$(sqlite3 "$DB" \
+if [[ -f "$SOREN_DB_PATH" ]]; then
+    current_task=$(soren_db \
         "SELECT id || ': ' || title FROM tasks WHERE (assigned_to='${WINDOW}' OR linked_workers LIKE '%${WINDOW}%') AND status IN ('in-progress', 'assigned') LIMIT 1;" \
         2>/dev/null || echo "")
 fi

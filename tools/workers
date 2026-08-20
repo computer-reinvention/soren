@@ -28,6 +28,9 @@ STARTUP_DELAY=8  # fallback wait when the opencode health endpoint is unreachabl
 # Shared opencode helpers (model mapping, ports, health, HTTP send)
 source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -330,14 +333,14 @@ cmd_spawn() {
 
     soren_registry_update "$reg_file" "${jq_args[@]}" "$jq_filter"
 
-    # Also register in SQLite (agent_registry.db) so the API serves correct metadata immediately
-    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    # Also register in SQLite (shared soren.db) so the API serves correct metadata immediately
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
         local db_data
         db_data=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
         if [[ -n "$db_data" && "$db_data" != "null" ]]; then
             db_data="${db_data//\'/\'\'}"  # escape single quotes for SQLite
-            sqlite3 "$db_file" "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${name}', '${agent_id}', 'IDLE', '${db_data}');" 2>/dev/null || \
+            soren_db "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${name}', '${agent_id}', 'IDLE', '${db_data}');" 2>/dev/null || \
                 warn "Failed to register in SQLite (non-fatal)"
         fi
     fi
@@ -371,7 +374,7 @@ cmd_spawn() {
         db_data_final=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
         if [[ -n "$db_data_final" && "$db_data_final" != "null" ]]; then
             db_data_final="${db_data_final//\'/\'\'}"  # escape single quotes for SQLite
-            sqlite3 "$db_file" "UPDATE agents SET data = '${db_data_final}' WHERE key = '${name}';" 2>/dev/null || true
+            soren_db "UPDATE agents SET data = '${db_data_final}' WHERE key = '${name}';" 2>/dev/null || true
         fi
     fi
 
@@ -691,9 +694,9 @@ cmd_kill() {
             soren_oc_release_port "$old_port"
         fi
     fi
-    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        sqlite3 "$db_file" "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
+        soren_db "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
     fi
     # Clean up context files for the retired worker
     rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md" \
@@ -742,9 +745,9 @@ cmd_sleep() {
                     soren_oc_release_port "$old_port"
                 fi
                 # Also update SQLite
-                local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+                local db_file="$SOREN_DB_PATH"
                 if [[ -f "$db_file" ]]; then
-                    sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
+                    soren_db "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
                 fi
                 ok "Worker '$name' marked as sleeping (session: ${existing_sid:0:8}...)"
                 return 0
@@ -755,11 +758,11 @@ cmd_sleep() {
 
     info "Putting worker '$name' to sleep..."
 
-    # Get session ID from agent_events DB (most recent event for this agent)
+    # Get session ID from agent_events table (most recent event for this agent)
     local session_id=""
-    local db_file="${SOREN_PROJECT_ROOT}/.soren/conversations.db"
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        session_id=$(sqlite3 "$db_file" \
+        session_id=$(soren_db \
             "SELECT session_id FROM agent_events WHERE agent_id='${name}' ORDER BY timestamp DESC LIMIT 1;" 2>/dev/null || true)
     fi
 
@@ -792,9 +795,9 @@ cmd_sleep() {
     fi
 
     # Also update SQLite
-    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        sqlite3 "$db_file" "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
+        soren_db "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
     fi
 
     ok "Worker '$name' is now sleeping"
@@ -875,9 +878,9 @@ cmd_wake() {
         '.[$k].status = "IDLE" | .[$k].last_activity = $ts'
 
     # Also update SQLite
-    local db_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.db"
+    local db_file="$SOREN_DB_PATH"
     if [[ -f "$db_file" ]]; then
-        sqlite3 "$db_file" "UPDATE agents SET status='IDLE' WHERE key='${name}';" 2>/dev/null || true
+        soren_db "UPDATE agents SET status='IDLE' WHERE key='${name}';" 2>/dev/null || true
     fi
 
     ok "Worker '$name' is awake"
@@ -1313,14 +1316,14 @@ cmd_reset() {
     fi
 
     # Step 2: Mark current task as blocked (if any)
-    local db="${SOREN_PROJECT_ROOT}/.soren/tasks.db"
+    local db="$SOREN_DB_PATH"
     if [[ -f "$db" ]]; then
         local active_task
-        active_task=$(sqlite3 "$db" \
+        active_task=$(soren_db \
             "SELECT id FROM tasks WHERE (assigned_to='${name}' OR linked_workers LIKE '%${name}%') AND status='in-progress' LIMIT 1;" \
             2>/dev/null || echo "")
         if [[ -n "$active_task" ]]; then
-            sqlite3 "$db" "UPDATE tasks SET status='blocked', updated_at='$(date -u +%Y-%m-%dT%H:%M:%SZ)' WHERE id='${active_task}';"
+            soren_db "UPDATE tasks SET status='blocked', updated_at='$(date -u +%Y-%m-%dT%H:%M:%SZ)' WHERE id='${active_task}';"
             warn "Task $active_task marked as blocked during reset"
         fi
     fi
@@ -1431,7 +1434,7 @@ cmd_assign() {
     # Notify worker via mailbox (requires 3 args: to, subject, body)
     local task_title
     task_title=$("$tasks_tool" show "$task_id" 2>/dev/null | head -1)
-    ./tools/mailbox send "$worker" "[TASK] $task_id" "Assigned: ${task_title:-$task_id}. Read details: sqlite3 .soren/tasks.db \"SELECT description FROM tasks WHERE id LIKE '${task_id}%'\""
+    ./tools/mailbox send "$worker" "[TASK] $task_id" "Assigned: ${task_title:-$task_id}. Read details: sqlite3 .soren/soren.db \"SELECT description FROM tasks WHERE id LIKE '${task_id}%'\""
     ok "Task $task_id assigned to $worker"
 }
 
@@ -1669,7 +1672,7 @@ SPAWN OPTIONS:
     --dir <path>       Set worker's working directory (default: SOREN project root)
                        The path must exist. When set, SOREN tools are added to PATH.
     --project <id>     Associate worker with a project (sets SOREN_PROJECT_ID env var)
-    --task <task-id>   Link worker to a task in the task system (.soren/tasks.db).
+    --task <task-id>   Link worker to a task in the task system (.soren/soren.db).
                        Auto-assigns the task to this worker and sets status to in-progress.
     --worktree         Create a git worktree for branch-isolated work.
                        Creates ~/.soren/worktrees/<project>/<name> on branch feat/<name>.

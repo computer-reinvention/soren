@@ -1,3 +1,6 @@
+from typing import Optional
+
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 from pathlib import Path
 
@@ -8,6 +11,14 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     tmux_session: str = "soren"
     soren_dir: Path = Path(".soren")
+
+    # Consolidated SQLite database (ALL server state lives in this one file).
+    # Defaults to <project_root>/.soren/soren.db (i.e. <soren_dir>/soren.db —
+    # resolved in services/db.py:get_db_path). Env override: SOREN_DB.
+    db_path: Optional[Path] = Field(
+        default=None,
+        validation_alias=AliasChoices("SOREN_DB", "SOREN_DB_PATH"),
+    )
     mailbox_path: Path = Path(".soren/mailbox")
     recovery_wait_seconds: int = 30
     event_buffer_size: int = 100

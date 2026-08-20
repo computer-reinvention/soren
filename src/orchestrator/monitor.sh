@@ -44,6 +44,9 @@ ROUTER_LOG=".soren/router.log"
 # Shared opencode helpers (model mapping, ports, health, HTTP send)
 source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
+
 # Colors
 CYAN='\033[0;36m'
 GREEN='\033[0;32m'
@@ -687,7 +690,7 @@ check_supervisor_heartbeat() {
         local _total_lines=$(wc -l < "$SOREN_MAILBOX" 2>/dev/null | xargs || echo 0)
         hb_mailbox=$(( _total_lines - _router_pos ))
         [[ $hb_mailbox -lt 0 ]] && hb_mailbox=0
-        hb_backlog=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" "SELECT COUNT(*) FROM tasks WHERE status='backlog';" 2>/dev/null || echo "0")
+        hb_backlog=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog';" 2>/dev/null || echo "0")
         hb_health=$(curl -sf --max-time 1 "http://localhost:${SOREN_PORT}/api/webhooks/health" 2>/dev/null | grep -q '"api":"healthy"' && echo "healthy" || echo "degraded")
         hb_git=$(git -C "$SOREN_PROJECT_ROOT" diff --stat HEAD 2>/dev/null | tail -1 | sed 's/^ *//')
         [[ -z "$hb_git" ]] && hb_git="clean"
@@ -953,15 +956,15 @@ check_supervisor_heartbeat() {
         # migration in tools/backlog; if an older db doesn't have it yet, skip
         # injection rather than risk injecting unapproved self-proposals.
         local has_approved_col
-        has_approved_col=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
+        has_approved_col=$(soren_db \
             "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='approved';" 2>/dev/null || echo "0")
 
         local backlog_row=""
         if [[ "$has_approved_col" == "1" ]]; then
-            backlog_row=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
+            backlog_row=$(soren_db \
                 "SELECT id, title FROM tasks WHERE status IN ('backlog','pending') AND approved=1 ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, created_at LIMIT 1;" 2>/dev/null || true)
         else
-            log_status "HEARTBEAT" "Task injection: tasks.db has no 'approved' column yet (backlog migration pending) — skipping backlog query"
+            log_status "HEARTBEAT" "Task injection: tasks table has no 'approved' column yet (backlog migration pending) — skipping backlog query"
         fi
 
         if [[ -n "$backlog_row" ]]; then
@@ -1104,7 +1107,7 @@ spawn_sentry() {
 
     # Gather context: backlog items
     local backlog_context=""
-    backlog_context=$(sqlite3 "${SOREN_PROJECT_ROOT}/.soren/tasks.db" \
+    backlog_context=$(soren_db \
         "SELECT title FROM tasks WHERE status='backlog' ORDER BY priority LIMIT 3;" 2>/dev/null || echo "(no backlog)")
     [[ -z "$backlog_context" ]] && backlog_context="(no backlog items)"
 
@@ -2093,7 +2096,9 @@ rollback_and_restart() {
         # Restore databases, journals, agent registry, mailbox, and daemon state
         # NOTE: *.pid and *.lock files in run/ are intentionally excluded —
         # daemons must create fresh state on startup to avoid stale lock contention.
-        for item in journal agent_registry.db agent_registry.db-shm agent_registry.db-wal \
+        for item in journal soren.db soren.db-shm soren.db-wal \
+                    backup-pre-consolidation \
+                    agent_registry.db agent_registry.db-shm agent_registry.db-wal \
                     agent_registry.json conversations.db memories.db messages.db tasks.db \
                     auth.db mailbox worker-contexts .compact-timestamps \
                     .supervisor-heartbeat .sup-site-heartbeat .last_healthy_commit \

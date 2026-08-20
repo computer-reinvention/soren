@@ -57,30 +57,26 @@ CREATE TABLE task_status_history (
 
 
 @pytest.fixture()
-def tasks_db(tmp_path, monkeypatch):
-    """Isolated SQLite DB wired into task_dag and blocker_detector."""
-    db = tmp_path / "tasks.db"
+def tasks_db():
+    """Tasks schema created inside the per-test consolidated soren.db.
+
+    task_dag, blocker_detector, and routes/tasks all resolve the DB path
+    dynamically via services/db.py, which the autouse conftest fixture points
+    at <tmp>/.soren/soren.db — so creating the tasks tables there wires
+    everything up with no monkeypatching.
+    """
+    from src.server.services.db import get_db_path
+
+    db = get_db_path()
     conn = sqlite3.connect(str(db))
     conn.executescript(_TASKS_SCHEMA)
     conn.close()
-
-    monkeypatch.setattr(task_dag, "DB_PATH", db)
-    monkeypatch.setattr(blocker_detector, "TASKS_DB_PATH", db)
     return db
 
 
 @pytest.fixture()
-def tasks_client(client, tmp_path, monkeypatch):
-    """HTTP client with routes/tasks and task_dag both pointing to a fresh DB."""
-    db = tmp_path / "tasks_route.db"
-    conn = sqlite3.connect(str(db))
-    conn.executescript(_TASKS_SCHEMA)
-    conn.close()
-
-    import src.server.routes.tasks as tasks_routes
-    monkeypatch.setattr(tasks_routes, "DB_PATH", db)
-    monkeypatch.setattr(task_dag, "DB_PATH", db)
-    monkeypatch.setattr(blocker_detector, "TASKS_DB_PATH", db)
+def tasks_client(client, tasks_db):
+    """HTTP client with the tasks schema present in the consolidated test DB."""
     return client
 
 

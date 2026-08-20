@@ -18,7 +18,9 @@ source "${SCRIPT_DIR}/lib/logging.sh"
 
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PROJECT_ROOT="${SOREN_PROJECT_ROOT:-$(pwd)}"
-DB_PATH="${SOREN_PROJECT_ROOT}/.soren/conversations.db"
+
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper w/ 5s busy timeout)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
 
 # Thresholds
 TOOL_THRESHOLD=60                # nudge after this many tool calls (base, overridden by role)
@@ -44,7 +46,7 @@ has_mutation_tools() {
             date -u -d "${MIN_NUDGE_INTERVAL} seconds ago" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || \
             echo "2000-01-01T00:00:00")
     local count
-    count=$(sqlite3 "$DB_PATH" "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+    count=$(soren_db "
         SELECT COUNT(*) FROM agent_events
         WHERE agent_id = '${agent_id}'
           AND event_type = 'PostToolUse'
@@ -66,13 +68,11 @@ MSG
 
 # Count unlinked tool call events per agent (events without a message_id = work since last Stop)
 get_agent_tool_counts() {
-    if [[ ! -f "$DB_PATH" ]]; then
+    if [[ ! -f "$SOREN_DB_PATH" ]]; then
         return
     fi
 
-    sqlite3 "$DB_PATH" <<'SQL' 2>/dev/null | grep '|'
-        PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+    soren_db <<'SQL' 2>/dev/null | grep '|'
         SELECT agent_id, COUNT(*) as cnt
         FROM agent_events
         WHERE event_type = 'PostToolUse'
@@ -85,7 +85,7 @@ SQL
 # Count tool calls since last journal entry for agents who DO have linked events
 # (i.e. agents actively producing messages but not journaling)
 get_agent_total_recent() {
-    if [[ ! -f "$DB_PATH" ]]; then
+    if [[ ! -f "$SOREN_DB_PATH" ]]; then
         return
     fi
 
@@ -95,9 +95,7 @@ get_agent_total_recent() {
             date -u -d "${MIN_NUDGE_INTERVAL} seconds ago" +"%Y-%m-%dT%H:%M:%S" 2>/dev/null || \
             echo "2000-01-01T00:00:00")
 
-    sqlite3 "$DB_PATH" <<SQL 2>/dev/null | grep '|'
-        PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+    soren_db <<SQL 2>/dev/null | grep '|'
         SELECT agent_id, COUNT(*) as cnt
         FROM agent_events
         WHERE event_type = 'PostToolUse'

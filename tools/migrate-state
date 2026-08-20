@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+#═══════════════════════════════════════════════════════════════════════════════
+# migrate-state - One-time consolidation of legacy per-domain SQLite DBs into
+#                 the single .soren/soren.db
+#
+# Usage:
+#   migrate-state [run]                    Consolidate legacy DBs (default)
+#   migrate-state status                   Report legacy DBs + row counts vs soren.db
+#   migrate-state [run|status] --sandbox <dir>
+#                                          Operate on a COPIED .soren dir (testing)
+#   migrate-state run --force              Skip the running-system safety gate
+#
+# Legacy databases (consolidated in this order):
+#   tasks.db, conversations.db, agent_registry.db, auth.db, memories.db
+#
+# How run works:
+#   1. Refuses if the soren tmux session exists or the server answers on
+#      port 8000 (cutover requires a stopped system) — unless --force or
+#      --sandbox.
+#   2. Creates soren.db (WAL mode) if missing.
+#   3. For each legacy DB that exists:
+#        a. Copies its schema (CREATE TABLE/INDEX/... rewritten to
+#           IF NOT EXISTS so collisions with already-created tables are
+#           tolerated; internal sqlite_sequence is filtered out).
+#        b. Per table: INSERT OR IGNORE INTO main.<t> SELECT <common cols>
+#           FROM legacy.<t> (column intersection guards against schema
+#           drift), skipping tables whose row count shows they were already
+#           copied (idempotent re-runs).
+#        c. Verifies per-table row counts (main >= legacy required;
+#           == expected for freshly created tables; deltas are reported).
+#   4. Only on FULL success: moves the legacy files (+ -wal/-shm siblings)
+#      to .soren/backup-pre-consolidation/<timestamp>/ and prints restore
+#      instructions. On any failure legacy files stay in place.
+#
+# Env: SOREN_DB overrides the target DB path (ignored with --sandbox).
+#═══════════════════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+SOREN_PORT="${SOREN_PORT:-8000}"
+
+LEGACY_NAMES="tasks conversations agent_registry auth memories"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+die()  { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
+info() { echo -e "${CYAN}▶${NC} $1"; }
+ok()   { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}!${NC} $1"; }
+
+#───────────────────────────────────────────────────────────────────────────────
+# Argument parsing
+#───────────────────────────────────────────────────────────────────────────────
+
+MODE=""
+SANDBOX_DIR=""
+FORCE=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        run|status)
+            [ -n "$MODE" ] && die "mode given twice"
+            MODE="$1"; shift ;;
+        --sandbox)
+            SANDBOX_DIR="${2:-}"
+            [ -z "$SANDBOX_DIR" ] && die "--sandbox requires a directory argument"
+            shift 2 ;;
+        --force)
+            FORCE=1; shift ;;
+        -h|--help)
+            sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *)
+            die "unknown argument: $1 (see --help)" ;;
+    esac
+done
+MODE="${MODE:-run}"
+
+if [ -n "$SANDBOX_DIR" ]; then
+    [ -d "$SANDBOX_DIR" ] || die "sandbox directory not found: $SANDBOX_DIR"
+    SOREN_DIR="$(cd "$SANDBOX_DIR" && pwd)"
+    TARGET_DB="${SOREN_DIR}/soren.db"
+else
+    SOREN_DIR="${SOREN_HOME}/.soren"
+    TARGET_DB="${SOREN_DB:-${SOREN_DIR}/soren.db}"
+fi
+
+#───────────────────────────────────────────────────────────────────────────────
+# Helpers
+#───────────────────────────────────────────────────────────────────────────────
+
+# sqlite3 with the project-wide 5s busy timeout. Usage: _sq <db-file> [args...]
+_sq() {
+    local _db="$1"; shift
+    sqlite3 -cmd '.timeout 5000' "$_db" "$@"
+}
+
+# Escape single quotes for use inside an SQL string literal
+_sql_escape() {
+    printf "%s" "$1" | sed "s/'/''/g"
+}
+
+# List user tables of a database, one per line
+_user_tables() {
+    _sq "$1" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name;"
+}
+
+# Row count of a table (0 if the table is missing)
+_row_count() {
+    local db="$1" t="$2"
+    _sq "$db" "SELECT COUNT(*) FROM \"$t\";" 2>/dev/null || echo 0
+}
+
+# Does <db> contain table <t>?
+_has_table() {
+    local n
+    n=$(_sq "$1" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$(_sql_escape "$2")';" 2>/dev/null || echo 0)
+    [ "$n" = "1" ]
+}
+
+# Column names of a table, one per line, in schema order
+_columns() {
+    _sq "$1" "PRAGMA table_info(\"$2\");" | awk -F'|' '{print $2}'
+}
+
+# Copy the schema of <legacy-db> into <target-db>, tolerating existing
+# objects: CREATE TABLE/INDEX/VIEW/TRIGGER/VIRTUAL TABLE become IF NOT EXISTS.
+# The internal sqlite_sequence table is dropped (reserved name; SQLite
+# maintains it automatically as rows with explicit AUTOINCREMENT ids arrive).
+_copy_schema() {
+    local legacy="$1" target="$2"
+    _sq "$legacy" .schema | sed \
+        -e '/^CREATE TABLE sqlite_sequence(/d' \
+        -e 's/^CREATE TABLE IF NOT EXISTS /CREATE TABLE /' \
+        -e 's/^CREATE TABLE /CREATE TABLE IF NOT EXISTS /' \
+        -e 's/^CREATE VIRTUAL TABLE IF NOT EXISTS /CREATE VIRTUAL TABLE /' \
+        -e 's/^CREATE VIRTUAL TABLE /CREATE VIRTUAL TABLE IF NOT EXISTS /' \
+        -e 's/^CREATE UNIQUE INDEX IF NOT EXISTS /CREATE UNIQUE INDEX /' \
+        -e 's/^CREATE UNIQUE INDEX /CREATE UNIQUE INDEX IF NOT EXISTS /' \
+        -e 's/^CREATE INDEX IF NOT EXISTS /CREATE INDEX /' \
+        -e 's/^CREATE INDEX /CREATE INDEX IF NOT EXISTS /' \
+        -e 's/^CREATE VIEW IF NOT EXISTS /CREATE VIEW /' \
+        -e 's/^CREATE VIEW /CREATE VIEW IF NOT EXISTS /' \
+        -e 's/^CREATE TRIGGER IF NOT EXISTS /CREATE TRIGGER /' \
+        -e 's/^CREATE TRIGGER /CREATE TRIGGER IF NOT EXISTS /' \
+        | _sq "$target"
+}
+
+# Make sure every legacy column exists on the target table, ALTER-adding any
+# that are missing (schema drift: a tool's ensure_db created a leaner table
+# in soren.db before migration ran). Without this, intersection copying would
+# silently drop the values of drifted columns. NOT NULL is deliberately not
+# carried over — ALTER ADD COLUMN on a populated table forbids it without a
+# default; nullable is fine for drift recovery (the fresh-table path via
+# _copy_schema preserves constraints exactly).
+_align_columns() {
+    local legacy="$1" target="$2" t="$3"
+    local main_cols _cid cname ctype _cnotnull cdflt _pk decl
+    main_cols=$(_columns "$target" "$t")
+    while IFS='|' read -r _cid cname ctype _cnotnull cdflt _pk; do
+        [ -z "$cname" ] && continue
+        if ! printf '%s\n' "$main_cols" | grep -qFx -- "$cname"; then
+            decl="\"$cname\" ${ctype:-TEXT}"
+            if [ -n "$cdflt" ]; then
+                decl="$decl DEFAULT $cdflt"
+            fi
+            _sq "$target" "ALTER TABLE \"$t\" ADD COLUMN $decl;" || return 1
+        fi
+    done <<EOF
+$(_sq "$legacy" "PRAGMA table_info(\"$t\");")
+EOF
+    return 0
+}
+
+# Comma-separated, double-quoted list of columns present in BOTH tables.
+# Guards against schema drift (e.g. a tool's ensure_db created a leaner
+# table in soren.db before migration ran).
+_common_columns() {
+    local legacy="$1" target="$2" t="$3"
+    local legacy_cols main_cols common="" c
+    legacy_cols=$(_columns "$legacy" "$t")
+    main_cols=$(_columns "$target" "$t")
+    while IFS= read -r c; do
+        [ -z "$c" ] && continue
+        if printf '%s\n' "$main_cols" | grep -qFx -- "$c"; then
+            common="${common:+${common}, }\"$c\""
+        fi
+    done <<EOF
+$legacy_cols
+EOF
+    printf '%s' "$common"
+}
+
+# Is the system running? (tmux session or healthy server)
+_system_running() {
+    if tmux has-session -t "$SOREN_SESSION" 2>/dev/null; then
+        echo "tmux session '$SOREN_SESSION' exists"
+        return 0
+    fi
+    if curl -sf -m 2 "http://localhost:${SOREN_PORT}/api/webhooks/health" >/dev/null 2>&1; then
+        echo "server answering on port ${SOREN_PORT}"
+        return 0
+    fi
+    return 1
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# status
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    echo -e "${BOLD}State consolidation status${NC}"
+    echo -e "  ${DIM}dir:    ${SOREN_DIR}${NC}"
+    echo -e "  ${DIM}target: ${TARGET_DB}${NC}"
+    echo ""
+
+    local any_legacy=0 name legacy t lc mc marker
+    for name in $LEGACY_NAMES; do
+        legacy="${SOREN_DIR}/${name}.db"
+        if [ ! -f "$legacy" ]; then
+            echo -e "  ${DIM}${name}.db — not present${NC}"
+            continue
+        fi
+        any_legacy=1
+        echo -e "  ${YELLOW}${name}.db — legacy DB present${NC}"
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            lc=$(_row_count "$legacy" "$t")
+            if [ -f "$TARGET_DB" ] && _has_table "$TARGET_DB" "$t"; then
+                mc=$(_row_count "$TARGET_DB" "$t")
+            else
+                mc="-"
+            fi
+            marker=""
+            if [ "$mc" != "-" ] && [ "$mc" -ge "$lc" ] 2>/dev/null; then
+                marker=" ${GREEN}(copied)${NC}"
+            fi
+            echo -e "      ${t}: legacy=${lc} soren.db=${mc}${marker}"
+        done <<EOF
+$(_user_tables "$legacy")
+EOF
+    done
+
+    echo ""
+    if [ -f "$TARGET_DB" ]; then
+        echo -e "  ${GREEN}soren.db present${NC}"
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            echo -e "      ${t}: $(_row_count "$TARGET_DB" "$t") rows"
+        done <<EOF
+$(_user_tables "$TARGET_DB")
+EOF
+    else
+        echo -e "  ${YELLOW}soren.db not created yet${NC}"
+    fi
+
+    if [ "$any_legacy" = "0" ]; then
+        echo ""
+        ok "No legacy databases — consolidation complete (or fresh install)"
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# run
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_run() {
+    # Safety gate: never cut over a live system (sandbox runs are isolated
+    # copies, so the gate does not apply there)
+    if [ -z "$SANDBOX_DIR" ] && [ "$FORCE" = "0" ]; then
+        local running
+        if running=$(_system_running); then
+            die "system appears to be running (${running}) — stop it with ./soren.sh stop, or pass --force"
+        fi
+    fi
+
+    [ -d "$SOREN_DIR" ] || die "state directory not found: $SOREN_DIR"
+
+    # Which legacy DBs exist?
+    local present="" name legacy
+    for name in $LEGACY_NAMES; do
+        [ -f "${SOREN_DIR}/${name}.db" ] && present="${present} ${name}"
+    done
+    if [ -z "$present" ]; then
+        ok "No legacy databases found in ${SOREN_DIR} — nothing to migrate"
+        echo ""
+        cmd_status
+        return 0
+    fi
+
+    info "Consolidating:${present} → ${TARGET_DB}"
+    echo ""
+
+    # Create the target DB in WAL mode (idempotent)
+    mkdir -p "$(dirname "$TARGET_DB")"
+    _sq "$TARGET_DB" 'PRAGMA journal_mode=WAL;' >/dev/null
+
+    local all_ok=1 migrated=""
+    for name in $present; do
+        legacy="${SOREN_DIR}/${name}.db"
+        echo -e "${BOLD}${name}.db${NC}"
+
+        local tables
+        tables=$(_user_tables "$legacy" 2>/dev/null) || {
+            warn "  cannot read ${legacy} — skipping (not moved)"
+            all_ok=0
+            continue
+        }
+        if [ -z "$tables" ]; then
+            echo -e "  ${DIM}empty database (no user tables)${NC}"
+            migrated="${migrated} ${name}"
+            continue
+        fi
+
+        # 1. Schema first (tables + indexes, IF NOT EXISTS collisions tolerated)
+        if ! _copy_schema "$legacy" "$TARGET_DB"; then
+            warn "  schema copy failed — skipping data copy for ${name}.db"
+            all_ok=0
+            continue
+        fi
+
+        # 2. Copy rows table by table
+        local db_ok=1 t lc mc cols esc_path after
+        while IFS= read -r t; do
+            [ -z "$t" ] && continue
+            lc=$(_row_count "$legacy" "$t")
+
+            if ! _has_table "$TARGET_DB" "$t"; then
+                warn "  ${t}: missing in target after schema copy — FAILED"
+                db_ok=0
+                continue
+            fi
+            mc=$(_row_count "$TARGET_DB" "$t")
+
+            if [ "$lc" = "0" ]; then
+                echo -e "  ${t}: legacy empty (0 rows) — nothing to copy"
+                continue
+            fi
+            # Idempotency heuristic: target already holds >= legacy rows
+            if [ "$mc" -ge "$lc" ]; then
+                echo -e "  ${t}: already copied (legacy=${lc}, soren.db=${mc}) — skipped"
+                continue
+            fi
+
+            # Schema drift guard: add any legacy columns missing on the target
+            if ! _align_columns "$legacy" "$TARGET_DB" "$t"; then
+                warn "  ${t}: could not align target columns with legacy — FAILED"
+                db_ok=0
+                continue
+            fi
+
+            cols=$(_common_columns "$legacy" "$TARGET_DB" "$t")
+            if [ -z "$cols" ]; then
+                warn "  ${t}: no common columns between legacy and target — FAILED"
+                db_ok=0
+                continue
+            fi
+
+            esc_path=$(_sql_escape "$legacy")
+            if ! _sq "$TARGET_DB" "ATTACH DATABASE '${esc_path}' AS legacy;
+INSERT OR IGNORE INTO main.\"$t\" ($cols) SELECT $cols FROM legacy.\"$t\";
+DETACH DATABASE legacy;"; then
+                warn "  ${t}: row copy failed"
+                db_ok=0
+                continue
+            fi
+
+            # 3. Verify counts
+            after=$(_row_count "$TARGET_DB" "$t")
+            if [ "$after" -ge "$lc" ]; then
+                if [ "$mc" = "0" ] && [ "$after" != "$lc" ]; then
+                    # fresh table should match exactly; >= means pre-existing rows
+                    warn "  ${t}: copied but counts differ (legacy=${lc}, soren.db=${after})"
+                else
+                    echo -e "  ${t}: ${GREEN}copied${NC} legacy=${lc} → soren.db=${after}"
+                fi
+            else
+                warn "  ${t}: VERIFY FAILED — legacy=${lc}, soren.db=${after} (delta $((lc - after)))"
+                db_ok=0
+            fi
+        done <<EOF
+$tables
+EOF
+
+        if [ "$db_ok" = "1" ]; then
+            migrated="${migrated} ${name}"
+        else
+            all_ok=0
+        fi
+        echo ""
+    done
+
+    if [ "$all_ok" != "1" ]; then
+        warn "Migration incomplete — legacy databases were NOT moved."
+        warn "Fix the reported issues and re-run; already-copied tables are skipped."
+        exit 1
+    fi
+
+    # 4. Full success: move legacy files (+ WAL/SHM siblings) to a backup dir
+    local ts backup_dir f s
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    backup_dir="${SOREN_DIR}/backup-pre-consolidation/${ts}"
+    mkdir -p "$backup_dir"
+    # Keep the backup tree out of git regardless of repo-level ignore rules
+    if [ ! -f "${SOREN_DIR}/backup-pre-consolidation/.gitignore" ]; then
+        printf '*\n' > "${SOREN_DIR}/backup-pre-consolidation/.gitignore"
+    fi
+
+    for name in $migrated; do
+        f="${SOREN_DIR}/${name}.db"
+        [ -f "$f" ] && mv "$f" "$backup_dir/"
+        for s in -wal -shm; do
+            if [ -f "${f}${s}" ]; then
+                mv "${f}${s}" "$backup_dir/"
+            fi
+        done
+    done
+
+    ok "Consolidation complete → ${TARGET_DB}"
+    ok "Legacy databases moved to ${backup_dir}"
+    echo ""
+    echo -e "${BOLD}Restore instructions${NC} (if anything looks wrong):"
+    echo -e "  1. Stop the system:        ./soren.sh stop"
+    echo -e "  2. Restore legacy files:   mv ${backup_dir}/*.db* ${SOREN_DIR}/"
+    echo -e "  3. Remove the target:      rm -f ${TARGET_DB} ${TARGET_DB}-wal ${TARGET_DB}-shm"
+    echo -e "  4. Check out a pre-consolidation commit of tools/ to use the legacy paths."
+    echo ""
+    cmd_status
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+command -v sqlite3 >/dev/null 2>&1 || die "sqlite3 not found"
+
+case "$MODE" in
+    status) cmd_status ;;
+    run)    cmd_run ;;
+    *)      die "unknown mode: $MODE" ;;
+esac

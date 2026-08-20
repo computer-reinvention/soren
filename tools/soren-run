@@ -8,7 +8,7 @@
 # Steps:
 #   1. Detect project (from --project or cwd)
 #   2. Decompose task description into typed subtasks using keyword heuristics
-#   3. Create parent task + subtasks in tasks.db with dependency edges
+#   3. Create parent task + subtasks in the tasks table (soren.db) with dependency edges
 #   4. Assign to permanent workers or project supervisor
 #   5. Print execution plan
 #   6. Execute (unless --dry-run)

@@ -8,14 +8,12 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import logging
 
-from ..config import settings
+from ..services.db import get_db
 from ..websocket.manager import ws_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-DB_PATH = settings.soren_dir / "conversations.db"
 
 
 class HeartbeatData(BaseModel):
@@ -45,22 +43,20 @@ _latest_heartbeat: Optional[HeartbeatResponse] = None
 # --- Database ---
 
 
+_SCHEMA = """CREATE TABLE IF NOT EXISTS heartbeat_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp REAL NOT NULL,
+    sections TEXT NOT NULL,
+    highest_priority TEXT,
+    all_clear BOOLEAN NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL
+)"""
+
+
 def _init_db():
     """Create heartbeat_history table if it doesn't exist."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS heartbeat_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp REAL NOT NULL,
-            sections TEXT NOT NULL,
-            highest_priority TEXT,
-            all_clear BOOLEAN NOT NULL DEFAULT 0,
-            received_at TEXT NOT NULL
-        )"""
-    )
-    conn.commit()
-    conn.close()
+    with get_db() as conn:
+        conn.execute(_SCHEMA)
 
 
 _init_db()
@@ -68,16 +64,12 @@ _init_db()
 
 @contextmanager
 def _get_connection():
-    """Get a database connection with WAL mode and proper cleanup."""
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    try:
+    """Get a consolidated-DB connection (standard pragmas) with proper cleanup."""
+    with get_db() as conn:
+        # Idempotent ensure — the DB path can change under tests, and this is
+        # a single cheap DDL statement on an existing table.
+        conn.execute(_SCHEMA)
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _store_heartbeat(hb: HeartbeatResponse):

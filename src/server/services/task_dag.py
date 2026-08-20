@@ -1,7 +1,8 @@
 """Task dependency DAG — directed acyclic graph for task ordering.
 
-Manages the task_dependencies table in tasks.db. Provides cycle detection,
-topological sort, and "ready tasks" computation (all deps satisfied).
+Manages the task_dependencies table in the consolidated .soren/soren.db.
+Provides cycle detection, topological sort, and "ready tasks" computation
+(all deps satisfied).
 
 Edge semantics: (task_id, depends_on) means task_id WAITS FOR depends_on.
 Arrow direction in DAG: depends_on → task_id (dep must complete first).
@@ -12,29 +13,20 @@ from collections import deque
 from contextlib import contextmanager
 from typing import Optional
 
-from ..config import settings
-
-DB_PATH = settings.soren_dir / "tasks.db"
+from .db import get_db, table_exists
 
 
 @contextmanager
 def _conn():
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
-    try:
+    with get_db() as conn:
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def ensure_table() -> None:
     """Create task_dependencies table if it doesn't exist (idempotent)."""
-    if not DB_PATH.exists():
-        return  # DB not yet created; called again on first task add
     with _conn() as conn:
+        if not table_exists(conn, "tasks"):
+            return  # tasks table not yet created; called again on first task add
         conn.execute("""
             CREATE TABLE IF NOT EXISTS task_dependencies (
                 task_id    TEXT NOT NULL,

@@ -10,13 +10,13 @@ Level 2: Code-level — scans task descriptions for API endpoint and module
 import json
 import logging
 import re
-import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 from ..config import settings
-from .task_dag import DB_PATH as TASKS_DB_PATH, get_dependencies
+from .db import get_db, table_exists
+from .task_dag import get_dependencies
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +39,10 @@ _IMPORT_RE = re.compile(
 
 @contextmanager
 def _task_conn():
-    if not TASKS_DB_PATH.exists():
-        raise RuntimeError("tasks.db not found")
-    conn = sqlite3.connect(str(TASKS_DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=5000")
-    try:
+    with get_db() as conn:
+        if not table_exists(conn, "tasks"):
+            raise RuntimeError("tasks table not found")
         yield conn
-    finally:
-        conn.close()
 
 
 def _get_project_path(project_id: str) -> Optional[str]:

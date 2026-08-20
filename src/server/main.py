@@ -41,6 +41,7 @@ from .services.agent_registry import agent_registry
 from .services.tmux_service import tmux_service
 from .websocket.manager import ws_manager
 from .services.auth import decode_token, init_db as init_auth_db
+from .services.db import init_schema_version, warn_if_migration_needed
 
 logging.basicConfig(level=getattr(logging, settings.log_level))
 logger = logging.getLogger(__name__)
@@ -125,6 +126,11 @@ AUTH_EXEMPT_PREFIXES = (
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting soren server...")
+    # Consolidated DB (.soren/soren.db): seed schema_version and check whether
+    # legacy per-domain DBs still need the one-time ./tools/migrate-state run.
+    # Never auto-migrates — explicit operator action; server serves either way.
+    init_schema_version()
+    warn_if_migration_needed()
     init_auth_db()
     ws_manager.start_ping_task()
     sleep_task = asyncio.create_task(_auto_sleep_task())

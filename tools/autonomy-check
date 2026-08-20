@@ -28,6 +28,9 @@ SOREN_PORT="${SOREN_PORT:-8000}"
 SOREN_MAILBOX="${SOREN_MAILBOX:-${SOREN_PROJECT_ROOT}/.soren/mailbox}"
 WORKER_IDLE_THRESHOLD=${WORKER_IDLE_THRESHOLD:-1800}  # 30 minutes in seconds
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
+
 # Parse flags
 OUTPUT_MODE="summary"
 while [[ $# -gt 0 ]]; do
@@ -259,15 +262,14 @@ if [[ -n "$windows" ]]; then
 fi
 
 #───────────────────────────────────────────────────────────────────────────────
-# 3. Backlog — pending items with priority breakdown (from tasks.db)
+# 3. Backlog — pending items with priority breakdown (from the tasks table)
 #───────────────────────────────────────────────────────────────────────────────
 
-tasks_db="${SOREN_PROJECT_ROOT}/.soren/tasks.db"
-if [[ -f "$tasks_db" ]]; then
-    p1=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='critical';" 2>/dev/null || echo 0)
-    p2=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='high';" 2>/dev/null || echo 0)
-    p3=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='medium';" 2>/dev/null || echo 0)
-    p4=$(sqlite3 "$tasks_db" "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='low';" 2>/dev/null || echo 0)
+if [[ -f "$SOREN_DB_PATH" ]]; then
+    p1=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='critical';" 2>/dev/null || echo 0)
+    p2=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='high';" 2>/dev/null || echo 0)
+    p3=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='medium';" 2>/dev/null || echo 0)
+    p4=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='low';" 2>/dev/null || echo 0)
     backlog_total=$((p1 + p2 + p3 + p4))
 
     if ((backlog_total > 0)); then
@@ -381,7 +383,7 @@ fi
 
 cd "$SOREN_PROJECT_ROOT"
 git_diff_stat=$(git diff --stat HEAD -- \
-    ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' \
+    ':!.soren/soren.db' ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' \
     ':!.soren/.router_line' ':!.soren/.router_position' ':!.soren/.log_markers/' \
     ':!.soren/audit.log' ':!.soren/tasks.db' 2>/dev/null || true)
 
@@ -393,7 +395,7 @@ if [[ -n "$git_diff_stat" ]]; then
 fi
 
 # Also check untracked files (new files not yet added)
-untracked_count=$(git ls-files --others --exclude-standard -- ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' 2>/dev/null | wc -l | tr -d ' ')
+untracked_count=$(git ls-files --others --exclude-standard -- ':!.soren/soren.db' ':!.soren/conversations.db' ':!.soren/mailbox' ':!.soren/.supervisor-heartbeat' 2>/dev/null | wc -l | tr -d ' ')
 if ((untracked_count > 0)); then
     if [[ -n "$git_summary" ]]; then
         git_summary="${git_summary}, ${untracked_count} untracked"
