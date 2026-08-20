@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+#===============================================================================
+# server-boot - Idempotent boot entrypoint for always-on server mode (launchd)
+#
+# Designed to run at login via launchd RunAtLoad (see: ./soren.sh server install).
+# Safe to run by hand at any time — if soren is already healthy it does nothing.
+#
+# What it does, in order:
+#   1. Wait for the network to come up (max 60s)
+#   2. If soren is already healthy on 127.0.0.1:$SOREN_PORT → log + exit 0
+#      (tailscale `serve --bg` config persists across reboots, so nothing
+#      else is needed in this path)
+#   3. Otherwise start soren fully DETACHED (nohup + disown). Never run
+#      `soren.sh start` in the launchd foreground: its tmux session is torn
+#      down by an exit-trap when the foreground process is killed.
+#   4. Wait up to 90s for health, log the outcome
+#   5. Best-effort: ensure `tailscale serve` proxies the tailnet HTTPS
+#      endpoint to 127.0.0.1:$SOREN_PORT — using the Tailscale.app bundled
+#      CLI ONLY. The homebrew formula CLI (/opt/homebrew/bin/tailscale)
+#      talks to a different daemon socket and must not be used with the app.
+#      Tailscale failures never fail the boot; they are logged and skipped.
+#
+# Logs: .soren/logs/server-boot.log
+#
+# Usage:
+#   server-boot          Run the boot sequence (idempotent)
+#   server-boot help     Show this help
+#===============================================================================
+
+set -euo pipefail
+
+# Self-locate the repo root from the script's own path (tools/ -> repo root).
+# The launchd plist hardcodes the absolute path to this script, but the script
+# itself never assumes where it lives.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+SOREN_PORT="${SOREN_PORT:-8000}"
+HEALTH_URL="http://127.0.0.1:${SOREN_PORT}/api/webhooks/health"
+LOG_DIR="${ROOT}/.soren/logs"
+LOG_FILE="${LOG_DIR}/server-boot.log"
+
+# The Tailscale.app bundled CLI. Do NOT swap for /opt/homebrew/bin/tailscale:
+# the formula CLI talks to a different tailscaled socket than the app's
+# NetworkExtension daemon and will report "failed to connect" or, worse,
+# manage a second daemon.
+TS_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+NETWORK_WAIT_MAX=60
+HEALTH_WAIT_MAX=90
+
+mkdir -p "$LOG_DIR"
+
+#-------------------------------------------------------------------------------
+# Logging
+#-------------------------------------------------------------------------------
+
+# Always append to the log file. Echo to stdout only when interactive —
+# under launchd, stdout is redirected to the same file and would duplicate.
+log() {
+    local level="$1"; shift
+    local line
+    line="$(date -Iseconds) [${level}] $*"
+    echo "$line" >> "$LOG_FILE"
+    if [[ -t 1 ]]; then
+        echo "$line"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Steps
+#-------------------------------------------------------------------------------
+
+server_healthy() {
+    curl -sf -m 3 "$HEALTH_URL" >/dev/null 2>&1
+}
+
+wait_for_network() {
+    local waited=0
+    while (( waited < NETWORK_WAIT_MAX )); do
+        if route -n get 1.1.1.1 >/dev/null 2>&1; then
+            log "INFO" "network up after ${waited}s"
+            return 0
+        fi
+        # Fallback probe: any global IPv4 state at all
+        if scutil --nwi 2>/dev/null | grep -q 'IPv4 network interface information'; then
+            if ! scutil --nwi 2>/dev/null | grep -q 'No network information'; then
+                log "INFO" "network up (scutil) after ${waited}s"
+                return 0
+            fi
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    log "WARN" "network not confirmed after ${NETWORK_WAIT_MAX}s — continuing anyway"
+    return 0
+}
+
+start_soren_detached() {
+    log "INFO" "starting soren detached (nohup + disown)"
+    # QUIRK: `soren.sh start` run in the foreground tears down the tmux
+    # session via an exit-trap when its process is killed (launchd reaps the
+    # job after RunAtLoad). Detach fully: subshell + nohup + disown so the
+    # child is orphaned and reparented away from this process group.
+    (
+        cd "$ROOT"
+        nohup ./soren.sh start >> "$LOG_FILE" 2>&1 < /dev/null &
+        disown 2>/dev/null || true
+    )
+
+    local waited=0
+    while (( waited < HEALTH_WAIT_MAX )); do
+        if server_healthy; then
+            log "OK" "soren healthy after ${waited}s (port ${SOREN_PORT})"
+            return 0
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    log "FAIL" "soren not healthy after ${HEALTH_WAIT_MAX}s — check .soren/logs/ and .soren/status.log"
+    return 1
+}
+
+# Best-effort: never fail the boot on tailscale problems. Every early return
+# here is a logged skip, not an error.
+ensure_tailscale_serve() {
+    if [[ ! -x "$TS_CLI" ]]; then
+        log "SKIP" "Tailscale.app CLI not found at ${TS_CLI} — skipping serve setup"
+        return 0
+    fi
+
+    if ! "$TS_CLI" status >/dev/null 2>&1; then
+        log "SKIP" "tailscale daemon not responding (app not running or logged out) — try: open -a Tailscale"
+        return 0
+    fi
+
+    # Idempotence: if serve already proxies our port, leave it alone.
+    if "$TS_CLI" serve status 2>/dev/null | grep -q "127\.0\.0\.1:${SOREN_PORT}"; then
+        log "OK" "tailscale serve already configured for 127.0.0.1:${SOREN_PORT}"
+        return 0
+    fi
+
+    # New syntax first (tailscale >= 1.44): serve --bg <port>
+    if "$TS_CLI" serve --bg "$SOREN_PORT" >> "$LOG_FILE" 2>&1; then
+        log "OK" "tailscale serve configured: tailnet HTTPS -> 127.0.0.1:${SOREN_PORT} (serve --bg ${SOREN_PORT})"
+        return 0
+    fi
+
+    # Older syntax fallback: serve https / <target>
+    if "$TS_CLI" serve https / "http://127.0.0.1:${SOREN_PORT}" >> "$LOG_FILE" 2>&1; then
+        log "OK" "tailscale serve configured via legacy syntax (serve https / http://127.0.0.1:${SOREN_PORT})"
+        return 0
+    fi
+
+    log "WARN" "tailscale serve setup failed (both syntaxes) — configure manually: ${TS_CLI} serve --bg ${SOREN_PORT}"
+    return 0
+}
+
+#-------------------------------------------------------------------------------
+# Main
+#-------------------------------------------------------------------------------
+
+main() {
+    case "${1:-}" in
+        help|--help|-h)
+            sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+    esac
+
+    log "INFO" "server-boot invoked (root: ${ROOT}, port: ${SOREN_PORT})"
+
+    wait_for_network
+
+    if server_healthy; then
+        log "OK" "soren already running and healthy on port ${SOREN_PORT} — nothing to do"
+        exit 0
+    fi
+
+    local boot_ok=0
+    start_soren_detached || boot_ok=1
+
+    # Tailscale is best-effort even if soren failed to come up: the serve
+    # config persisting means the endpoint recovers as soon as soren does.
+    ensure_tailscale_serve || true
+
+    if (( boot_ok == 0 )); then
+        log "OK" "server-boot complete"
+    else
+        log "FAIL" "server-boot finished with soren unhealthy — manual attention needed"
+    fi
+    exit "$boot_ok"
+}
+
+main "$@"
