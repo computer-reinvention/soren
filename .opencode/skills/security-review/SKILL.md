@@ -34,7 +34,7 @@ All injection is the same bug: **data concatenated into a language** (SQL, shell
 
 ## Secrets Handling
 
-- Secrets come from env vars or the secret store (`.soren/secrets.db`) — never literals in code, config committed to git, or CLI args (visible in `ps`).
+- Secrets come from env vars or the encrypted secret store (`tools/secrets`, backed by the `secrets_vault` table in `.soren/soren.db`) — never literals in code, config committed to git, or CLI args (visible in `ps`).
 - Never log secrets: audit log lines, error messages, and exception traces that echo request bodies/headers.
 - If a secret ever touched git history, it's burned — rotate it; deleting the file doesn't help.
 - Tokens: compare with constant-time comparison; expire them; scope them minimally.

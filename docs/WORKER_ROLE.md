@@ -223,10 +223,10 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 
 ## Preferences
 
-SOREN has a TARS-style preference system in `.soren/preferences.json`. On startup, read this file to calibrate your behavior:
+SOREN has a TARS-style preference system stored in the `prefs` table of the consolidated database (`.soren/soren.db`). On startup, read it to calibrate your behavior:
 
 ```bash
-./tools/prefs list    # or: jq . .soren/preferences.json
+./tools/prefs list    # or: sqlite3 .soren/soren.db "SELECT key, value FROM prefs"
 ```
 
 Workers should adjust for these settings:

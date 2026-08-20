@@ -146,8 +146,8 @@ To make your runtime data durable across machines, create a **private** GitHub r
 
 - `mailbox` — JSONL message queue
 - `journal/YYYY-MM-DD/` — daily journals, plans, research artifacts
-- `tasks.db` — SQLite task database
-- `secrets.db` — encrypted secret store
+- `soren.db` — the single consolidated SQLite database (tasks, messages, agent events, agent registry, memories, encrypted secrets vault, verification state, projects/teams/schedule/preferences)
+- `agent_registry.json`, `projects.json`, `teams.json` — read-only JSON views regenerated from `soren.db`
 - `worker-contexts/` — per-worker role files and conversation state
 - `*.log` — daemon and router logs
 
@@ -166,7 +166,7 @@ Copy `.env.example` to `.env` and adjust as needed. Key settings:
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — mailbox path (default `.soren/mailbox`)
 
-The supervisor reads its growth agenda from `.soren/AMBITION.md` and behavioral preferences from `.soren/preferences.json` and `.soren/conventions.md`. Templates for these are in `.soren/` — copy and customize.
+The supervisor reads its growth agenda from `.soren/AMBITION.md`, style conventions from `.soren/conventions.md` (templates for both live in `.soren/` — copy and customize), and behavioral preferences via `./tools/prefs` (stored in the `prefs` table of `.soren/soren.db`).
 
 ## License
 
