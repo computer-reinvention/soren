@@ -55,6 +55,12 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 
 ## One-time setup checklist
 
+> **Shortcut:** `./tools/server-setup` runs all of the steps below
+> interactively (sudo prompts included), is idempotent, sets the tailscale
+> hostname to `terminal` (override with `--hostname <name>`), and opens the
+> Serve/HTTPS enablement page automatically when tailscale requires it.
+> The manual steps remain documented for reference.
+
 1. **Sign in to Tailscale.app** — `open -a Tailscale`, sign in from the menu
    bar icon. Verify: `"/Applications/Tailscale.app/Contents/MacOS/Tailscale" status`
    lists this machine.
@@ -99,7 +105,7 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 ## Daily use
 
 - **Dashboard**: `https://<machine>.<tailnet>.ts.net` from any tailnet device
-  (e.g. `https://pankajs-macbook-air.<tailnet>.ts.net`). Dashboard auth stays
+  (e.g. `https://terminal.<tailnet>.ts.net`). Dashboard auth stays
   on — log in as usual.
 - **Command Center**: use `@agent-name` routing in the dashboard's Command
   Center to message the supervisor or direct a specific agent.
