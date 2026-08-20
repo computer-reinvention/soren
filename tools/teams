@@ -23,6 +23,9 @@ WORKERS_TOOL="${SOREN_HOME}/tools/workers"
 # Source shared scanning library (used by setup-permanent)
 source "${SOREN_HOME}/tools/lib/scan-project.sh"
 
+# Registry helpers (soren_registry_update — sqlite master + JSON view regen)
+source "${SOREN_HOME}/tools/lib/opencode.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -865,14 +868,11 @@ cmd_setup_permanent() {
             ok "Spawned ${wname}"
             spawned+=("$wname")
 
-            # Set display name in registry
+            # Set display name in registry (through the sqlite master — a raw
+            # JSON edit would be clobbered by the next view regeneration)
             local reg_file="${SOREN_HOME}/.soren/agent_registry.json"
-            if [[ -f "$reg_file" ]]; then
-                local tmp
-                tmp=$(mktemp)
-                jq --arg k "$wname" --arg d "$rlabel" \
-                    '.[$k].display_name = $d' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
-            fi
+            soren_registry_update "$reg_file" --arg k "$wname" --arg d "$rlabel" \
+                '.[$k].display_name = $d' || warn "Could not set display name for ${wname}"
         else
             warn "Failed to spawn ${wname}"
         fi
