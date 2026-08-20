@@ -17,9 +17,13 @@
 #   ./soren.sh smoke            End-to-end smoke test: spawn a test worker
 #   ./soren.sh team up [core]   Bootstrap the permanent worker team (core = 3)
 #   ./soren.sh team status      Show permanent worker roster
+#   ./soren.sh server install   Install launchd agent: auto-start at login (always-on server)
+#   ./soren.sh server uninstall Unload + remove the launchd agent
+#   ./soren.sh server status    Server-mode status: launchd, health, tailscale serve
 #   ./soren.sh help             Show this help
 #
 # Lifecycle commands delegate to src/orchestrator/soren.sh.
+# Server mode (launchd + Tailscale remote access): docs/REMOTE_ACCESS.md
 #═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -112,6 +116,189 @@ server_healthy() {
 }
 
 #───────────────────────────────────────────────────────────────────────────────
+# Server mode (always-on home server: launchd boot + Tailscale remote access)
+#───────────────────────────────────────────────────────────────────────────────
+
+SERVER_LABEL="com.computerreinvention.soren"
+SERVER_PLIST="${HOME}/Library/LaunchAgents/${SERVER_LABEL}.plist"
+# The Tailscale.app bundled CLI. NEVER use /opt/homebrew/bin/tailscale here —
+# the formula CLI talks to a different tailscaled socket than the app's
+# NetworkExtension daemon (see docs/REMOTE_ACCESS.md, "two-CLI footgun").
+TS_APP_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+write_server_plist() {
+    local dest="$1"
+    mkdir -p "$(dirname "$dest")"
+    cat > "$dest" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${SERVER_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${ROOT}/tools/server-boot</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>WorkingDirectory</key>
+    <string>${ROOT}</string>
+    <key>StandardOutPath</key>
+    <string>${ROOT}/.soren/logs/server-boot.log</string>
+    <key>StandardErrorPath</key>
+    <string>${ROOT}/.soren/logs/server-boot.log</string>
+</dict>
+</plist>
+EOF
+}
+
+server_plist_loaded() {
+    launchctl print "gui/$(id -u)/${SERVER_LABEL}" >/dev/null 2>&1
+}
+
+tailscale_serve_configured() {
+    "$TS_APP_CLI" serve status 2>/dev/null | grep -q "127\.0\.0\.1:${SOREN_PORT}"
+}
+
+cmd_server() {
+    local action="${1:-status}"
+    case "$action" in
+        install)
+            mkdir -p "${ROOT}/.soren/logs"
+            write_server_plist "$SERVER_PLIST"
+            ok "plist written: ${SERVER_PLIST}"
+            # Idempotent: unload any previous copy before loading the new one
+            if server_plist_loaded; then
+                info "agent already loaded — booting out old copy first"
+                launchctl bootout "gui/$(id -u)/${SERVER_LABEL}" 2>/dev/null || true
+            fi
+            if launchctl bootstrap "gui/$(id -u)" "$SERVER_PLIST" 2>/dev/null; then
+                ok "launchd agent loaded (bootstrap gui/$(id -u))"
+            else
+                warn "launchctl bootstrap failed — falling back to legacy load -w"
+                launchctl load -w "$SERVER_PLIST" 2>/dev/null || die "could not load launchd agent (bootstrap and load -w both failed)"
+                ok "launchd agent loaded (load -w)"
+            fi
+            info "soren now auto-starts at login (RunAtLoad). Boot log: .soren/logs/server-boot.log"
+            info "Runbook: docs/REMOTE_ACCESS.md"
+            ;;
+        uninstall)
+            if server_plist_loaded; then
+                launchctl bootout "gui/$(id -u)/${SERVER_LABEL}" 2>/dev/null \
+                    || launchctl unload -w "$SERVER_PLIST" 2>/dev/null \
+                    || warn "could not unload agent (already gone?)"
+                ok "launchd agent unloaded"
+            else
+                info "launchd agent not loaded"
+            fi
+            if [[ -f "$SERVER_PLIST" ]]; then
+                rm -f "$SERVER_PLIST"
+                ok "removed ${SERVER_PLIST}"
+            else
+                info "no plist at ${SERVER_PLIST}"
+            fi
+            ;;
+        status)
+            # launchd
+            if [[ ! -f "$SERVER_PLIST" ]]; then
+                warn "launchd: not installed (run ./soren.sh server install)"
+            elif server_plist_loaded; then
+                ok "launchd: agent loaded (${SERVER_LABEL})"
+            else
+                warn "launchd: plist exists but agent not loaded — re-run ./soren.sh server install"
+            fi
+            # soren health
+            if server_healthy; then
+                ok "soren: healthy on 127.0.0.1:${SOREN_PORT}"
+            else
+                warn "soren: not responding on port ${SOREN_PORT}"
+            fi
+            # tailscale daemon (app CLI only)
+            if [[ ! -x "$TS_APP_CLI" ]]; then
+                warn "tailscale: Tailscale.app CLI not found (${TS_APP_CLI})"
+            elif "$TS_APP_CLI" status >/dev/null 2>&1; then
+                ok "tailscale: daemon running, logged in (app CLI)"
+                if tailscale_serve_configured; then
+                    ok "tailscale serve: tailnet HTTPS -> 127.0.0.1:${SOREN_PORT}"
+                else
+                    warn "tailscale serve: not configured for port ${SOREN_PORT} — run: \"${TS_APP_CLI}\" serve --bg ${SOREN_PORT}"
+                fi
+            else
+                warn "tailscale: daemon not responding (app not running or logged out) — open -a Tailscale"
+            fi
+            ;;
+        plist)
+            # Write the plist to an arbitrary path without loading it
+            # (used for linting/inspection; not part of normal workflows).
+            local dest="${2:-$SERVER_PLIST}"
+            write_server_plist "$dest"
+            ok "plist written (not loaded): ${dest}"
+            ;;
+        *)
+            die "usage: soren.sh server [install | uninstall | status]"
+            ;;
+    esac
+}
+
+# Non-fatal server-mode checks for cmd_doctor. Runs only when the launchd
+# plist exists (server mode installed) or doctor is called with --server.
+doctor_server_mode() {
+    echo -e "${BOLD}Server mode${NC}"
+
+    # launchd agent
+    if server_plist_loaded; then
+        ok "launchd agent loaded (${SERVER_LABEL})"
+    elif [[ -f "$SERVER_PLIST" ]]; then
+        warn "launchd plist exists but not loaded — re-run ./soren.sh server install"
+    else
+        warn "launchd agent not installed — run ./soren.sh server install"
+    fi
+
+    # tailscale daemon + login (app CLI ONLY — the homebrew CLI talks to a
+    # different daemon socket and gives misleading answers here)
+    if [[ ! -x "$TS_APP_CLI" ]]; then
+        warn "Tailscale.app CLI not found at ${TS_APP_CLI} — install Tailscale.app"
+    elif "$TS_APP_CLI" status >/dev/null 2>&1; then
+        ok "tailscale daemon reachable and logged in (app CLI)"
+        if tailscale_serve_configured; then
+            ok "tailscale serve proxies tailnet HTTPS -> 127.0.0.1:${SOREN_PORT}"
+        else
+            warn "tailscale serve not configured for ${SOREN_PORT} — run: \"${TS_APP_CLI}\" serve --bg ${SOREN_PORT}"
+        fi
+    else
+        warn "tailscale daemon not responding or logged out — open -a Tailscale, then sign in"
+    fi
+
+    # Remote Login (sshd). systemsetup -getremotelogin needs sudo, so probe
+    # the port instead.
+    if nc -z -w 2 localhost 22 >/dev/null 2>&1; then
+        ok "Remote Login (SSH) enabled — port 22 open"
+    else
+        warn "Remote Login off — fix: sudo systemsetup -setremotelogin on"
+    fi
+
+    # AC sleep must be 0 for an always-on server. Parse the AC Power section
+    # of `pmset -g custom` (section headers start at column 0, values are
+    # indented).
+    local ac_sleep
+    ac_sleep=$(pmset -g custom 2>/dev/null | awk '
+        /^AC Power:/    { ac = 1; next }
+        /^[A-Za-z].*:$/ { ac = 0 }
+        ac && $1 == "sleep" { print $2; exit }
+    ')
+    if [[ "$ac_sleep" == "0" ]]; then
+        ok "pmset: no sleep on AC power"
+    elif [[ -z "$ac_sleep" ]]; then
+        warn "pmset: could not read AC sleep setting — check: pmset -g custom"
+    else
+        warn "pmset: Mac sleeps on AC power (sleep=${ac_sleep}) — fix: sudo pmset -c sleep 0 displaysleep 10"
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
 # Commands
 #───────────────────────────────────────────────────────────────────────────────
 
@@ -184,6 +371,12 @@ cmd_doctor() {
         [[ $drift -eq 0 ]] && ok "Agent ports consistent with registry"
     fi
     echo ""
+
+    # Server mode (non-fatal): only when installed, or explicitly requested
+    if [[ -f "$SERVER_PLIST" || "${1:-}" == "--server" ]]; then
+        doctor_server_mode
+        echo ""
+    fi
 
     # Deep verification (plugin, hooks, tools) if the system-verify tool exists
     if [[ -x "${ROOT}/tools/system-verify" ]]; then
@@ -308,7 +501,7 @@ cmd_team() {
 }
 
 cmd_help() {
-    sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 #───────────────────────────────────────────────────────────────────────────────
@@ -317,7 +510,7 @@ cmd_help() {
 
 case "${1:-help}" in
     setup)   cmd_setup ;;
-    doctor)  cmd_doctor ;;
+    doctor)  shift; cmd_doctor "$@" ;;
     start)   cmd_start ;;
     stop|restart|status|detached-restart)
              exec "$ORCH" "$@" ;;
@@ -331,6 +524,7 @@ case "${1:-help}" in
     test)    cmd_test ;;
     smoke)   cmd_smoke ;;
     team)    shift; cmd_team "$@" ;;
+    server)  shift; cmd_server "$@" ;;
     help|--help|-h) cmd_help ;;
     *)       die "unknown command: $1 (see ./soren.sh help)" ;;
 esac
