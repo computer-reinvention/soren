@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# server-setup — one-shot interactive setup for running soren as a home server
+#
+# Performs the manual steps from docs/REMOTE_ACCESS.md:
+#   1. Enable Remote Login (SSH)                      [sudo]
+#   2. Never sleep on AC power                        [sudo]
+#   3. Install the launchd boot agent                 (soren.sh server install)
+#   4. Set the tailscale hostname                     (default: terminal)
+#   5. Enable tailscale serve (HTTPS, fallback HTTP)  (app CLI)
+#   6. Final check: soren.sh doctor --server
+#
+# Idempotent — safe to re-run. Usage:
+#   ./tools/server-setup [--hostname <name>] [--skip-sudo]
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; DIM='\033[2m'; NC='\033[0m'
+ok()   { printf "${GREEN}✓${NC} %s\n" "$1"; }
+warn() { printf "${YELLOW}!${NC} %s\n" "$1"; }
+info() { printf "${DIM}·${NC} %s\n" "$1"; }
+die()  { printf "${RED}✗${NC} %s\n" "$1" >&2; exit 1; }
+
+TS_APP="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+HOSTNAME_WANTED="terminal"
+SKIP_SUDO=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --hostname) shift; HOSTNAME_WANTED="${1:?--hostname needs a value}" ;;
+        --skip-sudo) SKIP_SUDO=true ;;
+        -h|--help) sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "unknown arg: $1 (see --help)" ;;
+    esac
+    shift
+done
+
+# Run a tailscale command with a hang guard (serve blocks forever when the
+# Serve/HTTPS feature is not yet enabled for this node in the admin console).
+ts_guarded() {
+    local secs="$1"; shift
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$TS_APP" "$@" 2>&1
+}
+
+echo "── soren server setup ──────────────────────────────────────────"
+
+#─ 1. Remote Login (SSH) ─────────────────────────────────────────────
+if nc -z localhost 22 2>/dev/null; then
+    ok "Remote Login (SSH) already enabled"
+elif $SKIP_SUDO; then
+    warn "SSH off — run: sudo systemsetup -setremotelogin on"
+else
+    info "Enabling Remote Login (sudo password may be prompted)..."
+    sudo systemsetup -setremotelogin on >/dev/null
+    ok "Remote Login enabled"
+fi
+
+#─ 2. Power: never sleep on AC ───────────────────────────────────────
+ac_sleep="$(pmset -g custom | awk '/AC Power/{f=1} f && $1=="sleep"{print $2; exit}')"
+if [[ "${ac_sleep:-1}" == "0" ]]; then
+    ok "AC sleep already 0"
+elif $SKIP_SUDO; then
+    warn "AC sleep=${ac_sleep:-?} — run: sudo pmset -c sleep 0 displaysleep 10"
+else
+    info "Disabling sleep on AC power..."
+    sudo pmset -c sleep 0 displaysleep 10
+    ok "AC sleep disabled (display sleeps at 10 min)"
+fi
+
+#─ 3. launchd boot agent ─────────────────────────────────────────────
+if [[ -f "$HOME/Library/LaunchAgents/com.computerreinvention.soren.plist" ]]; then
+    ok "launchd boot agent already installed"
+else
+    "${ROOT}/soren.sh" server install
+fi
+
+#─ 4. Tailscale hostname ─────────────────────────────────────────────
+[[ -x "$TS_APP" ]] || die "Tailscale.app not found — install it, sign in (open -a Tailscale), then re-run"
+if ! ts_guarded 10 status >/dev/null; then
+    die "tailscale daemon not responding — open -a Tailscale and sign in, then re-run"
+fi
+current_host="$(ts_guarded 10 status --json | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["HostName"])' 2>/dev/null || echo "")"
+if [[ "$current_host" == "$HOSTNAME_WANTED" ]]; then
+    ok "tailscale hostname already '$HOSTNAME_WANTED'"
+else
+    ts_guarded 10 set --hostname="$HOSTNAME_WANTED"
+    ok "tailscale hostname set to '$HOSTNAME_WANTED'"
+fi
+
+#─ 5. tailscale serve (HTTPS preferred, HTTP fallback) ───────────────
+serve_out="$(ts_guarded 10 serve status || true)"
+if printf '%s' "$serve_out" | grep -q '^https://.*ts.net'; then
+    ok "tailscale serve (HTTPS) already proxying → 127.0.0.1:8000"
+    printf '%s\n' "$serve_out" | grep -m1 'ts.net' || true
+elif printf '%s' "$serve_out" | grep -q 'proxy http://127.0.0.1:8000'; then
+    info "Interim HTTP serve active — attempting upgrade to HTTPS..."
+    https_out="$(ts_guarded 25 serve --bg 8000 || true)"
+    if printf '%s' "$https_out" | grep -q 'proxy http://127.0.0.1:8000'; then
+        ts_guarded 10 serve --http=80 off >/dev/null 2>&1 || true
+        ok "Upgraded to HTTPS serve"
+        printf '%s\n' "$https_out" | grep -m1 'ts.net' || true
+    else
+        enable_url="$(printf '%s' "$https_out" | grep -o 'https://login.tailscale.com/f/serve?node=[A-Za-z0-9]*' || true)"
+        warn "HTTPS not available yet — keeping interim HTTP serve."
+        if [[ -n "$enable_url" ]]; then
+            info "Enable Serve/HTTPS here, then re-run: $enable_url"
+            open "$enable_url" 2>/dev/null || true
+        fi
+    fi
+else
+    info "Enabling tailscale serve (HTTPS)..."
+    https_out="$(ts_guarded 25 serve --bg 8000 || true)"
+    if printf '%s' "$https_out" | grep -q 'proxy http://127.0.0.1:8000'; then
+        ok "HTTPS serve enabled"
+        printf '%s\n' "$https_out" | grep -m1 'ts.net' || true
+    else
+        # Common cause: Serve/HTTPS feature not enabled for this node yet.
+        enable_url="$(printf '%s' "$https_out" | grep -o 'https://login.tailscale.com/f/serve?node=[A-Za-z0-9]*' || true)"
+        if [[ -n "$enable_url" ]]; then
+            warn "HTTPS serve needs one-time enablement in the admin console."
+            info "Opening: $enable_url"
+            open "$enable_url" 2>/dev/null || true
+            warn "Click 'Enable' there, then re-run ./tools/server-setup"
+        else
+            warn "HTTPS serve did not come up (certs may still be provisioning)."
+        fi
+        info "Setting up interim plain-HTTP serve (tailnet-only, no TLS)..."
+        http_out="$(ts_guarded 15 serve --http=80 --bg 8000 || true)"
+        if printf '%s' "$http_out" | grep -q 'proxy http://127.0.0.1:8000'; then
+            ok "Interim HTTP serve enabled"
+            printf '%s\n' "$http_out" | grep -m1 'ts.net' || true
+            info "After enabling HTTPS: $TS_APP serve --http=80 off && $TS_APP serve --bg 8000"
+        else
+            warn "serve not configured — see docs/REMOTE_ACCESS.md troubleshooting"
+        fi
+    fi
+fi
+
+#─ 6. Final check ────────────────────────────────────────────────────
+echo ""
+"${ROOT}/soren.sh" doctor --server || true
+echo ""
+ok "Setup pass complete. Dashboard (tailnet devices only):"
+info "  https://${HOSTNAME_WANTED}.<your-tailnet>.ts.net   (or http:// if on interim serve)"
+info "  Full control: ssh ${HOSTNAME_WANTED} && tmux attach -t soren"
