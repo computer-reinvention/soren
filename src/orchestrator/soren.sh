@@ -90,6 +90,12 @@ EOF
     # Lock window name to prevent renaming
     tmux set-option -t "$SOREN_SESSION:monitor" allow-rename off
 
+    # Aggressive resize: size windows to the smallest session actually viewing
+    # them (not the smallest attached client), so web-terminal viewport
+    # sessions (view-*, grouped onto this session) don't letterbox agents.
+    # -g sets the global window option, which grouped sessions inherit.
+    tmux set-option -t "$SOREN_SESSION" -g aggressive-resize on 2>/dev/null || true
+
     printf "${GREEN}✓${NC} Session started: ${SOREN_SESSION}\n"
     printf "${GREEN}✓${NC} Monitor window launched\n"
     echo ""

@@ -6,6 +6,7 @@ import { useMessages } from '@/hooks/useMessages';
 import { useAgentStore } from '@/stores/agentStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useViewerStore } from '@/stores/viewerStore';
+import { useTerminalStore } from '@/stores/terminalStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useAgents } from '@/hooks/useAgents';
 import { useProjectAgents } from '@/hooks/useProjects';
@@ -32,6 +33,7 @@ export function ChatPanel() {
   const { selectedAgentId, viewingArchivedId } = useAgentStore();
   const { username } = useAuthStore();
   const { selectedFile } = useViewerStore();
+  const terminalShowing = useTerminalStore((state) => state.centerMode === 'terminal');
   const { selectedProjectId } = useProjectStore();
   const {
     messages: allLoadedMessages,
@@ -194,7 +196,9 @@ export function ChatPanel() {
         textarea.value = '';
       }
     },
-    enabled: !selectedFile,
+    // Disabled while the terminal covers the chat (ChatPanel stays mounted
+    // behind it) so Cmd+K/Cmd+Enter/Escape don't act on the hidden input.
+    enabled: !selectedFile && !terminalShowing,
   });
 
   // If a file is selected, show the file viewer instead of chat

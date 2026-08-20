@@ -14,8 +14,21 @@ const getWsUrl = () => {
   return 'ws://localhost:8000/api/agents/ws'; // Fallback for SSR/build
 };
 
+const getTerminalWsUrl = () => {
+  if (import.meta.env.VITE_TERMINAL_WS_URL) return import.meta.env.VITE_TERMINAL_WS_URL;
+  if (typeof window !== 'undefined') {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${protocol}//${window.location.host}/api/terminal/ws`;
+  }
+  return 'ws://localhost:8000/api/terminal/ws'; // Fallback for SSR/build
+};
+
 export const API_BASE = getApiBase();
 export const WS_URL = getWsUrl();
+export const TERMINAL_WS_URL = getTerminalWsUrl();
+
+// App-level keepalive ping for the interactive terminal WebSocket
+export const TERMINAL_PING_INTERVAL = 25000;
 
 // WebSocket reconnection with exponential backoff
 export const RECONNECT_DELAY_BASE = 1000; // Start at 1 second

@@ -2519,6 +2519,13 @@ main() {
     _orch_log "[STARTUP] node version: $(node --version 2>/dev/null || echo 'unknown')"
     _orch_log "============================================================"
 
+    # Aggressive resize for the session this monitor runs in: soren.sh sets it
+    # at session creation, but sessions preserved across monitor restarts (or
+    # created before this option existed) need it applied here too. Idempotent,
+    # best-effort. Grouped web-terminal viewports (view-*) inherit the global
+    # window option.
+    tmux set-option -t "$SOREN_SESSION" -g aggressive-resize on 2>/dev/null || true
+
     # Clean up stale daemon processes from previous runs
     cleanup_stale_daemons
 

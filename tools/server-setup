@@ -64,22 +64,64 @@ fi
 
 #─ 2. Remote Login (SSH) ─────────────────────────────────────────────
 # NOTE: 'sudo systemsetup -setremotelogin on' fails on modern macOS unless
-# the terminal app has Full Disk Access. Try it, but fall back to opening
-# the System Settings pane for a one-click manual enable.
-if nc -z localhost 22 2>/dev/null; then
+# the terminal app has Full Disk Access. Order of attempts:
+#   systemsetup → launchctl enable+bootstrap of sshd (works on some
+#   FDA-blocked configs) → open the System Settings pane for manual enable.
+ssh_probe() { nc -z localhost 22 2>/dev/null; }
+
+# Copy-paste hardening guidance, printed whenever SSH is confirmed on.
+print_ssh_hardening() {
+    local u
+    u="${USER:-$(id -un)}"
+    echo ""
+    info "Recommended once key-based login works — disable password auth."
+    info "On this Mac, copy-paste (see docs/REMOTE_ACCESS.md → 'Direct SSH'):"
+    cat <<EOF
+
+sudo mkdir -p /etc/ssh/sshd_config.d
+sudo tee /etc/ssh/sshd_config.d/soren.conf >/dev/null <<'CONF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers ${u}
+CONF
+sudo launchctl kickstart -k system/com.openssh.sshd   # reload sshd
+
+EOF
+    info "Laptop side first (one-time): ssh-copy-id ${u}@${HOSTNAME_WANTED}"
+}
+
+ssh_on=false
+if ssh_probe; then
     ok "Remote Login (SSH) already enabled"
+    ssh_on=true
 elif $SKIP_SUDO; then
     warn "SSH off — run: sudo systemsetup -setremotelogin on (needs Full Disk Access)"
+    info "or: sudo launchctl enable system/com.openssh.sshd && sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist"
+    info "or: System Settings → General → Sharing → toggle 'Remote Login' ON"
 else
     info "Enabling Remote Login..."
-    if sudo systemsetup -setremotelogin on >/dev/null 2>&1 && nc -z localhost 22 2>/dev/null; then
-        ok "Remote Login enabled"
+    if sudo systemsetup -setremotelogin on >/dev/null 2>&1 && ssh_probe; then
+        ok "Remote Login enabled (systemsetup)"
+        ssh_on=true
     else
-        warn "systemsetup blocked (needs Full Disk Access for your terminal app)."
-        info "Opening System Settings → General → Sharing — toggle 'Remote Login' ON."
-        open "x-apple.systempreferences:com.apple.Sharing-Settings.extension" 2>/dev/null || \
-            open "/System/Library/PreferencePanes/SharingPref.prefPane" 2>/dev/null || true
+        info "systemsetup blocked — trying launchctl route..."
+        { sudo launchctl enable system/com.openssh.sshd 2>/dev/null && \
+          sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null; } || true
+        sleep 2   # give sshd a moment to bootstrap, then re-probe
+        if ssh_probe; then
+            ok "Remote Login enabled (launchctl)"
+            ssh_on=true
+        else
+            warn "systemsetup and launchctl both blocked (systemsetup needs Full Disk Access for your terminal app)."
+            info "Opening System Settings → General → Sharing — toggle 'Remote Login' ON."
+            open "x-apple.systempreferences:com.apple.Sharing-Settings.extension" 2>/dev/null || \
+                open "/System/Library/PreferencePanes/SharingPref.prefPane" 2>/dev/null || true
+        fi
     fi
+fi
+if $ssh_on; then
+    print_ssh_hardening
 fi
 
 #─ 3. launchd boot agent ─────────────────────────────────────────────

@@ -276,6 +276,11 @@ doctor_server_mode() {
     # the port instead.
     if nc -z -w 2 localhost 22 >/dev/null 2>&1; then
         ok "Remote Login (SSH) enabled — port 22 open"
+        # Best-effort password-auth probe: 'sshd -T' usually needs root; on
+        # any error or uncertainty, stay silent (only warn on confirmed yes).
+        if sshd -T 2>/dev/null | grep -qi '^passwordauthentication yes'; then
+            warn "sshd accepts password auth — harden: docs/REMOTE_ACCESS.md → 'Direct SSH' → sshd hardening"
+        fi
     else
         warn "Remote Login off — fix: sudo systemsetup -setremotelogin on"
     fi

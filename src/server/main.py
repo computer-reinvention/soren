@@ -34,6 +34,7 @@ from .routes import (
     auth,
     secrets,
     quality,
+    terminal,
 )
 from .services.agent_manager import agent_manager
 from .services.agent_registry import agent_registry
@@ -178,7 +179,12 @@ async def auth_middleware(request: Request, call_next):
     if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
         return await call_next(request)
 
-    # WebSocket upgrade: token must be in query param
+    # NOTE: this branch is dead code for real WebSocket connections —
+    # @app.middleware("http") only runs for the "http" ASGI scope and never
+    # for "websocket". WS endpoints (/api/agents/ws, /api/terminal/ws)
+    # authenticate in-handler via services/ws_auth.authenticate_ws, which is
+    # the authoritative check. Kept as defense-in-depth for odd clients that
+    # send an Upgrade header over plain HTTP.
     if request.headers.get("upgrade", "").lower() == "websocket":
         token = request.query_params.get("token")
     else:
@@ -219,6 +225,7 @@ app.include_router(budget.router, prefix="/api/budget", tags=["budget"])
 app.include_router(memory.router, prefix="/api/memory", tags=["memory"])
 app.include_router(secrets.router, prefix="/api/secrets", tags=["secrets"])
 app.include_router(quality.router, prefix="/api/metrics", tags=["metrics"])
+app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])
 
 # Static files (frontend) - only mount if directory exists
 frontend_dir = Path("src/frontend/dist")

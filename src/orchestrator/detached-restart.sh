@@ -84,9 +84,13 @@ start_server() {
 
     cd "$SOREN_PROJECT_ROOT"
     mkdir -p "${SOREN_PROJECT_ROOT}/.soren/logs" "${SOREN_PROJECT_ROOT}/.soren/run"
+    # Bind + WS keepalive flags kept in parity with monitor.sh start_server:
+    # default to loopback; hosted deployments opt in via SOREN_HOST=0.0.0.0
     nohup uv run uvicorn src.server.main:app \
-        --host "0.0.0.0" \
+        --host "${SOREN_HOST:-127.0.0.1}" \
         --port "$SOREN_PORT" \
+        --ws-ping-interval 30 \
+        --ws-ping-timeout 60 \
         > "${SOREN_PROJECT_ROOT}/.soren/logs/server.log" 2>&1 &
 
     # Wait for server to be ready
