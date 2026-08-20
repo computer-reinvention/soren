@@ -377,6 +377,35 @@ cmd_doctor() {
     fi
     echo ""
 
+    # Consolidated database: existence, integrity, and pending-migration state
+    echo -e "${BOLD}Database${NC}"
+    local db="${ROOT}/.soren/soren.db"
+    if [[ -f "$db" ]]; then
+        ok "soren.db present ($(du -h "$db" 2>/dev/null | cut -f1 | tr -d ' '))"
+        local qc
+        qc=$(sqlite3 -cmd '.timeout 5000' "$db" "PRAGMA quick_check;" 2>&1 | head -1)
+        if [[ "$qc" == "ok" ]]; then
+            ok "integrity: PRAGMA quick_check ok"
+        else
+            warn "integrity: PRAGMA quick_check reported: ${qc:-no output}"
+        fi
+        # A -wal (and -shm) sibling is normal for a live or recently-run
+        # system — sqlite folds it back into the db on checkpoint.
+        [[ -f "${db}-wal" ]] && info "WAL sidecar present (soren.db-wal) — normal, not an error"
+    else
+        warn "soren.db missing — created on first start (./soren.sh start)"
+    fi
+    local legacy_dbs="" n
+    for n in tasks conversations agent_registry auth memories; do
+        [[ -f "${ROOT}/.soren/${n}.db" ]] && legacy_dbs="${legacy_dbs} ${n}.db"
+    done
+    if [[ -n "$legacy_dbs" ]]; then
+        warn "legacy database(s) present:${legacy_dbs} — migration pending; stop the system and run ./tools/migrate-state"
+    else
+        ok "No legacy per-domain DBs at .soren/ top level (consolidation complete)"
+    fi
+    echo ""
+
     # Server mode (non-fatal): only when installed, or explicitly requested
     if [[ -f "$SERVER_PLIST" || "${1:-}" == "--server" ]]; then
         doctor_server_mode
@@ -409,7 +438,7 @@ cmd_smoke() {
         "Smoke test (research task, no commit needed): read AGENTS.md, then run ./tools/mailbox done 'smoke test OK — <one line about what SOREN is>'. Then stop."
     echo ""
     info "Watch it:   tmux attach -t ${SOREN_SESSION}   (window: ${name})"
-    info "Events:     sqlite3 .soren/conversations.db \"SELECT event_type, agent_id FROM agent_events WHERE agent_id='${name}' ORDER BY timestamp DESC LIMIT 5\""
+    info "Events:     sqlite3 .soren/soren.db \"SELECT event_type, agent_id FROM agent_events WHERE agent_id='${name}' ORDER BY timestamp DESC LIMIT 5\""
     info "Clean up:   ./tools/workers kill ${name}"
 }
 

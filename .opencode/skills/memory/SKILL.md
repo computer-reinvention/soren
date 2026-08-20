@@ -1,17 +1,17 @@
 ---
 name: memory
-description: Search and maintain the automatic semantic memory pipeline — memory index, extract patterns, prune lessons, and the memory DB (.soren/memories.db). Use when searching past work before starting a similar task, running memory-index or extract-patterns manually, or pruning stale worker lessons.
+description: Search and maintain the automatic semantic memory pipeline — memory index, extract patterns, prune lessons, and the memory store (memories table in .soren/soren.db). Use when searching past work before starting a similar task, running memory-index or extract-patterns manually, or pruning stale worker lessons.
 ---
 
 # Memory - Automatic Semantic Memory Pipeline
 
-Memory is the **automatic** pipeline that turns journals, artifacts, and commits into a searchable vector store. It differs from the `knowledge` skill: knowledge files are *per-role, hand-curated, git-versioned*; memory is *system-wide, automatic, and lives in a gitignored SQLite DB* (`.soren/memories.db`, fastembed BAAI/bge-small-en-v1.5, 384-dim vectors, cosine similarity — see `src/server/services/memory_store.py`).
+Memory is the **automatic** pipeline that turns journals, artifacts, and commits into a searchable vector store. It differs from the `knowledge` skill: knowledge files are *per-role, hand-curated, git-versioned*; memory is *system-wide, automatic, and lives in the gitignored consolidated SQLite DB* (the `memories` table of `.soren/soren.db`, fastembed BAAI/bge-small-en-v1.5, 384-dim vectors, cosine similarity — see `src/server/services/memory_store.py`).
 
 ## Pipeline
 
 ```
 journals + artifacts ──► tools/memory-index (monitor.sh, every ~50s) ──┐
-                                                                        ├──► .soren/memories.db ──► POST /api/memory/search
+                                                                        ├──► soren.db (memories) ──► POST /api/memory/search
 commits + journals ────► tools/extract-patterns (monitor.sh, hourly) ──┘        (semantic search)
 ```
 
@@ -76,7 +76,7 @@ Prunes stale dated lessons from the **`## Accumulated Knowledge` sections of spa
 | | `memory` (this skill) | `knowledge` skill |
 |---|---|---|
 | Written by | pipeline, automatically | agents, deliberately |
-| Storage | `.soren/memories.db` (gitignored) | `templates/team/knowledge/*.md` (repo-tracked) |
+| Storage | `memories` table in `.soren/soren.db` (gitignored) | `templates/team/knowledge/*.md` (repo-tracked) |
 | Scope | system-wide, cross-project | per-role |
 | Read via | semantic search API | `knowledge show` / spawn injection |
 | Survives rollback | yes (DB restored from backup) | yes (git) |

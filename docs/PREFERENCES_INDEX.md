@@ -2,14 +2,14 @@
 
 Authoritative reference for all agent behavioral preferences. Any role file (supervisor, worker, reviewer) should point here rather than duplicating these definitions.
 
-Preferences are stored in `.soren/preferences.json` and managed via `./tools/prefs`. All values are integers from 1 to 10.
+Preferences are stored in the `prefs` table of the consolidated database (`.soren/soren.db`) and managed via `./tools/prefs`. All values are integers from 1 to 10. (A legacy `.soren/preferences.json`, if present, is imported once on first use and renamed `*.migrated`.)
 
 ## Reading Preferences
 
 ```bash
 ./tools/prefs list          # See all current settings
 ./tools/prefs get <key>     # Check a specific setting
-jq . .soren/preferences.json # Read the raw file
+sqlite3 .soren/soren.db "SELECT key, value FROM prefs"   # Read the raw table
 ```
 
 ---
@@ -153,7 +153,7 @@ When writing new role files (supervisor, worker, reviewer), do **not** duplicate
 ```markdown
 ## Agent Preferences
 
-Before starting work, read your behavioral preferences from `.soren/preferences.json`.
+Before starting work, read your behavioral preferences with `./tools/prefs list`.
 These are user-configured scales (1-10) that control your communication style and behavior.
 See [docs/PREFERENCES_INDEX.md](../docs/PREFERENCES_INDEX.md) for what each setting means and how to apply it.
 ```

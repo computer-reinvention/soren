@@ -133,6 +133,23 @@ for f in \
     fi
 done
 
+# Consolidated DB integrity — quick_check is <100ms at this size, but guard it
+# with the project-wide 5s sqlite busy timeout anyway (a writer mid-transaction
+# must not hang the verification run).
+soren_db_path="${SOREN_HOME}/.soren/soren.db"
+if [[ -f "$soren_db_path" ]]; then
+    if command -v sqlite3 >/dev/null 2>&1; then
+        qc=$(sqlite3 -cmd '.timeout 5000' "$soren_db_path" "PRAGMA quick_check;" 2>/dev/null | head -1)
+        if [[ "$qc" == "ok" ]]; then
+            pass "soren.db integrity (PRAGMA quick_check)"
+        else
+            fail "soren.db integrity: ${qc:-quick_check produced no output}"
+        fi
+    else
+        echo -e "  ${DIM}-${NC} sqlite3 not found — quick_check skipped"
+    fi
+fi
+
 #───────────────────────────────────────────────────────────────────────────────
 # 5. TMUX — verify session and supervisor window
 #───────────────────────────────────────────────────────────────────────────────

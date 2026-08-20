@@ -10,9 +10,9 @@ Two tools, both **one-shot** (neither recurs — SOREN has no cron):
 | | `tools/remind` | `tools/schedule` |
 |---|---|---|
 | Granularity | a **date** (YYYY-MM-DD) | **seconds** or HH:MM today |
-| Storage | task in the tasks DB (`POST /api/tasks`, tag `reminder`) | `.soren/schedule.json` |
+| Storage | task in the `tasks` table (`POST /api/tasks`, tag `reminder`) | `schedule` table in `.soren/soren.db` |
 | Delivered by | monitor.sh heartbeat nudges (`/api/tasks/reminders/due`) | `tools/autonomy-check` calling `schedule fire` |
-| After firing | stays a task (sent-once logging via `.soren/.reminder-sent-ids`) | removed from the schedule file |
+| After firing | stays a task (sent-once logging via `.soren/.reminder-sent-ids`) | row deleted from the `schedule` table |
 | Good for | "check the cert renewal on the 1st" | "check if worker-X finished in 30 min" |
 
 ## remind — date-based reminder tasks
@@ -47,5 +47,5 @@ Consequence: delivery latency is bounded by the nudge cadence, not the due time.
 
 - **Self-scheduled check-ins are a busywork vector.** Every fired item consumes a supervisor wake-up and tokens. In supervised autonomy mode (the default), schedule sparingly and prefer **backlog proposals** (`tools/backlog add`) for future work — the backlog is persistent, prioritized, and human-reviewable; a schedule note is a fire-and-forget ping.
 - **Don't build recurrence by re-scheduling yourself** in a loop — that's a token-burning cron imitation. Periodic system work belongs in monitor.sh's built-in cycles or auto-maintenance.
-- **schedule notes vanish after firing.** If the follow-up matters beyond one nudge, it belongs in the backlog or tasks DB, not the schedule file.
+- **schedule notes vanish after firing.** If the follow-up matters beyond one nudge, it belongs in the backlog or the tasks table, not the schedule table.
 - `schedule add-at` only knows *today* (past times roll to tomorrow); for anything further out, use `remind`.

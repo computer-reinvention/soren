@@ -140,8 +140,8 @@ Webhooks/User → Mailbox (.soren/mailbox) → Router daemon → Supervisor agen
 - `mailbox` — message queue
 - `status.log` — system status log
 - `journal/YYYY-MM-DD/` — daily journals, rollback records, and `artifacts/` (plans, research, debug findings)
-- `tasks.db` — task database
-- `secrets.db` — encrypted secret store
+- `soren.db` — the single consolidated SQLite database: tasks, messages, agent events, agent registry, memories, encrypted secrets vault (`secrets_vault`), verification state (`fix_retries`, `verify_events`), `spawn_events`, `compact_timestamps`, and the `projects`/`teams`/`schedule`/`prefs` registries (shell access via `soren_db` from `tools/lib/db.sh` or plain `sqlite3 .soren/soren.db`; python via `get_db` in `src/server/services/db.py`)
+- `agent_registry.json` / `projects.json` / `teams.json` — read-only JSON views regenerated from `soren.db` tables (never write these directly)
 - `worker-contexts/` — per-worker role files
 
 ## API structure
@@ -182,7 +182,9 @@ There are two separate groups (see `.env.example`):
 
 Every SOREN agent is an [opencode](https://opencode.ai) TUI running in a tmux
 window, pinned to a dedicated embedded-server port (`SOREN_OC_PORT`, range
-42000-42999, recorded as `oc_port` in `.soren/agent_registry.json`).
+42000-42999, recorded as `oc_port` in the agent registry — the `agents`
+table in `.soren/soren.db`, mirrored to the read-only
+`.soren/agent_registry.json` view).
 
 - **Spawning**: `tools/workers spawn` launches `opencode --port <p>` with
   `OPENCODE_PERMISSION` granting full autonomy (replaces Claude Code's

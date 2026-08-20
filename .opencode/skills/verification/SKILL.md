@@ -59,20 +59,22 @@ Rules (reviewers are required to reject violations):
 
 - **Retry budget**: 2 fix attempts per **task key** (the commit hash, or an
   md5 of the DONE summary when no hash) — one flaky task can't burn another
-  task's budget. Counters live in `RETRY_DIR`
-  (default `.soren/.fix-retries/<agent>-<key>`, env-overridable).
-- **Escalation latch**: after escalation, `<agent>-<key>.escalated` is
-  created and the counter resets. While latched, further `[DONE]` reports for
-  that task key produce only a status.log line — no auto FIX-REQUEST. The
-  worker is stuck until a supervisor intervenes.
+  task's budget. Counters live in the `fix_retries` table of `.soren/soren.db`
+  (a legacy `.soren/.fix-retries/` count-file dir is imported once, then
+  renamed `*.migrated`).
+- **Escalation latch**: after escalation, the row's `escalated` flag is set
+  in `fix_retries` and the counter resets. While latched, further `[DONE]`
+  reports for that task key produce only a status.log line — no auto
+  FIX-REQUEST. The worker is stuck until a supervisor intervenes.
 - **Two clearing paths**:
   1. `./tools/verifications clear-latch <agent> [key]` — explicit supervisor
      unblock.
   2. `./tools/workers send <agent> ...` — a new dispatch auto-clears all of
      the agent's latches (workers effectively receive auto-clears when
      re-tasked).
-- Results are also POSTed to `/api/messages/verify-result`, and every event
-  is logged to `.soren/status.log` as `ts | [VERIFY] | agent | detail`.
+- Results are also POSTed to `/api/messages/verify-result`, recorded in the
+  `verify_events` table (what `tools/verifications recent` reads), and every
+  event is logged to `.soren/status.log` as `ts | [VERIFY] | agent | detail`.
 
 ## Handling [FIX-REQUEST] (as a worker)
 
@@ -107,8 +109,9 @@ empty commits and false no-op claims are REVISE/BLOCK material.
 ./tools/verifications clear-latch <agent> [key]  # supervisor unblock path
 ```
 
-Read-only except `clear-latch`. Env: `SOREN_HOME` (soren root), `RETRY_DIR`
-(same override verify-done.sh honors).
+Read-only except `clear-latch`. Env: `SOREN_HOME` (soren root), `SOREN_DB`
+(consolidated-DB path override — the same sandboxing override
+verify-done.sh honors).
 
 ## Lifecycle context
 

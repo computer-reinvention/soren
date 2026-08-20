@@ -2073,6 +2073,17 @@ rollback_and_restart() {
     # (e.g., .gitignore itself gets rolled back), this backup ensures recovery.
     local backup_dir="/tmp/soren-rollback-backup-$(date +%s)"
     if cp -a .soren/ "$backup_dir" 2>/dev/null; then
+        # A raw cp of a live WAL database can be torn. Overwrite the copied
+        # soren.db with a consistent snapshot via sqlite's online-backup API
+        # (safe while the server is writing), and drop the raw WAL/SHM
+        # siblings — the .backup output is self-contained.
+        if [[ -f "$SOREN_DB_PATH" ]]; then
+            if soren_db ".backup '${backup_dir}/soren.db'" 2>/dev/null; then
+                rm -f "${backup_dir}/soren.db-wal" "${backup_dir}/soren.db-shm" 2>/dev/null || true
+            else
+                log_warn "sqlite online backup failed — keeping the raw soren.db copy"
+            fi
+        fi
         log_step "Runtime data backed up to ${backup_dir}"
     else
         log_warn "Failed to backup .soren/ — proceeding anyway"
@@ -2093,17 +2104,33 @@ rollback_and_restart() {
 
     # Restore runtime data that git reset may have clobbered
     if [[ -d "$backup_dir" ]]; then
-        # Restore databases, journals, agent registry, mailbox, and daemon state
+        # Restore the consolidated DB, journals, mailbox, and daemon state.
         # NOTE: *.pid and *.lock files in run/ are intentionally excluded —
         # daemons must create fresh state on startup to avoid stale lock contention.
-        for item in journal soren.db soren.db-shm soren.db-wal \
+        # agent_registry.json / projects.json / teams.json are NOT restored —
+        # they are read-only views regenerated from soren.db tables.
+
+        # soren.db: the backup copy is a consistent online-backup snapshot and
+        # is self-contained. Stale WAL/SHM siblings must not survive next to a
+        # restored db file — sqlite would replay mismatched WAL frames onto it.
+        if [[ -f "${backup_dir}/soren.db" ]]; then
+            if cp -a "${backup_dir}/soren.db" .soren/soren.db 2>/dev/null; then
+                rm -f .soren/soren.db-wal .soren/soren.db-shm 2>/dev/null || true
+            fi
+        fi
+
+        # Still-file-based runtime state. The trailing group are LEGACY
+        # pre-migration names (see tools/migrate-state) — kept only as
+        # rollback targets for systems that have not consolidated yet; the
+        # existence check makes every missing item a silent no-op.
+        for item in journal mailbox mailbox-archive worker-contexts \
                     backup-pre-consolidation \
-                    agent_registry.db agent_registry.db-shm agent_registry.db-wal \
-                    agent_registry.json conversations.db memories.db messages.db tasks.db \
-                    auth.db mailbox worker-contexts .compact-timestamps \
                     .supervisor-heartbeat .sup-site-heartbeat .last_healthy_commit \
-                    .router_line .router_position .log_markers .fix-retries \
-                    .ui-check-flags .reminder-sent-ids .auth-secret mailbox-archive; do
+                    .router_line .router_position .log_markers \
+                    .ui-check-flags .reminder-sent-ids .auth-secret \
+                    tasks.db conversations.db auth.db memories.db \
+                    agent_registry.db agent_registry.db-shm agent_registry.db-wal \
+                    .compact-timestamps .fix-retries; do
             if [[ -e "${backup_dir}/${item}" ]]; then
                 cp -a "${backup_dir}/${item}" ".soren/${item}" 2>/dev/null || true
             fi

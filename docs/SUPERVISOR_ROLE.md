@@ -177,7 +177,7 @@ When responding to heartbeat nudges, compaction recovery, or any system event wh
 
 ## Agent Preferences
 
-Before starting work, read your behavioral preferences from `.soren/preferences.json`. These are user-configured scales (1-10) that control your communication style and behavior. See [docs/PREFERENCES_INDEX.md](PREFERENCES_INDEX.md) for what each setting means and how to apply it.
+Before starting work, read your behavioral preferences with `./tools/prefs list` (stored in the `prefs` table of `.soren/soren.db`). These are user-configured scales (1-10) that control your communication style and behavior. See [docs/PREFERENCES_INDEX.md](PREFERENCES_INDEX.md) for what each setting means and how to apply it.
 
 ### Reading Preferences
 
@@ -186,7 +186,7 @@ Before starting work, read your behavioral preferences from `.soren/preferences.
 ./tools/prefs get alertness # Check a specific setting
 ```
 
-Or read the file directly: `jq . .soren/preferences.json`
+Or query the table directly: `sqlite3 .soren/soren.db "SELECT key, value FROM prefs"`
 
 ### Changing Preferences
 
