@@ -47,27 +47,39 @@ ts_guarded() {
 
 echo "── soren server setup ──────────────────────────────────────────"
 
-#─ 1. Remote Login (SSH) ─────────────────────────────────────────────
-if nc -z localhost 22 2>/dev/null; then
-    ok "Remote Login (SSH) already enabled"
-elif $SKIP_SUDO; then
-    warn "SSH off — run: sudo systemsetup -setremotelogin on"
-else
-    info "Enabling Remote Login (sudo password may be prompted)..."
-    sudo systemsetup -setremotelogin on >/dev/null
-    ok "Remote Login enabled"
-fi
-
-#─ 2. Power: never sleep on AC ───────────────────────────────────────
+#─ 1. Power: never sleep on AC ───────────────────────────────────────
 ac_sleep="$(pmset -g custom | awk '/AC Power/{f=1} f && $1=="sleep"{print $2; exit}')"
 if [[ "${ac_sleep:-1}" == "0" ]]; then
     ok "AC sleep already 0"
 elif $SKIP_SUDO; then
     warn "AC sleep=${ac_sleep:-?} — run: sudo pmset -c sleep 0 displaysleep 10"
 else
-    info "Disabling sleep on AC power..."
-    sudo pmset -c sleep 0 displaysleep 10
-    ok "AC sleep disabled (display sleeps at 10 min)"
+    info "Disabling sleep on AC power (sudo password may be prompted)..."
+    if sudo pmset -c sleep 0 displaysleep 10; then
+        ok "AC sleep disabled (display sleeps at 10 min)"
+    else
+        warn "pmset failed — run manually: sudo pmset -c sleep 0 displaysleep 10"
+    fi
+fi
+
+#─ 2. Remote Login (SSH) ─────────────────────────────────────────────
+# NOTE: 'sudo systemsetup -setremotelogin on' fails on modern macOS unless
+# the terminal app has Full Disk Access. Try it, but fall back to opening
+# the System Settings pane for a one-click manual enable.
+if nc -z localhost 22 2>/dev/null; then
+    ok "Remote Login (SSH) already enabled"
+elif $SKIP_SUDO; then
+    warn "SSH off — run: sudo systemsetup -setremotelogin on (needs Full Disk Access)"
+else
+    info "Enabling Remote Login..."
+    if sudo systemsetup -setremotelogin on >/dev/null 2>&1 && nc -z localhost 22 2>/dev/null; then
+        ok "Remote Login enabled"
+    else
+        warn "systemsetup blocked (needs Full Disk Access for your terminal app)."
+        info "Opening System Settings → General → Sharing — toggle 'Remote Login' ON."
+        open "x-apple.systempreferences:com.apple.Sharing-Settings.extension" 2>/dev/null || \
+            open "/System/Library/PreferencePanes/SharingPref.prefPane" 2>/dev/null || true
+    fi
 fi
 
 #─ 3. launchd boot agent ─────────────────────────────────────────────
