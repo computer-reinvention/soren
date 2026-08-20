@@ -12,6 +12,7 @@ import uuid
 from ..config import settings
 from ..models.agent import Agent, AgentList, AgentMessage
 from ..services.auth import decode_token
+from ..services.ws_auth import authenticate_ws
 from ..models.message import Message, MessageType
 from ..services.agent_manager import agent_manager
 from ..services.tmux_service import tmux_service
@@ -373,7 +374,17 @@ async def archive_agent(agent_id: str, lines: int = 2000):
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """WebSocket endpoint for real-time updates."""
+    """WebSocket endpoint for real-time updates.
+
+    Auth is enforced in-handler (services/ws_auth.py): the HTTP auth
+    middleware in main.py never runs for the websocket ASGI scope, so this
+    is the authoritative check. Token comes from ?token= (appended by the
+    frontend, useWebSocket.ts) or the soren_token cookie; invalid/missing
+    tokens are rejected with close code 4401 before accept.
+    """
+    username = await authenticate_ws(websocket)
+    if username is None:
+        return
     client_id = str(uuid.uuid4())
     await ws_manager.connect(websocket, client_id)
     try:

@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/layout/Layout';
 import { ResizableLayout } from './components/layout/ResizableLayout';
 import { Explorer } from './components/explorer/Explorer';
-import { ChatPanel } from './components/chat/ChatPanel';
+import { CenterPanel } from './components/layout/CenterPanel';
 import { ActivityTimeline } from './components/activity/ActivityTimeline';
 import { StatusBar } from './components/status/StatusBar';
 import { TooltipProvider } from './components/ui/tooltip';
@@ -42,7 +42,7 @@ function Dashboard() {
     <Layout>
       <ResizableLayout
         left={<Explorer />}
-        center={<ChatPanel />}
+        center={<CenterPanel />}
         right={<ActivityTimeline />}
       />
       <StatusBar />

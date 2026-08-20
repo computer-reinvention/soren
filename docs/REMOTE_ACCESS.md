@@ -80,6 +80,16 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
    ```bash
    sudo systemsetup -setremotelogin on
    ```
+   > On modern macOS this fails unless your terminal app has **Full Disk
+   > Access** (verified on this machine). Fallbacks, in order — the launchctl
+   > route (works on some FDA-blocked configs):
+   > ```bash
+   > sudo launchctl enable system/com.openssh.sshd
+   > sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist
+   > ```
+   > or flip **Remote Login** on manually in System Settings → General →
+   > Sharing. `tools/server-setup` tries all three in that order and verifies
+   > with a port-22 probe.
 4. **Never sleep on AC power** (display may sleep; the machine must not):
    ```bash
    sudo pmset -c sleep 0 displaysleep 10
@@ -102,11 +112,105 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
    (the doctor grows a "Server mode" section once the plist exists; force it
    with `./soren.sh doctor --server`).
 
+## Direct SSH (VM-style access)
+
+Once Remote Login is on, this Mac behaves like a VM you can reach from any
+tailnet device: MagicDNS resolves `terminal`, sshd answers on :22, and :22 is
+reachable only from the LAN and the tailnet — nothing is port-forwarded.
+
+### The three access layers
+
+Three different front doors that are easy to conflate (this exact confusion
+has happened live — keep them straight):
+
+| # | Layer | How | What you get |
+| --- | --- | --- | --- |
+| 1 | Raw SSH | `ssh pankajgarkoti@terminal` | A plain login shell — the machine as a VM. tmux is **not** involved; soren keeps running untouched in the background. |
+| 2 | Agent session | `ssh -t terminal 'tmux attach -t soren'` | The **same live session** the Mac's own screen shows. tmux is client/server: every attach joins the SAME session — keystrokes and output are shared with anyone else attached. |
+| 3 | Browser | `https://terminal.<tailnet>.ts.net` | Dashboard + web terminal (modes: **Shell** / **Soren session**) — no SSH client needed. |
+
+Layer-2 variants:
+
+```bash
+ssh -t terminal 'tmux attach -t soren'        # join the shared session (mirrored view)
+ssh -t terminal 'tmux new-session -t soren'   # grouped session: same windows, independent focus
+ssh -t terminal 'tmux attach -rt soren'       # read-only attach (watch, cannot type)
+```
+
+### Laptop client setup (once per device)
+
+1. Install the Tailscale app and sign in to the same tailnet.
+2. Create a key if you don't have one, then copy it over (the last password
+   prompt you should ever see):
+   ```bash
+   ssh-keygen -t ed25519              # accept defaults; skip if ~/.ssh/id_ed25519 exists
+   ssh-copy-id pankajgarkoti@terminal
+   ```
+3. Add to `~/.ssh/config`:
+   ```
+   Host terminal
+       HostName terminal
+       User pankajgarkoti
+       ServerAliveInterval 30
+       ServerAliveCountMax 4
+
+   # Optional: `ssh soren` drops straight into the live agent session
+   Host soren
+       HostName terminal
+       User pankajgarkoti
+       ServerAliveInterval 30
+       ServerAliveCountMax 4
+       RequestTTY yes
+       RemoteCommand tmux attach -t soren
+   ```
+
+Now `ssh terminal` is the VM shell (layer 1) and `ssh soren` is the live
+agent session (layer 2).
+
+### sshd hardening (recommended once key login works)
+
+Verify key-based `ssh terminal` works **first**, then disable password auth
+on the Mac:
+
+```bash
+sudo mkdir -p /etc/ssh/sshd_config.d
+sudo tee /etc/ssh/sshd_config.d/soren.conf >/dev/null <<'CONF'
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers pankajgarkoti
+CONF
+sudo launchctl kickstart -k system/com.openssh.sshd   # reload sshd
+```
+
+macOS's stock `sshd_config` ends with `Include /etc/ssh/sshd_config.d/*`, so
+the drop-in survives OS updates. Remember: :22 is only reachable from the LAN
+and the tailnet (no router port-forwards), so this is defense in depth, not
+the only line. `./soren.sh doctor --server` warns if password auth is still
+enabled. `tools/server-setup` prints this exact block once SSH is detected on.
+
+### Extras
+
+- **VS Code Remote-SSH**: install the "Remote - SSH" extension, connect to
+  host `terminal` — full IDE against the server's checkout.
+- **mosh** (flaky mobile links): `brew install mosh` on both ends, then
+  `mosh terminal` — sessions survive network changes / sleep; UDP flows fine
+  tailnet-internally.
+- **File transfer**:
+  ```bash
+  scp report.pdf terminal:~/Desktop/                      # push a file
+  scp terminal:~/Desktop/code/soren/.soren/status.log .   # pull a file
+  rsync -avz terminal:~/Desktop/code/soren/.soren/journal/ ./journal-backup/
+  ```
+
 ## Daily use
 
 - **Dashboard**: `https://<machine>.<tailnet>.ts.net` from any tailnet device
   (e.g. `https://terminal.<tailnet>.ts.net`). Dashboard auth stays
   on — log in as usual.
+- **Web terminal** (in the dashboard): **Shell** mode opens a plain login
+  shell on the Mac — raw SSH in the browser; **Soren session** mode attaches
+  to the same live `soren` tmux session the Mac's screen shows.
 - **Command Center**: use `@agent-name` routing in the dashboard's Command
   Center to message the supervisor or direct a specific agent.
 - **Full control via SSH**:
@@ -116,6 +220,8 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
   tmux attach -t soren          # watch/drive the whole system
   # detach without stopping anything: Ctrl+b then d
   ```
+  Client setup, attach variants, and hardening: see
+  [Direct SSH (VM-style access)](#direct-ssh-vm-style-access) above.
 - **Quick checks over SSH**: `./soren.sh status`, `./soren.sh health`,
   `./soren.sh server status`, `./soren.sh logs server`.
 

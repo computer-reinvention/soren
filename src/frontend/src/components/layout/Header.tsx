@@ -1,6 +1,8 @@
-import { useState } from 'react';
-import { Terminal, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
+import { cn } from '../../lib/utils';
 import { useThemeStore } from '../../stores/themeStore';
+import { useTerminalStore } from '../../stores/terminalStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjects } from '../../hooks/useProjects';
 import { RegisterProjectDialog } from '../projects/RegisterProjectDialog';
@@ -20,6 +22,22 @@ export function Header() {
   const { data: projectsData } = useProjects();
   const [registerOpen, setRegisterOpen] = useState(false);
   const { username, isAuthenticated, logout } = useAuthStore();
+  const centerMode = useTerminalStore((state) => state.centerMode);
+  const toggleTerminal = useTerminalStore((state) => state.toggleTerminal);
+  const terminalActive = centerMode === 'terminal';
+
+  // Ctrl+` toggles the terminal (WebTerminal lets this combo pass through
+  // its own key handling so it works while the terminal is focused too).
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.ctrlKey && !event.metaKey && !event.altKey && event.code === 'Backquote') {
+        event.preventDefault();
+        toggleTerminal();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleTerminal]);
 
   const projects = projectsData?.projects || [];
 
@@ -78,6 +96,28 @@ export function Header() {
 
         {/* Heartbeat + cost badge + dark mode grouped tight */}
         <div className="flex items-center">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={toggleTerminal}
+                className={cn(
+                  'h-8 w-8',
+                  terminalActive && 'bg-accent text-emerald-500 hover:text-emerald-500'
+                )}
+                aria-pressed={terminalActive}
+              >
+                <TerminalSquare
+                  className={cn('h-4 w-4', !terminalActive && 'text-muted-foreground')}
+                />
+                <span className="sr-only">Toggle terminal</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs font-mono">
+              terminal (ctrl+`)
+            </TooltipContent>
+          </Tooltip>
           <HeartbeatIndicator />
           <BudgetStatusline />
           <Button
