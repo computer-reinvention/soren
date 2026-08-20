@@ -26,6 +26,9 @@ source "${SOREN_HOME}/tools/lib/scan-project.sh"
 # Registry helpers (soren_registry_update — sqlite master + JSON view regen)
 source "${SOREN_HOME}/tools/lib/opencode.sh"
 
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_HOME}/tools/lib/db.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -44,16 +47,101 @@ info() { echo -e "${CYAN}▶${NC} $1"; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}!${NC} $1"; }
 
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+#───────────────────────────────────────────────────────────────────────────────
+# Teams state — SQLite master, JSON view
+#
+# The MASTER is the `teams` table in the consolidated SQLite DB
+# (.soren/soren.db); .soren/teams.json is a REGENERATED READ-ONLY VIEW of it
+# ({"teams":[...]}, members as a real JSON array) so external jq readers keep
+# working. Mutations are sqlite statements followed by a view regeneration.
+# NOTE (shared schema + view shape): duplicated in src/server/routes/teams.py —
+# keep in sync.
+#───────────────────────────────────────────────────────────────────────────────
+
+_teams_ensure_schema() {
+    soren_db "CREATE TABLE IF NOT EXISTS teams (
+        prefix     TEXT PRIMARY KEY,
+        template   TEXT,
+        task       TEXT,
+        project_id TEXT,
+        created_at TEXT,
+        members    TEXT DEFAULT '[]',
+        permanent  INTEGER DEFAULT 0
+    );" 2>/dev/null || true
+}
+
+# Legacy view shape, one JSON object per row. The 'permanent' key is emitted
+# only for permanent teams (legacy records omitted it otherwise); members is
+# stored as compact JSON text and re-emitted as a real array.
+_TEAMS_VIEW_SQL="SELECT CASE WHEN permanent THEN
+    json_object('prefix', prefix, 'template', template, 'task', task,
+                'members', json(members), 'project_id', project_id,
+                'permanent', json('true'), 'created_at', created_at)
+ELSE
+    json_object('prefix', prefix, 'template', template, 'task', task,
+                'members', json(members), 'project_id', project_id,
+                'created_at', created_at)
+END FROM teams ORDER BY rowid;"
+
+# Regenerate the JSON view from the master (post-commit; tmp+mv). jq '.'
+# formatting is byte-identical to the python route's regeneration.
+regen_teams_view() {
+    local tmp
+    tmp=$(mktemp "${TEAMS_FILE}.tmp.XXXXXX") || return 1
+    if soren_db "$_TEAMS_VIEW_SQL" 2>/dev/null | jq -s '{teams: .}' > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$TEAMS_FILE"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# One-time lazy import: table empty + populated legacy teams.json → seed the
+# table. The file is NOT renamed — it becomes the regenerated view.
+_teams_import_legacy() {
+    [[ -s "$TEAMS_FILE" ]] || return 0
+    local count
+    count=$(soren_db "SELECT COUNT(*) FROM teams;" 2>/dev/null) || count=0
+    [[ "$count" == "0" ]] || return 0
+    local n
+    n=$(jq -r '.teams | length' "$TEAMS_FILE" 2>/dev/null) || n=0
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 0
+    info "Importing ${n} team(s) from legacy $(basename "$TEAMS_FILE") into sqlite"
+    local prog sql
+    prog=$(cat <<'JQEOF'
+def q: "'" + ((. // "") | tostring | gsub("'"; "''")) + "'";
+.teams[]
+| "INSERT OR IGNORE INTO teams (prefix, template, task, project_id, created_at, members, permanent) VALUES ("
+  + (.prefix | q) + ", " + (.template | q) + ", " + (.task | q) + ", "
+  + (.project_id | q) + ", " + (.created_at | q) + ", "
+  + ((.members // []) | tojson | q) + ", "
+  + (if .permanent == true then "1" else "0" end) + ");"
+JQEOF
+)
+    sql=$(jq -r "$prog" "$TEAMS_FILE" 2>/dev/null) || return 0
+    [[ -n "$sql" ]] || return 0
+    printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | soren_db 2>/dev/null || return 0
+    regen_teams_view || true
+}
+
+# Ensure schema + one-time import + a readable view file; called by every
+# command before touching state.
 ensure_teams_file() {
+    mkdir -p "$(dirname "$TEAMS_FILE")"
+    _teams_ensure_schema
+    _teams_import_legacy
     if [[ ! -f "$TEAMS_FILE" ]]; then
-        mkdir -p "$(dirname "$TEAMS_FILE")"
-        echo '{"teams":[]}' > "$TEAMS_FILE"
+        regen_teams_view || echo '{"teams":[]}' > "$TEAMS_FILE"
     fi
 }
 
 team_exists() {
-    local prefix="$1"
-    jq -e --arg p "$prefix" '.teams[] | select(.prefix == $p)' "$TEAMS_FILE" > /dev/null 2>&1
+    local n
+    n=$(soren_db "SELECT COUNT(*) FROM teams WHERE prefix = '$(sql_q "$1")';" 2>/dev/null) || n=0
+    [[ "$n" != "0" ]]
 }
 
 window_exists() {
@@ -309,28 +397,15 @@ cmd_setup() {
         echo ""
     done <<< "$roles"
 
-    # Record team in teams.json
+    # Record team in the sqlite master, then regenerate the teams.json view
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local members_json
-    members_json=$(printf '%s\n' "${spawned[@]}" | jq -R . | jq -s .)
+    members_json=$(printf '%s\n' ${spawned[@]+"${spawned[@]}"} | jq -R . | jq -sc 'map(select(. != ""))')
 
-    local tmp
-    tmp=$(mktemp)
-    jq --arg prefix "$prefix" \
-       --arg template "$template" \
-       --arg task "$task" \
-       --arg now "$now" \
-       --arg project "$project_id" \
-       --argjson members "$members_json" \
-       '.teams += [{
-           prefix: $prefix,
-           template: $template,
-           task: $task,
-           members: $members,
-           project_id: $project,
-           created_at: $now
-       }]' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+    soren_db "INSERT INTO teams (prefix, template, task, project_id, created_at, members, permanent)
+        VALUES ('$(sql_q "$prefix")', '$(sql_q "$template")', '$(sql_q "$task")', '$(sql_q "$project_id")', '$(sql_q "$now")', '$(sql_q "$members_json")', 0);"
+    regen_teams_view
 
     # Summary
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -388,11 +463,10 @@ cmd_teardown() {
         fi
     done <<< "$windows"
 
-    # Remove from teams.json
+    # Remove from the master, regenerate the teams.json view
     if team_exists "$prefix"; then
-        local tmp
-        tmp=$(mktemp)
-        jq --arg p "$prefix" '.teams |= map(select(.prefix != $p))' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+        soren_db "DELETE FROM teams WHERE prefix = '$(sql_q "$prefix")';"
+        regen_teams_view
     fi
 
     ok "Team '$prefix' torn down ($killed workers killed)"
@@ -406,12 +480,12 @@ cmd_status() {
 
     ensure_teams_file
 
-    # Get team info from registry if available
+    # Get team info from the master if available
     local template=""
     if team_exists "$prefix"; then
-        template=$(jq -r --arg p "$prefix" '.teams[] | select(.prefix == $p) | .template' "$TEAMS_FILE")
+        template=$(soren_db "SELECT template FROM teams WHERE prefix = '$(sql_q "$prefix")';")
         local task
-        task=$(jq -r --arg p "$prefix" '.teams[] | select(.prefix == $p) | .task' "$TEAMS_FILE")
+        task=$(soren_db "SELECT task FROM teams WHERE prefix = '$(sql_q "$prefix")';")
         echo -e "${BOLD}Team: ${prefix}${NC} (${template})"
         echo -e "${DIM}Task: ${task}${NC}"
         echo ""
@@ -442,7 +516,7 @@ cmd_list() {
     ensure_teams_file
 
     local count
-    count=$(jq '.teams | length' "$TEAMS_FILE")
+    count=$(soren_db "SELECT COUNT(*) FROM teams;")
 
     if [[ "$count" -eq 0 ]]; then
         echo -e "${DIM}No active teams${NC}"
@@ -456,7 +530,8 @@ cmd_list() {
     local windows
     windows=$(tmux list-windows -t "$SOREN_SESSION" -F '#{window_name}' 2>/dev/null || true)
 
-    jq -c '.teams[]' "$TEAMS_FILE" | while IFS= read -r team; do
+    soren_db -json "SELECT prefix, template, task, members, created_at FROM teams ORDER BY rowid;" | \
+    jq -c '.[]' | while IFS= read -r team; do
         local prefix template task members created_at
         prefix=$(echo "$team" | jq -r '.prefix')
         template=$(echo "$team" | jq -r '.template')
@@ -467,8 +542,8 @@ cmd_list() {
         echo -e "  ${DIM}Task: ${task}${NC}"
         echo -e "  ${DIM}Created: ${created_at}${NC}"
 
-        # Show members with liveness
-        echo "$team" | jq -r '.members[]' | while IFS= read -r member; do
+        # Show members with liveness (members column holds JSON array text)
+        echo "$team" | jq -r '.members | fromjson | .[]' | while IFS= read -r member; do
             if echo "$windows" | grep -qx "$member"; then
                 echo -e "    ${GREEN}●${NC} ${member}"
             else
@@ -881,28 +956,15 @@ cmd_setup_permanent() {
         idx=$((idx+1))
     done <<< "$roles"
 
-    # --- Step 5: Record team in teams.json ---
+    # --- Step 5: Record team in the sqlite master + regenerate the view ---
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local members_json
-    members_json=$(printf '%s\n' "${spawned[@]}" | jq -R . | jq -s .)
+    members_json=$(printf '%s\n' ${spawned[@]+"${spawned[@]}"} | jq -R . | jq -sc 'map(select(. != ""))')
 
-    local tmp
-    tmp=$(mktemp)
-    jq --arg prefix "$prefix" \
-       --arg template "$template" \
-       --arg now "$now" \
-       --arg project "$project_id" \
-       --argjson members "$members_json" \
-       '.teams += [{
-           prefix: $prefix,
-           template: $template,
-           task: "permanent team",
-           members: $members,
-           project_id: $project,
-           permanent: true,
-           created_at: $now
-       }]' "$TEAMS_FILE" > "$tmp" && mv "$tmp" "$TEAMS_FILE"
+    soren_db "INSERT INTO teams (prefix, template, task, project_id, created_at, members, permanent)
+        VALUES ('$(sql_q "$prefix")', '$(sql_q "$template")', 'permanent team', '$(sql_q "$project_id")', '$(sql_q "$now")', '$(sql_q "$members_json")', 1);"
+    regen_teams_view
 
     # --- Summary ---
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

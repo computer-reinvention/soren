@@ -15,13 +15,24 @@
 #   schedule help                      Show this help
 #
 # The "fire" command is called by tools/autonomy-check during heartbeat scans.
-# Due items are returned as text and removed from the schedule.
+# Due items are returned as text (one note per line).
+#
+# Storage: the `schedule` table in the consolidated SQLite DB (.soren/soren.db).
+# Firing is a single atomic UPDATE ... RETURNING, which kills the legacy
+# fire-vs-add race (the old JSON file was read, filtered, and rewritten
+# wholesale — an `add` between the read and the rewrite was silently lost).
+# Fired rows keep their fired_at stamp so an item can never fire twice; the
+# legacy .soren/schedule.json is imported once, lazily, then renamed
+# schedule.json.migrated.
 #═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
 
 SOREN_PROJECT_ROOT="${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}}"
 SCHEDULE_FILE="${SOREN_PROJECT_ROOT}/.soren/schedule.json"
+
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -32,8 +43,54 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Ensure schedule file exists
-[[ -f "$SCHEDULE_FILE" ]] || echo '[]' > "$SCHEDULE_FILE"
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+#───────────────────────────────────────────────────────────────────────────────
+# State init — schema + one-time lazy import of the legacy JSON file
+#───────────────────────────────────────────────────────────────────────────────
+
+_sched_ensure_schema() {
+    soren_db "CREATE TABLE IF NOT EXISTS schedule (
+        id         TEXT PRIMARY KEY,
+        note       TEXT,
+        due_at     TEXT,
+        created_at TEXT,
+        fired_at   TEXT
+    );" 2>/dev/null || true
+}
+
+# One-time lazy import of the legacy schedule.json ([{id, note, due_at,
+# created_at}] with epoch-second timestamps). mv is the atomic claim: exactly
+# one concurrent invocation imports; the file ends up renamed *.migrated so
+# this never runs twice.
+_sched_import_legacy() {
+    [[ -f "$SCHEDULE_FILE" ]] || return 0
+    local claim="${SCHEDULE_FILE}.importing.$$"
+    mv "$SCHEDULE_FILE" "$claim" 2>/dev/null || return 0
+    local prog sql
+    prog=$(cat <<'JQEOF'
+def q: "'" + ((. // "") | tostring | gsub("'"; "''")) + "'";
+.[]?
+| "INSERT OR IGNORE INTO schedule (id, note, due_at, created_at, fired_at) VALUES ("
+  + (.id | q) + ", " + (.note | q) + ", " + (.due_at | q) + ", "
+  + (.created_at | q) + ", NULL);"
+JQEOF
+)
+    if sql=$(jq -r "$prog" "$claim" 2>/dev/null) && [[ -n "$sql" ]]; then
+        printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | soren_db 2>/dev/null || true
+    fi
+    if [[ -e "${SCHEDULE_FILE}.migrated" ]]; then
+        mv "$claim" "${SCHEDULE_FILE}.migrated.$(date +%s).$$" 2>/dev/null || true
+    else
+        mv "$claim" "${SCHEDULE_FILE}.migrated" 2>/dev/null || true
+    fi
+}
+
+init_state() {
+    _sched_ensure_schema
+    _sched_import_legacy
+}
 
 #───────────────────────────────────────────────────────────────────────────────
 # Add a check-in N seconds from now
@@ -56,7 +113,6 @@ cmd_add() {
     local now due_at id
     now=$(date +%s)
     due_at=$((now + seconds))
-    id="s_$(printf '%08x' $((RANDOM * RANDOM)))"
 
     local due_human
     if [[ "$(uname)" == "Darwin" ]]; then
@@ -65,15 +121,20 @@ cmd_add() {
         due_human=$(date -d "@$due_at" '+%H:%M:%S')
     fi
 
-    # Add to schedule file
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" \
-       --arg note "$note" \
-       --argjson due "$due_at" \
-       --argjson created "$now" \
-       '. + [{"id": $id, "note": $note, "due_at": $due, "created_at": $created}]' \
-       "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
+    # Insert with a random id; retry on the (unlikely) collision
+    local attempt=0 inserted="0"
+    while (( attempt < 5 )); do
+        id="s_$(printf '%08x' $(( (RANDOM * 32768 + RANDOM) % 4294967296 )))"
+        inserted=$(soren_db "INSERT OR IGNORE INTO schedule (id, note, due_at, created_at, fired_at)
+            VALUES ('$(sql_q "$id")', '$(sql_q "$note")', '$due_at', '$now', NULL);
+            SELECT changes();")
+        [[ "$inserted" == "1" ]] && break
+        attempt=$((attempt + 1))
+    done
+    if [[ "$inserted" != "1" ]]; then
+        echo -e "${RED}error:${NC} could not insert scheduled item"
+        exit 1
+    fi
 
     local mins=$((seconds / 60))
     local secs=$((seconds % 60))
@@ -127,7 +188,7 @@ cmd_add_at() {
 
 cmd_list() {
     local count
-    count=$(jq 'length' "$SCHEDULE_FILE")
+    count=$(soren_db "SELECT COUNT(*) FROM schedule WHERE fired_at IS NULL;")
 
     if ((count == 0)); then
         echo -e "${DIM}No scheduled check-ins${NC}"
@@ -141,7 +202,8 @@ cmd_list() {
     printf "${DIM}%-12s  %-10s  %-s${NC}\n" "ID" "DUE IN" "NOTE"
     printf "${DIM}%-12s  %-10s  %-s${NC}\n" "────────────" "──────────" "────────────────────────────────"
 
-    jq -r --argjson now "$now" '.[] | [.id, (.due_at - $now | tostring), .note] | @tsv' "$SCHEDULE_FILE" | \
+    soren_db -separator $'\t' "SELECT id, CAST(due_at AS INTEGER) - $now, note
+        FROM schedule WHERE fired_at IS NULL ORDER BY rowid;" | \
     while IFS=$'\t' read -r id remaining note; do
         if ((remaining <= 0)); then
             printf "  ${RED}%-12s${NC}  ${RED}%-10s${NC}  %s\n" "$id" "OVERDUE" "$note"
@@ -167,28 +229,30 @@ cmd_list() {
 
 #───────────────────────────────────────────────────────────────────────────────
 # Fire due check-ins — called by autonomy-check
-# Outputs due items as text and removes them from the schedule
+# A single atomic UPDATE ... RETURNING claims due items exactly once (two
+# concurrent fires cannot both claim the same item; adds concurrent with a
+# fire are never lost). Output: the due notes, one per line.
 #───────────────────────────────────────────────────────────────────────────────
 
 cmd_fire() {
     local now
     now=$(date +%s)
 
-    # Find due items
-    local due_items
-    due_items=$(jq -r --argjson now "$now" '[.[] | select(.due_at <= $now)] | .[] | .note' "$SCHEDULE_FILE" 2>/dev/null || true)
+    local fired
+    fired=$(soren_db -separator $'\t' "UPDATE schedule SET fired_at = '$now'
+        WHERE CAST(due_at AS INTEGER) <= $now AND fired_at IS NULL
+        RETURNING id, note;" 2>/dev/null) || fired=""
 
-    if [[ -z "$due_items" ]]; then
+    if [[ -z "$fired" ]]; then
         return 1  # nothing due
     fi
 
-    # Output due notes
-    echo "$due_items"
+    # Output due notes (autonomy-check consumes raw stdout, one note per line)
+    printf '%s\n' "$fired" | cut -f2-
 
-    # Remove fired items from schedule
-    local tmp
-    tmp=$(mktemp)
-    jq --argjson now "$now" '[.[] | select(.due_at > $now)]' "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
+    # Opportunistic pruning: drop fired rows older than 7 days
+    soren_db "DELETE FROM schedule WHERE fired_at IS NOT NULL
+        AND CAST(fired_at AS INTEGER) < $((now - 604800));" 2>/dev/null || true
 
     return 0
 }
@@ -201,16 +265,12 @@ cmd_clear() {
     local target_id="${1:-}"
 
     if [[ -z "$target_id" ]]; then
-        echo '[]' > "$SCHEDULE_FILE"
+        soren_db "DELETE FROM schedule;"
         echo -e "${GREEN}✓${NC} Cleared all scheduled check-ins"
     else
-        local tmp
-        tmp=$(mktemp)
-        local before after
-        before=$(jq 'length' "$SCHEDULE_FILE")
-        jq --arg id "$target_id" '[.[] | select(.id != $id)]' "$SCHEDULE_FILE" > "$tmp" && mv "$tmp" "$SCHEDULE_FILE"
-        after=$(jq 'length' "$SCHEDULE_FILE")
-        if ((before == after)); then
+        local deleted
+        deleted=$(soren_db "DELETE FROM schedule WHERE id = '$(sql_q "$target_id")'; SELECT changes();")
+        if [[ "$deleted" == "0" ]]; then
             echo -e "${RED}error:${NC} check-in $target_id not found"
             exit 1
         fi
@@ -245,7 +305,12 @@ EXAMPLES:
 INTEGRATION:
     The heartbeat system (tools/autonomy-check) calls "schedule fire" on each
     scan cycle. Due items are injected into the supervisor's prompt as
-    scheduled reminders. Items are automatically removed after firing.
+    scheduled reminders. Firing is exactly-once (atomic UPDATE ... RETURNING
+    in the consolidated SQLite DB).
+
+STORAGE:
+    The `schedule` table in .soren/soren.db (override with SOREN_DB). The
+    legacy .soren/schedule.json is imported once and renamed *.migrated.
 EOF
 }
 
@@ -257,11 +322,11 @@ cmd="${1:-help}"
 shift 2>/dev/null || true
 
 case "$cmd" in
-    add)     cmd_add "$@" ;;
-    add-at)  cmd_add_at "$@" ;;
-    list)    cmd_list "$@" ;;
-    fire)    cmd_fire "$@" ;;
-    clear)   cmd_clear "$@" ;;
+    add)     init_state; cmd_add "$@" ;;
+    add-at)  init_state; cmd_add_at "$@" ;;
+    list)    init_state; cmd_list "$@" ;;
+    fire)    init_state; cmd_fire "$@" ;;
+    clear)   init_state; cmd_clear "$@" ;;
     help|-h|--help) cmd_help ;;
     *)
         echo -e "${RED}error:${NC} unknown command: $cmd (try 'schedule help')"

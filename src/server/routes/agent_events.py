@@ -9,12 +9,14 @@ import uuid
 import logging
 from pathlib import Path
 
+from ..config import settings
 from ..models.agent import AgentStatus
 from ..models.agent_event import AgentEvent, AgentEventResponse, AgentEventType
 from ..models.message import Message, MessageType
 from ..services.agent_manager import agent_manager
 from ..services.agent_registry import agent_registry
 from ..services.conversation_store import conversation_store
+from ..services.db import get_db
 from ..services.mailbox import mailbox_service
 from ..services.tmux_service import tmux_service
 from ..websocket.manager import ws_manager
@@ -25,7 +27,6 @@ logger = logging.getLogger(__name__)
 _CONTEXT_WINDOW = int(os.environ.get("SOREN_CONTEXT_WINDOW", "200000"))
 _COMPACT_THRESHOLD = float(os.environ.get("SOREN_COMPACT_THRESHOLD", "0.80"))
 _COMPACT_COOLDOWN = int(os.environ.get("SOREN_COMPACT_COOLDOWN", "1800"))
-_COMPACT_TIMESTAMPS = Path(".soren/.compact-timestamps")
 _RECOVERY_DELAY = 5  # seconds after /compact before injecting recovery message
 _COMPACT_EFFECTIVENESS_FILE = Path(".soren/.compact-effectiveness")
 # Track agents with pending compaction — maps agent_id → pre_tokens (input_tokens)
@@ -255,31 +256,101 @@ async def list_sessions():
     return {"sessions": sessions}
 
 
+# Compaction timestamps live in the compact_timestamps table of the
+# consolidated DB. The old .soren/.compact-timestamps file was rewritten
+# wholesale both here (read + full write_text) and by compact.sh (grep-filter
+# tmp+mv) with no coordination — a live race. The table upsert is atomic; the
+# legacy file is imported once, lazily, then renamed *.migrated (either side
+# may do the import — an atomic rename is the claim).
+_COMPACT_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS compact_timestamps (
+    window     TEXT PRIMARY KEY,
+    epoch      INTEGER NOT NULL,
+    updated_at TEXT
+)
+"""
+
+
+def _legacy_compact_file() -> Path:
+    return Path(settings.soren_dir) / ".compact-timestamps"
+
+
+def _migrate_compact_timestamps(conn) -> None:
+    """One-time lazy import of the legacy 'window=epoch' lines file."""
+    legacy = _legacy_compact_file()
+    if not legacy.exists():
+        return
+    claim = legacy.with_name(f"{legacy.name}.importing.{os.getpid()}")
+    try:
+        legacy.rename(claim)  # atomic claim — exactly one importer wins
+    except OSError:
+        return
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        for line in claim.read_text().splitlines():
+            window, sep, epoch_str = line.partition("=")
+            if not sep or not window:
+                continue
+            try:
+                epoch = int(float(epoch_str))
+            except ValueError:
+                continue
+            # Keep the newer epoch if the table already has one (compact.sh
+            # may have written between our claim and this insert).
+            conn.execute(
+                """
+                INSERT INTO compact_timestamps (window, epoch, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(window) DO UPDATE
+                    SET epoch = excluded.epoch, updated_at = excluded.updated_at
+                    WHERE excluded.epoch > compact_timestamps.epoch
+                """,
+                (window, epoch, now),
+            )
+    except Exception as exc:
+        logger.warning(f"Failed to import legacy compact timestamps: {exc}")
+    finally:
+        try:
+            claim.rename(legacy.with_name(f"{legacy.name}.migrated"))
+        except OSError:
+            pass
+
+
 def _get_last_compact_time(window: str) -> float:
     """Return epoch of last compaction for window, or 0.0 if never."""
-    if not _COMPACT_TIMESTAMPS.exists():
-        return 0.0
     try:
-        for line in _COMPACT_TIMESTAMPS.read_text().splitlines():
-            if line.startswith(f"{window}="):
-                return float(line.split("=", 1)[1])
-    except Exception:
-        pass
-    return 0.0
+        with get_db() as conn:
+            conn.execute(_COMPACT_TABLE_SQL)
+            _migrate_compact_timestamps(conn)
+            row = conn.execute(
+                "SELECT epoch FROM compact_timestamps WHERE window = ?",
+                (window,),
+            ).fetchone()
+            return float(row["epoch"]) if row else 0.0
+    except Exception as exc:
+        logger.warning(f"Failed to read compact timestamps: {exc}")
+        return 0.0
 
 
 def _set_last_compact_time(window: str, ts: float):
     """Record compaction timestamp for window."""
     try:
-        _COMPACT_TIMESTAMPS.parent.mkdir(parents=True, exist_ok=True)
-        lines: list[str] = []
-        if _COMPACT_TIMESTAMPS.exists():
-            lines = [
-                ln for ln in _COMPACT_TIMESTAMPS.read_text().splitlines()
-                if ln and not ln.startswith(f"{window}=")
-            ]
-        lines.append(f"{window}={int(ts)}")
-        _COMPACT_TIMESTAMPS.write_text("\n".join(lines) + "\n")
+        with get_db() as conn:
+            conn.execute(_COMPACT_TABLE_SQL)
+            _migrate_compact_timestamps(conn)
+            conn.execute(
+                """
+                INSERT INTO compact_timestamps (window, epoch, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(window) DO UPDATE
+                    SET epoch = excluded.epoch, updated_at = excluded.updated_at
+                """,
+                (
+                    window,
+                    int(ts),
+                    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                ),
+            )
     except Exception as exc:
         logger.warning(f"Failed to update compact timestamps: {exc}")
 

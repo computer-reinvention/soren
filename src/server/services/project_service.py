@@ -1,59 +1,187 @@
-import fcntl
+"""Project registry service — SQLite master, JSON view.
+
+The registry MASTER is the `projects` table in the consolidated SQLite DB
+(.soren/soren.db, resolved via services/db.py). .soren/projects.json is a
+REGENERATED READ-ONLY VIEW of that table so existing jq readers (monitor.sh,
+verify-done.sh, tools/workers, scan-project.sh, memory-index, soren-init,
+soren-run, blocker_detector.py, ...) keep working unchanged.
+
+This replaces the old fcntl-locked JSON read-modify-write: sqlite
+(busy_timeout=5000) is the write serializer shared with the bash tool
+(tools/projects), and the view is regenerated post-commit via tmp+rename.
+
+View byte format: json.dumps({"projects": [...]}, indent=2, ensure_ascii=False)
++ "\n" — byte-identical to the bash regeneration (`jq .` formatting) for the
+same table state. Boolean columns are JSON booleans in the view; an empty
+supervisor_agent_id renders as null (both legacy writers emitted null).
+
+NOTE (shared schema + view shape): duplicated in tools/projects — keep in sync.
+"""
+
 import json
+import logging
+import os
+import sqlite3
 import subprocess
-from pathlib import Path
-from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+from ..config import settings
 from ..models.project import Project
+from .db import get_db
 
-PROJECTS_FILE = Path(".soren/projects.json")
+logger = logging.getLogger(__name__)
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS projects (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT,
+    path                TEXT,
+    is_self             INTEGER DEFAULT 0,
+    active              INTEGER DEFAULT 1,
+    supervisor_agent_id TEXT DEFAULT '',
+    hooks_installed     INTEGER DEFAULT 0,
+    added_at            TEXT,
+    git_remote          TEXT DEFAULT '',
+    language            TEXT DEFAULT '',
+    description         TEXT DEFAULT ''
+)
+"""
+
+_BOOL_FIELDS = ("is_self", "active", "hooks_installed")
+
+_COLUMNS = (
+    "id", "name", "path", "is_self", "active", "supervisor_agent_id",
+    "hooks_installed", "added_at", "git_remote", "language", "description",
+)
 
 
 class ProjectService:
-    """Service for managing the SOREN project registry (.soren/projects.json)."""
+    """Service for the SOREN project registry (sqlite master + JSON view)."""
 
-    def __init__(self, projects_file: Optional[Path] = None):
-        self._file = projects_file or PROJECTS_FILE
+    def __init__(self, projects_file: Optional[Path] = None, db_path: Optional[Path] = None):
+        # projects_file overrides the VIEW path (tests); db_path overrides the
+        # master DB path (tests) — default follows settings dynamically.
+        self._file_override = projects_file
+        self._db_override = db_path
 
-    def _ensure_file(self):
-        """Ensure the projects.json file exists."""
-        if not self._file.exists():
-            self._file.parent.mkdir(parents=True, exist_ok=True)
-            self._file.write_text('{"projects": []}')
+    # ── plumbing ──────────────────────────────────────────────────────────────
 
-    def _read(self) -> List[Dict[str, Any]]:
-        """Read projects from disk with shared lock."""
-        self._ensure_file()
+    @property
+    def _view_path(self) -> Path:
+        if self._file_override is not None:
+            return self._file_override
+        return Path(settings.soren_dir) / "projects.json"
+
+    def _db(self):
+        return get_db(self._db_override)
+
+    def _init(self, conn: sqlite3.Connection) -> None:
+        """Ensure schema + one-time lazy import from a legacy projects.json."""
+        conn.execute(SCHEMA)
+        self._import_legacy(conn)
+
+    def _import_legacy(self, conn: sqlite3.Connection) -> None:
+        """If the table is empty but a populated projects.json exists, seed the
+        table from it. The file is NOT renamed — it becomes the regenerated
+        view. Mirrors the bash import in tools/projects."""
+        count = conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        if count > 0:
+            return
+        view = self._view_path
+        if not view.exists():
+            return
         try:
-            with open(self._file, "r") as f:
-                fcntl.flock(f.fileno(), fcntl.LOCK_SH)
-                data = json.load(f)
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-                return data.get("projects", [])
-        except (json.JSONDecodeError, IOError):
-            return []
+            data = json.loads(view.read_text())
+        except (json.JSONDecodeError, OSError):
+            return
+        entries = data.get("projects", []) if isinstance(data, dict) else []
+        entries = [p for p in entries if isinstance(p, dict) and p.get("id")]
+        if not entries:
+            return
+        for p in entries:
+            conn.execute(
+                "INSERT OR IGNORE INTO projects "
+                "(id, name, path, is_self, active, supervisor_agent_id, "
+                " hooks_installed, added_at, git_remote, language, description) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    p.get("id"),
+                    p.get("name") or "",
+                    p.get("path") or "",
+                    1 if p.get("is_self") else 0,
+                    1 if p.get("active") else 0,
+                    p.get("supervisor_agent_id") or "",
+                    1 if p.get("hooks_installed") else 0,
+                    p.get("added_at") or "",
+                    p.get("git_remote") or "",
+                    p.get("language") or "",
+                    p.get("description") or "",
+                ),
+            )
+        conn.commit()
+        logger.info(
+            "Imported %d project(s) from legacy %s into sqlite (file kept as view)",
+            len(entries), view,
+        )
+        # Canonicalize the file now that it is a derived view
+        self._regenerate_view(conn)
 
-    def _write(self, projects: List[Dict[str, Any]]):
-        """Write projects to disk with exclusive lock."""
-        self._ensure_file()
-        with open(self._file, "w") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            json.dump({"projects": projects}, f, indent=2)
-            f.flush()
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    @staticmethod
+    def _row_to_entry(row: sqlite3.Row) -> Dict[str, Any]:
+        """Table row → legacy view/API shape (INTEGER↔boolean at the boundary,
+        '' supervisor_agent_id → null). Key order matches the bash view SQL."""
+        sid = row["supervisor_agent_id"]
+        return {
+            "id": row["id"],
+            "name": row["name"],
+            "path": row["path"],
+            "is_self": bool(row["is_self"]),
+            "active": bool(row["active"]),
+            "supervisor_agent_id": sid if sid else None,
+            "hooks_installed": bool(row["hooks_installed"]),
+            "added_at": row["added_at"],
+            "git_remote": row["git_remote"] if row["git_remote"] is not None else "",
+            "language": row["language"] if row["language"] is not None else "",
+            "description": row["description"] if row["description"] is not None else "",
+        }
+
+    def _read_entries(self, conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+        rows = conn.execute("SELECT * FROM projects ORDER BY rowid").fetchall()
+        return [self._row_to_entry(r) for r in rows]
+
+    def _regenerate_view(self, conn: sqlite3.Connection) -> None:
+        """Regenerate the read-only JSON view (call AFTER commit). tmp+rename
+        in the same directory = atomic same-filesystem replacement."""
+        try:
+            entries = self._read_entries(conn)
+            view = self._view_path
+            view.parent.mkdir(parents=True, exist_ok=True)
+            tmp = view.with_name(f"{view.name}.tmp.{os.getpid()}")
+            tmp.write_text(
+                json.dumps({"projects": entries}, indent=2, ensure_ascii=False) + "\n"
+            )
+            tmp.rename(view)
+        except OSError as e:
+            logger.warning("projects.json view regeneration failed: %s", e)
+
+    # ── public API ────────────────────────────────────────────────────────────
 
     def list_projects(self) -> List[Project]:
         """List all registered projects."""
-        raw = self._read()
-        return [Project(**p) for p in raw]
+        with self._db() as conn:
+            self._init(conn)
+            return [Project(**e) for e in self._read_entries(conn)]
 
     def get_project(self, project_id: str) -> Optional[Project]:
         """Get a single project by ID."""
-        for p in self._read():
-            if p.get("id") == project_id:
-                return Project(**p)
-        return None
+        with self._db() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return Project(**self._row_to_entry(row)) if row else None
 
     def add_project(self, path: str, name: Optional[str] = None, description: Optional[str] = None) -> Project:
         """Register a new project.
@@ -69,72 +197,114 @@ class ProjectService:
         if not project_id:
             raise ValueError(f"Could not derive project ID from path: {path}")
 
-        projects = self._read()
-        for p in projects:
-            if p.get("id") == project_id:
-                raise ValueError(f"Project '{project_id}' already registered")
-
         git_remote = self._detect_git_remote(str(resolved))
         language = self._detect_language(str(resolved))
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        entry = {
-            "id": project_id,
-            "name": name or resolved.name,
-            "path": str(resolved),
-            "is_self": False,
-            "active": False,
-            "supervisor_agent_id": None,
-            "hooks_installed": False,
-            "added_at": now,
-            "git_remote": git_remote or None,
-            "language": language,
-            "description": description or None,
-        }
-
-        projects.append(entry)
-        self._write(projects)
-        return Project(**entry)
+        with self._db() as conn:
+            self._init(conn)
+            exists = conn.execute(
+                "SELECT 1 FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if exists:
+                raise ValueError(f"Project '{project_id}' already registered")
+            conn.execute(
+                "INSERT INTO projects "
+                "(id, name, path, is_self, active, supervisor_agent_id, "
+                " hooks_installed, added_at, git_remote, language, description) "
+                "VALUES (?,?,?,0,0,'',0,?,?,?,?)",
+                (
+                    project_id,
+                    name or resolved.name,
+                    str(resolved),
+                    now,
+                    git_remote or "",
+                    language,
+                    description or "",
+                ),
+            )
+            conn.commit()
+            self._regenerate_view(conn)
+            row = conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return Project(**self._row_to_entry(row))
 
     def update_project(self, project_id: str, updates: Dict[str, Any]) -> Optional[Project]:
         """Update project metadata. Only updates provided (non-None) fields."""
-        projects = self._read()
-        for i, p in enumerate(projects):
-            if p.get("id") == project_id:
-                for key, value in updates.items():
-                    if value is not None:
-                        p[key] = value
-                projects[i] = p
-                self._write(projects)
-                return Project(**p)
-        return None
+        sets, params = [], []
+        for key, value in updates.items():
+            if value is None or key not in _COLUMNS or key == "id":
+                continue
+            if key in _BOOL_FIELDS:
+                value = 1 if value else 0
+            sets.append(f"{key} = ?")
+            params.append(value)
+
+        with self._db() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if sets:
+                conn.execute(
+                    f"UPDATE projects SET {', '.join(sets)} WHERE id = ?",
+                    (*params, project_id),
+                )
+                conn.commit()
+                self._regenerate_view(conn)
+            updated = conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return Project(**self._row_to_entry(updated))
 
     def remove_project(self, project_id: str) -> bool:
         """Remove a project from the registry. Returns True if found and removed."""
-        projects = self._read()
-        for p in projects:
-            if p.get("id") == project_id:
-                if p.get("is_self"):
-                    raise ValueError("Cannot remove SOREN self-project")
-                projects = [proj for proj in projects if proj.get("id") != project_id]
-                self._write(projects)
-                return True
-        return False
+        with self._db() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT is_self FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not row:
+                return False
+            if row["is_self"]:
+                raise ValueError("Cannot remove SOREN self-project")
+            conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+            conn.commit()
+            self._regenerate_view(conn)
+            return True
 
     def set_active(self, project_id: str, active: bool, supervisor_agent_id: Optional[str] = None) -> Optional[Project]:
         """Set a project's active state and optionally its supervisor_agent_id."""
-        projects = self._read()
-        for i, p in enumerate(projects):
-            if p.get("id") == project_id:
-                p["active"] = active
-                if supervisor_agent_id is not None:
-                    p["supervisor_agent_id"] = supervisor_agent_id
-                elif not active:
-                    p["supervisor_agent_id"] = None
-                projects[i] = p
-                self._write(projects)
-                return Project(**p)
-        return None
+        with self._db() as conn:
+            self._init(conn)
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if supervisor_agent_id is not None:
+                conn.execute(
+                    "UPDATE projects SET active = ?, supervisor_agent_id = ? WHERE id = ?",
+                    (1 if active else 0, supervisor_agent_id, project_id),
+                )
+            elif not active:
+                conn.execute(
+                    "UPDATE projects SET active = 0, supervisor_agent_id = '' WHERE id = ?",
+                    (project_id,),
+                )
+            else:
+                conn.execute(
+                    "UPDATE projects SET active = 1 WHERE id = ?", (project_id,)
+                )
+            conn.commit()
+            self._regenerate_view(conn)
+            updated = conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            return Project(**self._row_to_entry(updated))
 
     def get_project_agents(self, project_id: str) -> List[Dict[str, Any]]:
         """Get agents associated with a project from the agent registry."""

@@ -9,6 +9,19 @@
 #   projects info <id>
 #   projects activate <id>
 #   projects deactivate <id>
+#
+# Storage model (matches the agent-registry pattern in tools/lib/opencode.sh):
+# the MASTER is the `projects` table in the consolidated SQLite DB
+# (.soren/soren.db); .soren/projects.json is a REGENERATED READ-ONLY VIEW of
+# that table so existing jq readers (monitor.sh, verify-done.sh, tools/workers,
+# scan-project.sh, memory-index, soren-init, soren-run, blocker_detector.py, …)
+# keep working unchanged. Never write the JSON file directly — every mutation
+# is a sqlite statement followed by a view regeneration (tmp+mv).
+#
+# View shape is the exact legacy shape: {"projects":[...]} with JSON booleans
+# for is_self/active/hooks_installed and null for an unset supervisor_agent_id.
+# The view bytes are jq-formatted and byte-identical to the python service's
+# regeneration (src/server/services/project_service.py — keep in sync).
 #═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -43,16 +56,115 @@ info() { echo -e "${CYAN}▶${NC} $1"; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
 warn() { echo -e "${YELLOW}!${NC} $1"; }
 
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# Schema for the projects master table.
+# NOTE (shared schema): duplicated in src/server/services/project_service.py —
+# keep in sync. CREATE IF NOT EXISTS from both sides.
+_projects_ensure_schema() {
+    soren_db "CREATE TABLE IF NOT EXISTS projects (
+        id                  TEXT PRIMARY KEY,
+        name                TEXT,
+        path                TEXT,
+        is_self             INTEGER DEFAULT 0,
+        active              INTEGER DEFAULT 1,
+        supervisor_agent_id TEXT DEFAULT '',
+        hooks_installed     INTEGER DEFAULT 0,
+        added_at            TEXT,
+        git_remote          TEXT DEFAULT '',
+        language            TEXT DEFAULT '',
+        description         TEXT DEFAULT ''
+    );" 2>/dev/null || true
+}
+
+# Serialize the table into the legacy view shape, one JSON object per row.
+# Boolean columns become JSON booleans; an empty supervisor_agent_id becomes
+# null (both legacy writers emitted null when unset). Key order matches the
+# legacy writers (and the python regenerator) for byte-stable views.
+_PROJECTS_VIEW_SQL="SELECT json_object(
+    'id', id,
+    'name', name,
+    'path', path,
+    'is_self', json(CASE WHEN is_self THEN 'true' ELSE 'false' END),
+    'active', json(CASE WHEN active THEN 'true' ELSE 'false' END),
+    'supervisor_agent_id', CASE WHEN IFNULL(supervisor_agent_id, '') = '' THEN NULL ELSE supervisor_agent_id END,
+    'hooks_installed', json(CASE WHEN hooks_installed THEN 'true' ELSE 'false' END),
+    'added_at', added_at,
+    'git_remote', IFNULL(git_remote, ''),
+    'language', IFNULL(language, ''),
+    'description', IFNULL(description, '')
+) FROM projects ORDER BY rowid;"
+
+# Regenerate the JSON view from the master (post-commit; tmp+mv in the SAME
+# directory so the replacement is an atomic same-filesystem rename). jq '.'
+# formatting is byte-identical to the python service's
+# json.dumps(indent=2, ensure_ascii=False) + '\n'.
+regen_projects_view() {
+    local tmp
+    tmp=$(mktemp "${REGISTRY}.tmp.XXXXXX") || return 1
+    if soren_db "$_PROJECTS_VIEW_SQL" 2>/dev/null | jq -s '{projects: .}' > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$REGISTRY"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# One-time lazy import: if the table is empty but a populated legacy
+# projects.json exists (pre-sqlite era), seed the table from it. The file is
+# NOT renamed — it becomes the regenerated view. Idempotent (INSERT OR IGNORE
+# + empty-table guard); mirrors the python service's import.
+_projects_import_legacy() {
+    [[ -s "$REGISTRY" ]] || return 0
+    local count
+    count=$(soren_db "SELECT COUNT(*) FROM projects;" 2>/dev/null) || count=0
+    [[ "$count" == "0" ]] || return 0
+    local n
+    n=$(jq -r '.projects | length' "$REGISTRY" 2>/dev/null) || n=0
+    [[ "$n" =~ ^[0-9]+$ ]] && (( n > 0 )) || return 0
+    info "Importing ${n} project(s) from legacy $(basename "$REGISTRY") into sqlite"
+    local prog sql
+    prog=$(cat <<'JQEOF'
+def q: "'" + ((. // "") | tostring | gsub("'"; "''")) + "'";
+def flag: if . == true then "1" else "0" end;
+.projects[]
+| "INSERT OR IGNORE INTO projects (id, name, path, is_self, active, supervisor_agent_id, hooks_installed, added_at, git_remote, language, description) VALUES ("
+  + (.id | q) + ", " + (.name | q) + ", " + (.path | q) + ", "
+  + (.is_self | flag) + ", " + (.active | flag) + ", "
+  + (.supervisor_agent_id | q) + ", " + (.hooks_installed | flag) + ", "
+  + (.added_at | q) + ", " + (.git_remote | q) + ", "
+  + (.language | q) + ", " + (.description | q) + ");"
+JQEOF
+)
+    sql=$(jq -r "$prog" "$REGISTRY" 2>/dev/null) || return 0
+    [[ -n "$sql" ]] || return 0
+    printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | soren_db 2>/dev/null || return 0
+    # Canonicalize the file now that it is a derived view
+    regen_projects_view || true
+}
+
+# Ensure schema + one-time import + a readable view file; called by every
+# command before touching state.
 ensure_registry() {
+    mkdir -p "$(dirname "$REGISTRY")"
+    _projects_ensure_schema
+    _projects_import_legacy
     if [[ ! -f "$REGISTRY" ]]; then
-        mkdir -p "$(dirname "$REGISTRY")"
-        echo '{"projects":[]}' > "$REGISTRY"
+        regen_projects_view || echo '{"projects":[]}' > "$REGISTRY"
     fi
 }
 
 project_exists() {
-    local id="$1"
-    jq -e --arg id "$id" '.projects[] | select(.id == $id)' "$REGISTRY" > /dev/null 2>&1
+    local n
+    n=$(soren_db "SELECT COUNT(*) FROM projects WHERE id = '$(sql_q "$1")';" 2>/dev/null) || n=0
+    [[ "$n" != "0" ]]
+}
+
+# project_field <id> <column> — print one column for one project (raw sqlite
+# output: integers for boolean columns).
+project_field() {
+    soren_db "SELECT $2 FROM projects WHERE id = '$(sql_q "$1")';" 2>/dev/null
 }
 
 detect_git_remote() {
@@ -252,29 +364,11 @@ cmd_add() {
 
     info "Registering project: $id"
 
-    # Add to registry
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" \
-       --arg name "$name" \
-       --arg path "$path" \
-       --arg desc "$description" \
-       --arg remote "$git_remote" \
-       --arg lang "$language" \
-       --arg now "$now" \
-       '.projects += [{
-           id: $id,
-           name: $name,
-           path: $path,
-           is_self: false,
-           active: false,
-           supervisor_agent_id: null,
-           hooks_installed: false,
-           added_at: $now,
-           git_remote: $remote,
-           language: $lang,
-           description: $desc
-       }]' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+    # Add to the sqlite master, then regenerate the view
+    soren_db "INSERT INTO projects (id, name, path, is_self, active, supervisor_agent_id, hooks_installed, added_at, git_remote, language, description)
+        VALUES ('$(sql_q "$id")', '$(sql_q "$name")', '$(sql_q "$path")', 0, 0, '', 0, '$(sql_q "$now")', '$(sql_q "$git_remote")', '$(sql_q "$language")', '$(sql_q "$description")');" \
+        || die "failed to register project '$id'"
+    regen_projects_view
 
     ok "Project '$id' registered"
 
@@ -307,8 +401,8 @@ cmd_remove() {
 
     # Prevent removing self-project
     local is_self
-    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
-    if [[ "$is_self" == "true" ]]; then
+    is_self=$(project_field "$id" is_self)
+    if [[ "$is_self" == "1" ]]; then
         die "cannot remove SOREN self-project"
     fi
 
@@ -316,8 +410,8 @@ cmd_remove() {
 
     # Step 1: Deactivate (kill supervisor) if active
     local is_active
-    is_active=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
-    if [[ "$is_active" == "true" ]]; then
+    is_active=$(project_field "$id" active)
+    if [[ "$is_active" == "1" ]]; then
         info "Deactivating project supervisor..."
         cmd_deactivate "$id" || warn "Failed to deactivate project (continuing removal)"
     fi
@@ -358,10 +452,10 @@ cmd_remove() {
 
     # Step 3: Remove the soren-bridge plugin shim if it was installed
     local hooks_installed
-    hooks_installed=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .hooks_installed' "$REGISTRY")
-    if [[ "$hooks_installed" == "true" ]]; then
+    hooks_installed=$(project_field "$id" hooks_installed)
+    if [[ "$hooks_installed" == "1" ]]; then
         local project_path
-        project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+        project_path=$(project_field "$id" path)
         local plugin_file="${project_path}/.opencode/plugins/soren-bridge.ts"
         if [[ -f "$plugin_file" ]]; then
             info "Removing installed soren-bridge plugin: $plugin_file"
@@ -384,10 +478,9 @@ cmd_remove() {
         fi
     fi
 
-    # Step 5: Remove from registry
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" '.projects |= map(select(.id != $id))' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+    # Step 5: Remove from the master, regenerate the view
+    soren_db "DELETE FROM projects WHERE id = '$(sql_q "$id")';"
+    regen_projects_view
 
     ok "Project '$id' removed"
 }
@@ -396,7 +489,7 @@ cmd_list() {
     ensure_registry
 
     local count
-    count=$(jq '.projects | length' "$REGISTRY")
+    count=$(soren_db "SELECT COUNT(*) FROM projects;")
 
     if [[ "$count" -eq 0 ]]; then
         echo -e "${DIM}No projects registered${NC}"
@@ -406,7 +499,7 @@ cmd_list() {
     printf "${BOLD}%-16s %-20s %-8s %-10s %s${NC}\n" "ID" "NAME" "ACTIVE" "LANGUAGE" "PATH"
     printf "%-16s %-20s %-8s %-10s %s\n" "────────────────" "────────────────────" "────────" "──────────" "────────────────────"
 
-    jq -r '.projects[] | [.id, .name, (if .active then "yes" else "no" end), .language, .path] | @tsv' "$REGISTRY" | \
+    soren_db -separator $'\t' "SELECT id, name, CASE WHEN active THEN 'yes' ELSE 'no' END, IFNULL(language, ''), path FROM projects ORDER BY rowid;" | \
     while IFS=$'\t' read -r id name active lang path; do
         local color="$NC"
         if [[ "$active" == "yes" ]]; then
@@ -430,19 +523,19 @@ cmd_info() {
     fi
 
     local data
-    data=$(jq --arg id "$id" '.projects[] | select(.id == $id)' "$REGISTRY")
+    data=$(soren_db -json "SELECT * FROM projects WHERE id = '$(sql_q "$id")';" | jq '.[0]')
 
     echo -e "${BOLD}Project: $(echo "$data" | jq -r '.name')${NC}"
     echo ""
     echo "  ID:          $(echo "$data" | jq -r '.id')"
     echo "  Path:        $(echo "$data" | jq -r '.path')"
-    echo "  Active:      $(echo "$data" | jq -r 'if .active then "yes" else "no" end')"
-    echo "  Language:    $(echo "$data" | jq -r '.language // "unknown"')"
-    echo "  Self:        $(echo "$data" | jq -r 'if .is_self then "yes" else "no" end')"
-    echo "  Supervisor:  $(echo "$data" | jq -r '.supervisor_agent_id // "none"')"
-    echo "  Hooks:       $(echo "$data" | jq -r 'if .hooks_installed then "installed" else "not installed" end')"
-    echo "  Remote:      $(echo "$data" | jq -r '.git_remote // "none"')"
-    echo "  Description: $(echo "$data" | jq -r '.description // "none"')"
+    echo "  Active:      $(echo "$data" | jq -r 'if .active == 1 then "yes" else "no" end')"
+    echo "  Language:    $(echo "$data" | jq -r 'if (.language // "") == "" then "unknown" else .language end')"
+    echo "  Self:        $(echo "$data" | jq -r 'if .is_self == 1 then "yes" else "no" end')"
+    echo "  Supervisor:  $(echo "$data" | jq -r 'if (.supervisor_agent_id // "") == "" then "none" else .supervisor_agent_id end')"
+    echo "  Hooks:       $(echo "$data" | jq -r 'if .hooks_installed == 1 then "installed" else "not installed" end')"
+    echo "  Remote:      $(echo "$data" | jq -r 'if (.git_remote // "") == "" then "none" else .git_remote end')"
+    echo "  Description: $(echo "$data" | jq -r 'if (.description // "") == "" then "none" else .description end')"
     echo "  Added:       $(echo "$data" | jq -r '.added_at')"
 }
 
@@ -483,19 +576,18 @@ cmd_activate() {
 
     # Self-project uses Supervisor Prime — nothing to spawn
     local is_self
-    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
-    if [[ "$is_self" == "true" ]]; then
+    is_self=$(project_field "$id" is_self)
+    if [[ "$is_self" == "1" ]]; then
         # Just mark active
-        local tmp
-        tmp=$(mktemp)
-        jq --arg id "$id" '(.projects[] | select(.id == $id)).active = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+        soren_db "UPDATE projects SET active = 1 WHERE id = '$(sql_q "$id")';"
+        regen_projects_view
         ok "Self-project '$id' activated (Supervisor Prime handles this project)"
         return 0
     fi
 
     local already_active
-    already_active=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
-    if [[ "$already_active" == "true" ]]; then
+    already_active=$(project_field "$id" active)
+    if [[ "$already_active" == "1" ]]; then
         # Check if the tmux window is actually running
         local sup_name_check="sup-${id}"
         local session_check="${SOREN_SESSION:-soren}"
@@ -510,7 +602,7 @@ cmd_activate() {
 
     # Read project details
     local project_path
-    project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+    project_path=$(project_field "$id" path)
     [[ -d "$project_path" ]] || die "project path does not exist: $project_path"
 
     local sup_name="sup-${id}"
@@ -520,9 +612,8 @@ cmd_activate() {
     if tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | grep -qxF "$sup_name"; then
         warn "supervisor window '$sup_name' already exists"
         # Still mark active in registry
-        local tmp
-        tmp=$(mktemp)
-        jq --arg id "$id" '(.projects[] | select(.id == $id)).active = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+        soren_db "UPDATE projects SET active = 1 WHERE id = '$(sql_q "$id")';"
+        regen_projects_view
         return 0
     fi
 
@@ -880,11 +971,8 @@ CTXEOF
     tmux send-keys -t "${session}:${sup_name}" Enter
 
     # Update registry: set active=true, save supervisor_agent_id
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" --arg aid "$agent_id" \
-        '(.projects[] | select(.id == $id)) |= (.active = true | .supervisor_agent_id = $aid)' \
-        "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+    soren_db "UPDATE projects SET active = 1, supervisor_agent_id = '$(sql_q "$agent_id")' WHERE id = '$(sql_q "$id")';"
+    regen_projects_view
 
     # Initialize heartbeat file for this supervisor
     date +%s > "${SOREN_HOME}/.soren/.${sup_name}-heartbeat"
@@ -909,14 +997,14 @@ cmd_deactivate() {
 
     # Prevent deactivating self-project
     local is_self
-    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
-    if [[ "$is_self" == "true" ]]; then
+    is_self=$(project_field "$id" is_self)
+    if [[ "$is_self" == "1" ]]; then
         die "cannot deactivate SOREN self-project"
     fi
 
     local already_inactive
-    already_inactive=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .active' "$REGISTRY")
-    if [[ "$already_inactive" == "false" ]]; then
+    already_inactive=$(project_field "$id" active)
+    if [[ "$already_inactive" == "0" ]]; then
         warn "project '$id' is already inactive"
         return 0
     fi
@@ -954,11 +1042,9 @@ cmd_deactivate() {
     rm -f "${SOREN_HOME}/.soren/.${sup_name}-heartbeat"
 
     # Update registry: set active=false, clear supervisor_agent_id
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" \
-        '(.projects[] | select(.id == $id)) |= (.active = false | .supervisor_agent_id = null)' \
-        "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+    # ('' in the master renders as null in the view)
+    soren_db "UPDATE projects SET active = 0, supervisor_agent_id = '' WHERE id = '$(sql_q "$id")';"
+    regen_projects_view
 
     ok "Project '$id' deactivated"
 }
@@ -974,14 +1060,14 @@ cmd_install_hooks() {
     fi
 
     local is_self
-    is_self=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .is_self' "$REGISTRY")
-    if [[ "$is_self" == "true" ]]; then
+    is_self=$(project_field "$id" is_self)
+    if [[ "$is_self" == "1" ]]; then
         warn "SOREN self-project already has the soren-bridge plugin configured"
         return 0
     fi
 
     local project_path
-    project_path=$(jq -r --arg id "$id" '.projects[] | select(.id == $id) | .path' "$REGISTRY")
+    project_path=$(project_field "$id" path)
     [[ -d "$project_path" ]] || die "project path does not exist: $project_path"
 
     info "Installing soren-bridge opencode plugin in: $project_path"
@@ -1004,9 +1090,8 @@ export { SorenBridge } from "${SOREN_HOME}/.opencode/plugins/soren-bridge.ts"
 PLUGINEOF
 
     # Update registry: mark hooks as installed
-    local tmp
-    tmp=$(mktemp)
-    jq --arg id "$id" '(.projects[] | select(.id == $id)).hooks_installed = true' "$REGISTRY" > "$tmp" && mv "$tmp" "$REGISTRY"
+    soren_db "UPDATE projects SET hooks_installed = 1 WHERE id = '$(sql_q "$id")';"
+    regen_projects_view
 
     ok "soren-bridge plugin installed at $plugin_file"
     echo "  Re-exports: ${SOREN_HOME}/.opencode/plugins/soren-bridge.ts"
@@ -1019,7 +1104,7 @@ cmd_sync_skills() {
     local id ppath is_self skill_file
     while IFS=$'\t' read -r id ppath is_self; do
         [[ -z "$id" ]] && continue
-        if [[ "$is_self" == "true" ]]; then
+        if [[ "$is_self" == "1" ]]; then
             skipped=$((skipped+1))
             continue
         fi
@@ -1036,7 +1121,7 @@ cmd_sync_skills() {
             warn "  failed to generate skill for '$id'"
             skipped=$((skipped+1))
         fi
-    done < <(jq -r '.projects[] | [.id, .path, (.is_self | tostring)] | @tsv' "$REGISTRY")
+    done < <(soren_db -separator $'\t' "SELECT id, path, is_self FROM projects ORDER BY rowid;")
 
     echo ""
     ok "Conventions skills regenerated: $count project(s)${skipped:+ (skipped: $skipped)}"

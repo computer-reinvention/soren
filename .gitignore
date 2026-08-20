@@ -80,3 +80,22 @@ Thumbs.db
 .soren/orchestrator.log*
 .soren/server.pid
 nohup.out
+
+# One-time file→table migration artifacts (fix_retries/compact_timestamps/
+# secrets_vault lazy imports rename the legacy files/dirs to *.migrated;
+# *.importing.* is the transient atomic-claim name)
+.soren/.fix-retries.migrated*
+.soren/.compact-timestamps.migrated*
+.soren/.compact-timestamps.importing.*
+.soren/secrets.enc.migrated
+.soren/.secrets-salt.migrated
+.soren/.fix-retries.importing.*
+.soren/schedule.json.migrated*
+.soren/schedule.json.importing.*
+.soren/preferences.json.migrated*
+.soren/preferences.json.importing.*
+.soren/prefs.json.migrated*
+.soren/prefs.json.importing.*
+# Transient tmp names used by the projects/teams view regenerations (tmp+mv)
+.soren/projects.json.tmp.*
+.soren/teams.json.tmp.*

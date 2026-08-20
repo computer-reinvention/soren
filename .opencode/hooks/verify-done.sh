@@ -25,6 +25,17 @@ fi
 STATUS_LOG="$PROJECT_ROOT/.soren/status.log"
 MAILBOX_TOOL="$PROJECT_ROOT/tools/mailbox"
 
+# Consolidated DB access (soren_db + SOREN_DB_PATH; SOREN_DB env overrides the
+# path — that is the sandboxing mechanism for tests, replacing the old
+# RETRY_DIR override).
+if [[ -f "$PROJECT_ROOT/tools/lib/db.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PROJECT_ROOT/tools/lib/db.sh"
+else
+    echo "verify-done.sh: $PROJECT_ROOT/tools/lib/db.sh not found — cannot verify" >&2
+    exit 0
+fi
+
 # Resolve GIT_ROOT for external projects (commits live in their own repo)
 GIT_ROOT="$PROJECT_ROOT"
 if [[ -n "${SOREN_PROJECT_ID:-}" && "${SOREN_PROJECT_ID:-}" != "soren" ]]; then
@@ -88,12 +99,106 @@ log_verify() {
 # Keyed by agent AND a task discriminator (TASK_KEY) so one flaky task can't
 # burn another task's retry budget, and REJECT/FIX cycles stay bounded per
 # task instead of resetting across rounds.
-RETRY_DIR="${RETRY_DIR:-$PROJECT_ROOT/.soren/.fix-retries}"
+#
+# State lives in the consolidated DB (fix_retries table) — the old per-task
+# count files + .escalated latch files in .soren/.fix-retries/ raced under
+# concurrent [DONE] reports (two backgrounded subshells could read the same
+# count and both write count+1). A single UPSERT is atomic. The legacy dir is
+# imported once, lazily (see migrate_fix_retries_dir), then renamed *.migrated.
+LEGACY_RETRY_DIR="$PROJECT_ROOT/.soren/.fix-retries"
 MAX_RETRIES=2
-mkdir -p "$RETRY_DIR" 2>/dev/null || true
 
 # Set in the background subshell after commit-hash extraction.
 TASK_KEY=""
+
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
+# Schema for retry/latch state + structured verification history.
+# NOTE (shared function): duplicated in tools/verifications — keep in sync.
+ensure_verify_tables() {
+    soren_db <<'SQL' 2>/dev/null || true
+CREATE TABLE IF NOT EXISTS fix_retries (
+    agent      TEXT NOT NULL,
+    task_key   TEXT NOT NULL,
+    retries    INTEGER NOT NULL DEFAULT 0,
+    escalated  INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (agent, task_key)
+);
+CREATE TABLE IF NOT EXISTS verify_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT NOT NULL,
+    event      TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    task_key   TEXT,
+    commit_sha TEXT,
+    detail     TEXT
+);
+SQL
+}
+
+# One-time lazy import of the legacy .fix-retries directory into fix_retries.
+# mv is the atomic claim: exactly one concurrent invocation imports; the dir
+# ends up renamed to <dir>.migrated so this never runs twice.
+# NOTE (shared function): duplicated in tools/verifications — keep in sync.
+migrate_fix_retries_dir() {
+    local legacy="$1"
+    [[ -d "$legacy" ]] || return 0
+    local claim="${legacy}.importing.$$"
+    mv "$legacy" "$claim" 2>/dev/null || return 0
+    local now f base esc key agt count
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for f in "$claim"/*; do
+        [[ -e "$f" ]] || continue
+        base=$(basename "$f")
+        esc=0
+        if [[ "$base" == *.escalated ]]; then
+            esc=1
+            base="${base%.escalated}"
+        fi
+        # <agent>-<key> where key is a commit sha / md5 (7-40 hex) or
+        # "default"; legacy keyless files are just <agent>.
+        key="${base##*-}"
+        agt="${base%-*}"
+        if [[ "$base" != *-* ]] || { [[ ! "$key" =~ ^[0-9a-f]{7,40}$ ]] && [[ "$key" != "default" ]]; }; then
+            agt="$base"
+            key="default"
+        fi
+        if (( esc == 1 )); then
+            soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+                VALUES ('$(sql_q "$agt")', '$(sql_q "$key")', 0, 1, '$now')
+                ON CONFLICT(agent, task_key) DO UPDATE SET escalated = 1, updated_at = '$now';" 2>/dev/null || true
+        else
+            count=$(tr -cd '0-9' < "$f" 2>/dev/null) || count=""
+            [[ -z "$count" ]] && count=0
+            soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+                VALUES ('$(sql_q "$agt")', '$(sql_q "$key")', $count, 0, '$now')
+                ON CONFLICT(agent, task_key) DO UPDATE SET retries = $count, updated_at = '$now';" 2>/dev/null || true
+        fi
+    done
+    if [[ -e "${legacy}.migrated" ]]; then
+        mv "$claim" "${legacy}.migrated.$(date +%s).$$" 2>/dev/null || true
+    else
+        mv "$claim" "${legacy}.migrated" 2>/dev/null || true
+    fi
+}
+
+# Structured verification history: one row per verification outcome, written
+# alongside the human-readable status.log line. $1=event $2=detail [$3=commit]
+record_event() {
+    local now detail
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # Flatten whitespace: detail rows are read back as tab-separated columns.
+    detail=$(printf '%s' "$2" | tr '\n\t' '  ')
+    soren_db "INSERT INTO verify_events (ts, event, agent, task_key, commit_sha, detail)
+        VALUES ('$now', '$(sql_q "$1")', '$(sql_q "$agent")',
+                NULLIF('$(sql_q "${TASK_KEY:-}")', ''),
+                NULLIF('$(sql_q "${3:-}")', ''),
+                '$(sql_q "$detail")');" 2>/dev/null || true
+}
 
 _md5_stdin() {
     # Portable md5-of-stdin: md5sum (Linux), md5 -q (macOS), openssl fallback
@@ -121,28 +226,38 @@ compute_task_key() {
     fi
 }
 
-retry_file() {
-    echo "$RETRY_DIR/${agent}-${TASK_KEY:-default}"
-}
-
-escalation_latch() {
-    echo "$(retry_file).escalated"
+# WHERE clause for the current (agent, task key) row.
+retry_where() {
+    echo "agent = '$(sql_q "$agent")' AND task_key = '$(sql_q "${TASK_KEY:-default}")'"
 }
 
 get_retry_count() {
-    local file
-    file=$(retry_file)
-    if [[ -f "$file" ]]; then cat "$file"; else echo "0"; fi
+    local n
+    n=$(soren_db "SELECT retries FROM fix_retries WHERE $(retry_where);" 2>/dev/null) || n=""
+    echo "${n:-0}"
 }
 
+# Atomic increment: single UPSERT with RETURNING gives back the new count in
+# one statement — concurrent [DONE] subshells can no longer lose increments.
+# RETURNING needs sqlite3 >= 3.35 (stock macOS ships 3.51 — verified).
 increment_retry() {
-    local count
-    count=$(get_retry_count)
-    echo $((count + 1)) > "$(retry_file)"
+    local now n
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    n=$(soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+        VALUES ('$(sql_q "$agent")', '$(sql_q "${TASK_KEY:-default}")', 1, 0, '$now')
+        ON CONFLICT(agent, task_key) DO UPDATE SET retries = retries + 1, updated_at = '$now'
+        RETURNING retries;" 2>/dev/null) || n=""
+    echo "${n:-1}"
 }
 
 clear_retry() {
-    rm -f "$(retry_file)" "$(escalation_latch)"
+    soren_db "DELETE FROM fix_retries WHERE $(retry_where);" 2>/dev/null || true
+}
+
+is_latched() {
+    local v
+    v=$(soren_db "SELECT escalated FROM fix_retries WHERE $(retry_where);" 2>/dev/null) || v=""
+    [[ "$v" == "1" ]]
 }
 
 should_auto_fix() {
@@ -154,14 +269,14 @@ should_auto_fix() {
 send_fix_request() {
     local failure_type="$1"
     local details="$2"
-    increment_retry
     local count
-    count=$(get_retry_count)
+    count=$(increment_retry)
     "$MAILBOX_TOOL" send "$agent" \
         "[FIX-REQUEST] ${failure_type}: attempt ${count}/${MAX_RETRIES}" \
         "$details" \
         2>/dev/null || true
     log_verify "FIX-REQUEST sent to $agent (attempt $count/$MAX_RETRIES): $failure_type"
+    record_event "FIX-REQUEST" "${failure_type}: attempt ${count}/${MAX_RETRIES}" "${commit_hash:-}"
 }
 
 escalate_to_supervisor() {
@@ -174,11 +289,17 @@ escalate_to_supervisor() {
         "$details" \
         2>/dev/null || true
     log_verify "ESCALATED to supervisor after $count failed auto-fix attempts: $failure_type"
-    # Escalation latch: while this file exists, further [DONE] reports for the
-    # same task key get NO auto FIX-REQUEST (just a status.log line). Cleared
-    # by the supervisor/human deleting it, or by `tools/workers send <agent>`
-    # (a new dispatch means the supervisor intervened).
-    touch "$(escalation_latch)" 2>/dev/null || true
+    record_event "VERIFY-FAILED" "$failure_type ($count auto-fix attempts exhausted)" "${commit_hash:-}"
+    # Escalation latch: while escalated=1, further [DONE] reports for the same
+    # task key get NO auto FIX-REQUEST (just a status.log line). Cleared by
+    # `tools/verifications clear-latch`, or by `tools/workers send <agent>`
+    # (a new dispatch means the supervisor intervened). Counter resets to 0 but
+    # the latch survives (old behavior: rm count file, keep .escalated file).
+    local esc_now
+    esc_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+        VALUES ('$(sql_q "$agent")', '$(sql_q "${TASK_KEY:-default}")', 0, 1, '$esc_now')
+        ON CONFLICT(agent, task_key) DO UPDATE SET retries = 0, escalated = 1, updated_at = '$esc_now';" 2>/dev/null || true
     # Log failure to API for tracking
     curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/messages/verify-result" \
       -H "Content-Type: application/json" \
@@ -188,9 +309,6 @@ escalate_to_supervisor() {
         \"commit_sha\": $(printf '%s' "${commit_hash:-unknown}" | jq -Rs .),
         \"details\": $(printf '%s' "$failure_type: $count auto-fix attempts exhausted" | jq -Rs .)
       }" >/dev/null 2>&1 || true
-    # Reset the counter but KEEP the escalation latch (clear_retry would
-    # delete both).
-    rm -f "$(retry_file)"
 }
 
 # --- Lesson extraction for Accumulated Knowledge ---
@@ -266,6 +384,11 @@ extract_lesson() {
 
 # --- Run verification in background ---
 (
+    # Retry/latch state and verification history live in the consolidated DB.
+    # Ensure schema, then lazily import any pre-migration .fix-retries dir.
+    ensure_verify_tables
+    migrate_fix_retries_dir "$LEGACY_RETRY_DIR"
+
     # Extract commit hash: look for 7-40 hex char sequences
     commit_hash=""
     # Try full 40-char SHA first, then short 7+ char
@@ -280,9 +403,10 @@ extract_lesson() {
 
     # Escalation latch: this task key already exhausted its retries and was
     # escalated. Do NOT restart the FIX-REQUEST cycle — wait for a supervisor
-    # to intervene (delete the latch or dispatch via `workers send`).
-    if [[ -f "$(escalation_latch)" ]]; then
+    # to intervene (clear-latch or dispatch via `workers send`).
+    if is_latched; then
         log_verify "escalation latched, awaiting supervisor (agent $agent, key ${TASK_KEY})"
+        record_event "LATCHED" "escalation latched, awaiting supervisor" "${commit_hash:-}"
         exit 0
     fi
 
@@ -302,6 +426,7 @@ extract_lesson() {
         fi
         if [[ "$contract_exempt" == "true" ]]; then
             log_verify "SKIP: contract-exempt DONE from $agent (done_requires_commit=false in contracts.json)"
+            record_event "SKIP-CONTRACT-EXEMPT" "contract-exempt DONE (done_requires_commit=false): ${done_msg:0:200}"
             retry_count_at_verify=$(get_retry_count)
             clear_retry
             "$MAILBOX_TOOL" send "$supervisor" \
@@ -332,6 +457,7 @@ extract_lesson() {
         msg_lower_noop=$(echo "$done_msg" | tr '[:upper:]' '[:lower:]')
         if [[ "$msg_lower_noop" == *"no-op:"* ]]; then
             log_verify "SKIP: no-op DONE from $agent (no commit expected)"
+            record_event "SKIP-NOOP" "no-op DONE (no commit expected): ${done_msg:0:200}"
             retry_count_at_verify=$(get_retry_count)
             clear_retry
             "$MAILBOX_TOOL" send "$supervisor" \
@@ -342,6 +468,7 @@ extract_lesson() {
 
         if [[ "$is_research" == "true" ]]; then
             log_verify "SKIP: research-only DONE from $agent (no commit expected)"
+            record_event "SKIP-RESEARCH" "research-only DONE (no commit expected): ${done_msg:0:200}"
             retry_count_at_verify=$(get_retry_count)
             clear_retry
             "$MAILBOX_TOOL" send "$supervisor" \
@@ -431,6 +558,7 @@ Your original message: ${done_msg:0:200}"
     if $verify_ok; then
         retry_count_at_verify=$(get_retry_count)
         clear_retry
+        record_event "VERIFIED" "commit $commit_hash checks passed" "$commit_hash"
         "$MAILBOX_TOOL" send "$supervisor" \
             "[VERIFIED] $agent: commit $commit_hash checks passed" \
             "$(printf '%b' "$verify_results" | head -30)" \
