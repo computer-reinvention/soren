@@ -66,11 +66,11 @@ get_model_default() {
 }
 
 generate_agent_id() {
-    # Generate ag_ + 8 random alphanumeric chars
-    # Check agent registry for collisions and regenerate if needed
-    local registry_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+    # Generate ag_ + 8 random alphanumeric chars.
+    # Collision check goes against the SQLite registry master — the JSON file
+    # is only a derived view (see tools/lib/opencode.sh).
     local attempt=0
-    local id
+    local id existing
 
     while [[ $attempt -lt 100 ]]; do
         id="ag_$(head -c 32 /dev/urandom | base64 | tr -dc 'a-z0-9' | head -c 8)"
@@ -79,8 +79,9 @@ generate_agent_id() {
             attempt=$((attempt+1))
             continue
         fi
-        # Check for collision in registry
-        if [[ -f "$registry_file" ]] && grep -q "\"$id\"" "$registry_file" 2>/dev/null; then
+        # Check for collision in the registry master
+        existing=$(soren_db "SELECT COUNT(*) FROM agents WHERE agent_id = '${id}';" 2>/dev/null) || existing=0
+        if [[ -n "$existing" && "$existing" != "0" ]]; then
             attempt=$((attempt+1))
             continue
         fi
@@ -293,14 +294,15 @@ cmd_spawn() {
         project_id="$SOREN_PROJECT_ID"
     fi
 
-    # Register in agent_registry.json so the API returns correct agent_id, role, project_id
+    # Register in the agent registry (SQLite master; agent_registry.json is
+    # regenerated as a view — the API serves correct metadata immediately)
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     if [[ ! -f "$reg_file" ]]; then
         echo '{}' > "$reg_file"
     fi
     # Release any stale port reservation from a previous incarnation of this name
     local old_oc_port=""
-    old_oc_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_oc_port=""
+    old_oc_port=$(soren_registry_get -r --arg k "$name" '.[$k].oc_port // empty' 2>/dev/null) || old_oc_port=""
     if [[ -n "$old_oc_port" ]]; then
         soren_oc_release_port "$old_oc_port"
     fi
@@ -317,6 +319,7 @@ cmd_spawn() {
            "spawned_by": $spawner,
            "created_at": $now,
            "agent_id": $aid,
+           "status": "IDLE",
            "display_name": $key,
            "role": "worker",
            "project_id": $pid,
@@ -332,18 +335,6 @@ cmd_spawn() {
     fi
 
     soren_registry_update "$reg_file" "${jq_args[@]}" "$jq_filter"
-
-    # Also register in SQLite (shared soren.db) so the API serves correct metadata immediately
-    local db_file="$SOREN_DB_PATH"
-    if [[ -f "$db_file" ]]; then
-        local db_data
-        db_data=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
-        if [[ -n "$db_data" && "$db_data" != "null" ]]; then
-            db_data="${db_data//\'/\'\'}"  # escape single quotes for SQLite
-            soren_db "INSERT OR REPLACE INTO agents (key, agent_id, status, data) VALUES ('${name}', '${agent_id}', 'IDLE', '${db_data}');" 2>/dev/null || \
-                warn "Failed to register in SQLite (non-fatal)"
-        fi
-    fi
 
     # Store model preference in registry if specified
     if [[ -n "$model_flag" ]]; then
@@ -365,16 +356,6 @@ cmd_spawn() {
             if [[ -n "$given_name" && "$given_name" != "$name" ]]; then
                 soren_registry_update "$reg_file" --arg k "$name" --arg dn "$given_name" '.[$k].display_name = $dn'
             fi
-        fi
-    fi
-
-    # Sync final state to SQLite (model + permanent flags may have been added after initial insert)
-    if [[ -f "$db_file" ]]; then
-        local db_data_final
-        db_data_final=$(jq -c --arg k "$name" '.[$k]' "$reg_file" 2>/dev/null)
-        if [[ -n "$db_data_final" && "$db_data_final" != "null" ]]; then
-            db_data_final="${db_data_final//\'/\'\'}"  # escape single quotes for SQLite
-            soren_db "UPDATE agents SET data = '${db_data_final}' WHERE key = '${name}';" 2>/dev/null || true
         fi
     fi
 
@@ -638,12 +619,11 @@ cmd_kill() {
         die "worker '$name' not found"
     fi
 
-    # Check for permanent worker protection
+    # Check for permanent worker protection (read the sqlite master — a stale
+    # view here could let a permanent worker be killed without --force)
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     local is_perm=false
-    if [[ -f "$reg_file" ]]; then
-        is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null)
-    fi
+    is_perm=$(soren_registry_get -r --arg k "$name" '.[$k].permanent // false' 2>/dev/null) || is_perm=false
     if [[ "$is_perm" == "true" ]]; then
         if [[ "$force_flag" != "true" ]]; then
             die "Cannot kill permanent worker '$name'.\n  Use 'workers reset $name' to reset context, or\n  Use 'workers kill $name --force' to permanently remove."
@@ -677,26 +657,19 @@ cmd_kill() {
 
     # Check for worktree BEFORE removing the registry entry (preservation note)
     local wt_path="" wt_branch=""
-    if [[ -f "$reg_file" ]]; then
-        wt_path=$(jq -r --arg key "$name" '.[$key].worktree_path // empty' "$reg_file" 2>/dev/null)
-        wt_branch=$(jq -r --arg key "$name" '.[$key].worktree_branch // empty' "$reg_file" 2>/dev/null)
-    fi
+    wt_path=$(soren_registry_get -r --arg key "$name" '.[$key].worktree_path // empty' 2>/dev/null) || wt_path=""
+    wt_branch=$(soren_registry_get -r --arg key "$name" '.[$key].worktree_branch // empty' 2>/dev/null) || wt_branch=""
 
-    # Retire the registry entry. A killed worker must NOT linger — leaving the
-    # entry made the stale-window sweep re-mark every killed ephemeral as
-    # SLEEPING, piling up phantom "sleeping agents". The conversation archive
-    # (above) preserves history; the registry entry is live-state only.
-    if [[ -f "$reg_file" ]]; then
-        local old_port=""
-        old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_port=""
-        soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])'
-        if [[ -n "$old_port" ]]; then
-            soren_oc_release_port "$old_port"
-        fi
-    fi
-    local db_file="$SOREN_DB_PATH"
-    if [[ -f "$db_file" ]]; then
-        soren_db "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
+    # Retire the registry entry (sqlite master + view regen). A killed worker
+    # must NOT linger — leaving the entry made the stale-window sweep re-mark
+    # every killed ephemeral as SLEEPING, piling up phantom "sleeping agents".
+    # The conversation archive (above) preserves history; the registry entry
+    # is live-state only.
+    local old_port=""
+    old_port=$(soren_registry_get -r --arg k "$name" '.[$k].oc_port // empty' 2>/dev/null) || old_port=""
+    soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])'
+    if [[ -n "$old_port" ]]; then
+        soren_oc_release_port "$old_port"
     fi
     # Clean up context files for the retired worker
     rm -f "${SOREN_PROJECT_ROOT}/.soren/worker-contexts/${name}-context.md" \
@@ -722,32 +695,26 @@ cmd_sleep() {
 
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
 
-    # Check if already sleeping
-    if [[ -f "$reg_file" ]]; then
-        local current_status
-        current_status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
-        if [[ "$current_status" == "SLEEPING" ]]; then
-            warn "Worker '$name' is already sleeping"
-            return 0
-        fi
+    # Check if already sleeping (read the sqlite master — the JSON view can
+    # lag a concurrent status writer)
+    local current_status
+    current_status=$(soren_registry_get -r --arg k "$name" '.[$k].status // ""' 2>/dev/null) || current_status=""
+    if [[ "$current_status" == "SLEEPING" ]]; then
+        warn "Worker '$name' is already sleeping"
+        return 0
     fi
 
     if ! window_exists "$name"; then
         # No window but agent exists in registry — mark as sleeping if we have a session_id
-        if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
+        if soren_registry_get -e --arg k "$name" '.[$k]' >/dev/null 2>&1; then
             local existing_sid
-            existing_sid=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
+            existing_sid=$(soren_registry_get -r --arg k "$name" '.[$k].session_id // ""' 2>/dev/null) || existing_sid=""
             if [[ -n "$existing_sid" ]]; then
                 local old_port=""
-                old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || old_port=""
+                old_port=$(soren_registry_get -r --arg k "$name" '.[$k].oc_port // empty' 2>/dev/null) || old_port=""
                 soren_registry_update "$reg_file" --arg k "$name" '.[$k].status = "SLEEPING" | del(.[$k].oc_port)'
                 if [[ -n "$old_port" ]]; then
                     soren_oc_release_port "$old_port"
-                fi
-                # Also update SQLite
-                local db_file="$SOREN_DB_PATH"
-                if [[ -f "$db_file" ]]; then
-                    soren_db "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
                 fi
                 ok "Worker '$name' marked as sleeping (session: ${existing_sid:0:8}...)"
                 return 0
@@ -784,20 +751,14 @@ cmd_sleep() {
 
     # Update registry: mark as SLEEPING, store session_id, drop the oc_port
     # (and release its reservation) so it can't route to a different agent
-    if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
+    if soren_registry_get -e --arg k "$name" '.[$k]' >/dev/null 2>&1; then
         local sleep_old_port=""
-        sleep_old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || sleep_old_port=""
+        sleep_old_port=$(soren_registry_get -r --arg k "$name" '.[$k].oc_port // empty' 2>/dev/null) || sleep_old_port=""
         soren_registry_update "$reg_file" --arg k "$name" --arg sid "$session_id" \
             '.[$k].status = "SLEEPING" | .[$k].session_id = $sid | del(.[$k].oc_port)'
         if [[ -n "$sleep_old_port" ]]; then
             soren_oc_release_port "$sleep_old_port"
         fi
-    fi
-
-    # Also update SQLite
-    local db_file="$SOREN_DB_PATH"
-    if [[ -f "$db_file" ]]; then
-        soren_db "UPDATE agents SET status='SLEEPING' WHERE key='${name}';" 2>/dev/null || true
     fi
 
     ok "Worker '$name' is now sleeping"
@@ -821,14 +782,14 @@ cmd_wake() {
         return 0
     fi
 
-    # Get saved session ID and worker config from registry
+    # Get saved session ID and worker config from the registry master
     local session_id="" worker_dir="" worktree_path="" project_id="" saved_model=""
-    if [[ -f "$reg_file" ]] && jq -e --arg k "$name" '.[$k]' "$reg_file" >/dev/null 2>&1; then
-        session_id=$(jq -r --arg k "$name" '.[$k].session_id // ""' "$reg_file" 2>/dev/null)
-        worker_dir=$(jq -r --arg k "$name" '.[$k].worker_dir // ""' "$reg_file" 2>/dev/null)
-        worktree_path=$(jq -r --arg k "$name" '.[$k].worktree_path // ""' "$reg_file" 2>/dev/null)
-        project_id=$(jq -r --arg k "$name" '.[$k].project_id // ""' "$reg_file" 2>/dev/null)
-        saved_model=$(jq -r --arg k "$name" '.[$k].model // ""' "$reg_file" 2>/dev/null)
+    if soren_registry_get -e --arg k "$name" '.[$k]' >/dev/null 2>&1; then
+        session_id=$(soren_registry_get -r --arg k "$name" '.[$k].session_id // ""' 2>/dev/null) || session_id=""
+        worker_dir=$(soren_registry_get -r --arg k "$name" '.[$k].worker_dir // ""' 2>/dev/null) || worker_dir=""
+        worktree_path=$(soren_registry_get -r --arg k "$name" '.[$k].worktree_path // ""' 2>/dev/null) || worktree_path=""
+        project_id=$(soren_registry_get -r --arg k "$name" '.[$k].project_id // ""' 2>/dev/null) || project_id=""
+        saved_model=$(soren_registry_get -r --arg k "$name" '.[$k].model // ""' 2>/dev/null) || saved_model=""
     fi
 
     if [[ -z "$session_id" ]]; then
@@ -844,12 +805,12 @@ cmd_wake() {
     # Build environment and resume command
     local supervisor_name="${SOREN_AGENT_NAME:-supervisor}"
     local agent_id
-    agent_id=$(jq -r --arg k "$name" '.[$k].agent_id // ""' "$reg_file" 2>/dev/null)
+    agent_id=$(soren_registry_get -r --arg k "$name" '.[$k].agent_id // ""' 2>/dev/null) || agent_id=""
     [[ -z "$agent_id" ]] && agent_id="ag_$(head -c 4 /dev/urandom | xxd -p)"
 
     # Release the old port reservation (if any) before allocating a new one
     local wake_old_port=""
-    wake_old_port=$(jq -r --arg k "$name" '.[$k].oc_port // empty' "$reg_file" 2>/dev/null) || wake_old_port=""
+    wake_old_port=$(soren_registry_get -r --arg k "$name" '.[$k].oc_port // empty' 2>/dev/null) || wake_old_port=""
     if [[ -n "$wake_old_port" ]]; then
         soren_oc_release_port "$wake_old_port"
     fi
@@ -873,15 +834,10 @@ cmd_wake() {
     tmux send-keys -t "${SOREN_SESSION}:${name}" Enter
 
     # Update registry status — IDLE (the worker hasn't started a task yet;
-    # the first PostToolUse will flip it). Matches the SQLite status below.
+    # the first PostToolUse will flip it). Writes through the sqlite master,
+    # which also derives the status column.
     soren_registry_update "$reg_file" --arg k "$name" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '.[$k].status = "IDLE" | .[$k].last_activity = $ts'
-
-    # Also update SQLite
-    local db_file="$SOREN_DB_PATH"
-    if [[ -f "$db_file" ]]; then
-        soren_db "UPDATE agents SET status='IDLE' WHERE key='${name}';" 2>/dev/null || true
-    fi
 
     ok "Worker '$name' is awake"
 
@@ -902,7 +858,7 @@ cmd_wake() {
         fi
         # Permanent workers with a durable knowledge file: point them at it
         local wake_is_perm
-        wake_is_perm=$(jq -r --arg k "$name" '.[$k].permanent // false' "$reg_file" 2>/dev/null) || wake_is_perm="false"
+        wake_is_perm=$(soren_registry_get -r --arg k "$name" '.[$k].permanent // false' 2>/dev/null) || wake_is_perm="false"
         if [[ "$wake_is_perm" == "true" && -f "${SOREN_PROJECT_ROOT}/templates/team/knowledge/${name}.md" ]]; then
             message="${message} Also skim your working knowledge: ./tools/knowledge show ${name} --brief"
         fi
@@ -1095,12 +1051,10 @@ cmd_send() {
     rm -f "${SOREN_PROJECT_ROOT}/.soren/.fix-retries/${name}-"*.escalated 2>/dev/null || true
 
     if ! window_exists "$name"; then
-        # Check if worker is sleeping — auto-wake
-        local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
+        # Check if worker is sleeping — auto-wake (master read: a stale view
+        # here would fail the send instead of waking the worker)
         local status=""
-        if [[ -f "$reg_file" ]]; then
-            status=$(jq -r --arg k "$name" '.[$k].status // ""' "$reg_file" 2>/dev/null)
-        fi
+        status=$(soren_registry_get -r --arg k "$name" '.[$k].status // ""' 2>/dev/null) || status=""
         if [[ "$status" == "SLEEPING" ]]; then
             info "Worker '$name' is sleeping — waking..."
             cmd_wake "$name" "$message"

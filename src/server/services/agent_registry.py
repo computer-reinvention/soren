@@ -1,12 +1,19 @@
 """SQLite-backed agent registry.
 
-Replaces the previous JSON + fcntl implementation.
-- Lives in the consolidated .soren/soren.db (agents table) — see services/db.py
+The agents table in the consolidated .soren/soren.db is the SINGLE MASTER for
+agent state (see services/db.py). Bash writers go through
+soren_registry_update in tools/lib/opencode.sh, which writes the same table.
+
 - WAL mode for safe concurrent reads
 - Atomic writes — no partial-write corruption
-- Write-through JSON cache at .soren/agent_registry.json for shell-script
-  compatibility (compact.sh, monitor.sh, hooks, tools)
-- Migration: imports existing agent_registry.json on first startup
+- .soren/agent_registry.json is a REGENERATED READ-ONLY VIEW of the table,
+  kept for shell-script jq readers (compact.sh, monitor.sh, hooks, tools).
+  It is re-exported after every committed write, in the same byte format the
+  bash writers produce (2-space indent, raw UTF-8, trailing newline), so
+  either writer regenerating it yields identical bytes for identical state.
+- The ONLY code path that treats the JSON file as input is the documented
+  fresh-install bootstrap (_migrate_from_json), which runs once when the
+  agents table is empty.
 """
 
 import json
@@ -139,7 +146,14 @@ class AgentRegistry:
             logger.warning("JSON migration failed: %s", e)
 
     def _write_json_cache(self):
-        """Atomically update agent_registry.json for shell-script consumers."""
+        """Regenerate the read-only JSON view for shell-script consumers.
+
+        Called AFTER the sqlite write has committed — sqlite is the master,
+        the JSON file is derived state only. The byte format (2-space indent,
+        insertion order, raw UTF-8, trailing newline) matches what the bash
+        writer (tools/lib/opencode.sh) produces via `jq .`, so regenerations
+        from either side are byte-stable for identical table state.
+        """
         try:
             rows = self._conn.execute("SELECT key, data FROM agents").fetchall()
             agents: Dict[str, Any] = {}
@@ -150,7 +164,7 @@ class AgentRegistry:
                     logger.warning("JSON parse failed for agent %s: %s", key, e)
             tmp = JSON_CACHE_PATH.with_suffix(".tmp")
             JSON_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(agents, indent=2))
+            tmp.write_text(json.dumps(agents, indent=2, ensure_ascii=False) + "\n")
             tmp.rename(JSON_CACHE_PATH)
         except Exception as e:
             logger.warning("JSON cache write failed: %s", e)

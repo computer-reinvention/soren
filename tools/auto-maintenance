@@ -26,6 +26,9 @@ WORKER_IDLE_THRESHOLD=${WORKER_IDLE_THRESHOLD:-1800}  # 30 minutes in seconds
 # Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
 source "${SOREN_PROJECT_ROOT}/tools/lib/db.sh"
 
+# Registry helpers (soren_registry_update — sqlite master + JSON view regen)
+source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
+
 CONTEXT_DIR="${SOREN_PROJECT_ROOT}/.soren/worker-contexts"
 
 # Protected window names — never touch these
@@ -217,9 +220,6 @@ retire_sleeping_ephemerals() {
     local reg_file="${SOREN_PROJECT_ROOT}/.soren/agent_registry.json"
     [[ -f "$reg_file" ]] || return 0
 
-    # shellcheck source=/dev/null
-    source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh" 2>/dev/null || true
-
     local name last_ts
     while IFS=$'\t' read -r name last_ts; do
         [[ -z "$name" ]] && continue
@@ -248,16 +248,8 @@ PYEOF
         # Archive conversation (best effort; may already be archived)
         curl -sX POST "http://localhost:${SOREN_PORT}/api/agents/${name}/archive" >/dev/null 2>&1 || true
 
-        # Remove registry entry (flock'd when available)
-        if declare -f soren_registry_update >/dev/null 2>&1; then
-            soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])' || true
-        else
-            local tmp; tmp=$(mktemp)
-            jq --arg k "$name" 'del(.[$k])' "$reg_file" > "$tmp" && mv "$tmp" "$reg_file"
-        fi
-        # Mirror into SQLite registry if present
-        soren_db \
-            "DELETE FROM agents WHERE key='${name//\'/''}';" 2>/dev/null || true
+        # Remove registry entry (sqlite master; JSON view regenerated)
+        soren_registry_update "$reg_file" --arg k "$name" 'del(.[$k])' || true
 
         # Clean context files
         rm -f "${CONTEXT_DIR}/${name}-context.md" \

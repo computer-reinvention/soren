@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 # tmux helper functions for soren orchestrator
 
+# Registry writes must go through the SQLite master (see tools/lib/opencode.sh
+# — agent_registry.json is only a regenerated view). tmux.sh is sourced by
+# router.sh/compact.sh/monitor.sh, which don't all source tools/lib, so pull
+# in the registry helpers ourselves when they're missing. opencode.sh is a
+# pure function library — sourcing it has no side effects.
+if ! declare -f soren_registry_update >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "$(dirname "${BASH_SOURCE[0]}")/../../../tools/lib/opencode.sh" 2>/dev/null || true
+fi
+
 # Check if a tmux session exists
 tmux_session_exists() {
     local session="$1"
@@ -224,15 +234,13 @@ _tmux_oc_port() {
     done
 
     if [[ -n "$live_port" && "$live_port" != "$port" ]]; then
-        # Repair the registry (best effort, non-fatal)
-        if [[ -f "$reg" ]]; then
-            local tmp
-            tmp=$(mktemp)
-            if jq --arg k "$window" --argjson p "$live_port" '.[$k].oc_port = $p' "$reg" > "$tmp" 2>/dev/null; then
-                mv "$tmp" "$reg"
+        # Repair the registry (best effort, non-fatal). Must go through the
+        # sqlite master — a direct JSON edit would be clobbered by the next
+        # view regeneration.
+        if declare -f soren_registry_update >/dev/null 2>&1; then
+            if soren_registry_update "$reg" --arg k "$window" --argjson p "$live_port" \
+                    '.[$k].oc_port = $p' 2>/dev/null; then
                 echo "[tmux_oc_port] Healed stale oc_port for ${window}: ${port:-none} -> ${live_port}" >&2
-            else
-                rm -f "$tmp"
             fi
         fi
         echo "$live_port"
