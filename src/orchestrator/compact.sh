@@ -20,6 +20,14 @@ source "${SCRIPT_DIR}/lib/tmux.sh"
 source "${SCRIPT_DIR}/lib/logging.sh"
 source "${SCRIPT_DIR}/lib/filelock.sh"
 
+# Compaction timestamps live in the consolidated DB (compact_timestamps table)
+# — pull in soren_db when missing (mirrors lib/tmux.sh's lazy opencode.sh
+# sourcing; db.sh is a pure function library, no side effects).
+if ! declare -f soren_db >/dev/null 2>&1; then
+    # shellcheck source=/dev/null
+    source "${SCRIPT_DIR}/../../tools/lib/db.sh" 2>/dev/null || true
+fi
+
 # Single-instance enforcement (portable: Linux flock / macOS python3 fcntl)
 COMPACT_LOCKFILE="${SOREN_PROJECT_ROOT:-.}/.soren/run/compact.lock"
 mkdir -p "$(dirname "$COMPACT_LOCKFILE")" 2>/dev/null || true
@@ -39,7 +47,7 @@ SKIP_WINDOWS="monitor|supervisor"                  # windows to never compact
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 PRE_COMPACT_HOOK="${PROJECT_ROOT}/.opencode/hooks/pre-compact.sh"
 RECOVERY_DELAY=5                                   # seconds to wait before injecting recovery message
-COMPACT_TIMESTAMPS="${PROJECT_ROOT}/.soren/.compact-timestamps"
+COMPACT_TIMESTAMPS="${PROJECT_ROOT}/.soren/.compact-timestamps"  # legacy file — imported once into the compact_timestamps table, then renamed
 COMPACT_COOLDOWN="${SOREN_COMPACT_COOLDOWN:-1800}"  # 30 minutes minimum between compactions per agent
 
 # Track state
@@ -73,37 +81,70 @@ is_agent_idle() {
 
 #-------------------------------------------------------------------------------
 # Activity tracking — skip agents with no work since last compaction
+#
+# Timestamps live in the compact_timestamps table of the consolidated DB.
+# The old .soren/.compact-timestamps file was rewritten wholesale both here
+# (grep-filter tmp+mv) and by the server (routes/agent_events.py read + full
+# write_text) with no coordination — a live race. The table upsert is atomic;
+# the legacy file is imported once, lazily, then renamed *.migrated (either
+# side may do the import — mv/rename is the atomic claim).
 #-------------------------------------------------------------------------------
+
+# Escape a value for embedding in a single-quoted SQL literal.
+_compact_sql_q() {
+    printf '%s' "$1" | sed "s/'/''/g"
+}
+
+_ensure_compact_table() {
+    soren_db "CREATE TABLE IF NOT EXISTS compact_timestamps (
+        window     TEXT PRIMARY KEY,
+        epoch      INTEGER NOT NULL,
+        updated_at TEXT
+    );" 2>/dev/null || true
+}
+
+# One-time lazy import of the legacy 'window=epoch' lines file.
+_migrate_compact_timestamps() {
+    [[ -f "$COMPACT_TIMESTAMPS" ]] || return 0
+    local claim="${COMPACT_TIMESTAMPS}.importing.$$"
+    mv "$COMPACT_TIMESTAMPS" "$claim" 2>/dev/null || return 0
+    local w e now
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    while IFS='=' read -r w e; do
+        [[ -n "$w" && "$e" =~ ^[0-9]+$ ]] || continue
+        # Keep the newer epoch if the table already has one (server may have
+        # written between our claim and this insert).
+        soren_db "INSERT INTO compact_timestamps (window, epoch, updated_at)
+            VALUES ('$(_compact_sql_q "$w")', $e, '$now')
+            ON CONFLICT(window) DO UPDATE SET epoch = excluded.epoch, updated_at = excluded.updated_at
+            WHERE excluded.epoch > compact_timestamps.epoch;" 2>/dev/null || true
+    done < "$claim"
+    mv "$claim" "${COMPACT_TIMESTAMPS}.migrated" 2>/dev/null || true
+}
 
 # Get the epoch timestamp of last compaction for a window.
 # Returns 0 if never compacted.
 get_last_compact_time() {
     local window="$1"
-    if [[ -f "$COMPACT_TIMESTAMPS" ]]; then
-        local ts
-        ts=$(grep "^${window}=" "$COMPACT_TIMESTAMPS" 2>/dev/null | tail -1 | cut -d= -f2)
-        echo "${ts:-0}"
-    else
-        echo "0"
-    fi
+    local ts
+    _ensure_compact_table
+    _migrate_compact_timestamps
+    ts=$(soren_db "SELECT epoch FROM compact_timestamps
+        WHERE window = '$(_compact_sql_q "$window")';" 2>/dev/null) || ts=""
+    echo "${ts:-0}"
 }
 
 # Record current epoch as last compaction time for a window.
 set_last_compact_time() {
     local window="$1"
-    local now
+    local now now_iso
     now=$(date +%s)
-
-    # Create file if missing
-    touch "$COMPACT_TIMESTAMPS"
-
-    # Remove old entry (if any) and append new one
-    if grep -q "^${window}=" "$COMPACT_TIMESTAMPS" 2>/dev/null; then
-        # Use a temp file to avoid sed -i portability issues
-        grep -v "^${window}=" "$COMPACT_TIMESTAMPS" > "${COMPACT_TIMESTAMPS}.tmp" || true
-        mv "${COMPACT_TIMESTAMPS}.tmp" "$COMPACT_TIMESTAMPS"
-    fi
-    echo "${window}=${now}" >> "$COMPACT_TIMESTAMPS"
+    now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    _ensure_compact_table
+    _migrate_compact_timestamps
+    soren_db "INSERT INTO compact_timestamps (window, epoch, updated_at)
+        VALUES ('$(_compact_sql_q "$window")', $now, '$now_iso')
+        ON CONFLICT(window) DO UPDATE SET epoch = excluded.epoch, updated_at = excluded.updated_at;" 2>/dev/null || true
 }
 
 # Check whether an agent has had activity since its last compaction.

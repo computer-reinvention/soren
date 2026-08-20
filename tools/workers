@@ -184,30 +184,38 @@ cmd_spawn() {
     # Spawn-rate ledger: agent-initiated spawns only (SOREN_AGENT=true —
     # humans are exempt). A runaway saga spawning workers in a loop gets
     # refused HERE, before any side effect (no tmux window, no worktree,
-    # no registry write). --user-approved bypasses with explicit approval.
-    if [[ "${SOREN_AGENT:-}" == "true" && "$user_approved" != "true" ]]; then
-        local spawn_run_dir="${SOREN_PROJECT_ROOT}/.soren/run"
-        mkdir -p "$spawn_run_dir"
-        local spawn_ledger="${spawn_run_dir}/spawn-events.log"
-        local spawn_now spawn_cutoff spawn_recent spawn_ev spawn_kept
+    # no registry write). --user-approved bypasses with explicit approval
+    # (recorded with approved=1, excluded from the rate count — matching the
+    # old file ledger, where approved spawns were never recorded).
+    # The ledger lives in the spawn_events table: insert + prune + count run
+    # in ONE transaction (the old .soren/run/spawn-events.log read-modify-write
+    # was unlocked and lost events under concurrent spawns).
+    if [[ "${SOREN_AGENT:-}" == "true" ]]; then
+        local spawn_now spawn_cutoff spawn_recent spawn_approved
         spawn_now=$(date +%s)
         spawn_cutoff=$((spawn_now - 3600))
-        echo "$spawn_now" >> "$spawn_ledger"
-        spawn_recent=0
-        spawn_kept=""
-        while IFS= read -r spawn_ev; do
-            [[ "$spawn_ev" =~ ^[0-9]+$ ]] || continue
-            if [ "$spawn_ev" -ge "$spawn_cutoff" ]; then
-                spawn_recent=$((spawn_recent + 1))
-                spawn_kept="${spawn_kept}${spawn_ev}
-"
+        spawn_approved=0
+        [[ "$user_approved" == "true" ]] && spawn_approved=1
+        # Ephemeral rate data — no import from the legacy file, just delete it.
+        rm -f "${SOREN_PROJECT_ROOT}/.soren/run/spawn-events.log" 2>/dev/null || true
+        spawn_recent=$(soren_db <<SQL
+CREATE TABLE IF NOT EXISTS spawn_events (
+    epoch    INTEGER NOT NULL,
+    agent    TEXT,
+    approved INTEGER NOT NULL DEFAULT 0
+);
+BEGIN IMMEDIATE;
+INSERT INTO spawn_events (epoch, agent, approved) VALUES (${spawn_now}, '${name}', ${spawn_approved});
+DELETE FROM spawn_events WHERE epoch < ${spawn_cutoff};
+SELECT COUNT(*) FROM spawn_events WHERE epoch >= ${spawn_cutoff} AND approved = 0;
+COMMIT;
+SQL
+) || spawn_recent=0
+        if [[ "$user_approved" != "true" ]]; then
+            local spawn_max="${SOREN_MAX_SPAWNS_PER_HOUR:-6}"
+            if [ "${spawn_recent:-0}" -gt "$spawn_max" ]; then
+                die "spawn rate limit: ${spawn_recent} in the last hour (max ${spawn_max}) — this usually means a runaway saga; get human approval or wait. A human can bypass with --user-approved."
             fi
-        done < "$spawn_ledger"
-        # Prune events older than the window so the ledger doesn't grow forever
-        printf '%s' "$spawn_kept" > "$spawn_ledger"
-        local spawn_max="${SOREN_MAX_SPAWNS_PER_HOUR:-6}"
-        if [ "$spawn_recent" -gt "$spawn_max" ]; then
-            die "spawn rate limit: ${spawn_recent} in the last hour (max ${spawn_max}) — this usually means a runaway saga; get human approval or wait. A human can bypass with --user-approved."
         fi
     fi
 
@@ -1048,7 +1056,22 @@ cmd_send() {
 
     # A new dispatch means the supervisor intervened — clear any verify-done
     # escalation latches for this agent so auto-fix resumes on its next [DONE].
-    rm -f "${SOREN_PROJECT_ROOT}/.soren/.fix-retries/${name}-"*.escalated 2>/dev/null || true
+    # Latches live in the fix_retries table (escalated=1); CREATE first so this
+    # works even before verify-done has ever run.
+    soren_db "CREATE TABLE IF NOT EXISTS fix_retries (
+        agent      TEXT NOT NULL,
+        task_key   TEXT NOT NULL,
+        retries    INTEGER NOT NULL DEFAULT 0,
+        escalated  INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT,
+        PRIMARY KEY (agent, task_key)
+    );
+    UPDATE fix_retries SET escalated = 0, updated_at = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
+        WHERE agent = '${name}' AND escalated = 1;" 2>/dev/null || true
+    # Pre-migration latch files (imported lazily by verify-done/verifications):
+    # clear those too so a latch can't resurface via a later import.
+    rm -f "${SOREN_PROJECT_ROOT}/.soren/.fix-retries/${name}-"*.escalated \
+          "${SOREN_PROJECT_ROOT}/.soren/.fix-retries/${name}.escalated" 2>/dev/null || true
 
     if ! window_exists "$name"; then
         # Check if worker is sleeping — auto-wake (master read: a stale view

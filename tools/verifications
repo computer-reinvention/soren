@@ -4,28 +4,37 @@
 #
 # The verify-done hook (.opencode/hooks/verify-done.sh) machine-checks every
 # worker [DONE]: it verifies the commit hash, runs tests, and writes
-# "ts | [VERIFY] | agent | detail" lines to .soren/status.log. Failures get a
-# [FIX-REQUEST] (2-retry budget per task key, counters in .soren/.fix-retries/);
-# exhausted budgets escalate as [VERIFY-FAILED] and drop an .escalated latch
-# that suppresses further auto-fix until cleared.
+# "ts | [VERIFY] | agent | detail" lines to .soren/status.log PLUS one
+# structured row per outcome to the verify_events table in the consolidated
+# DB (.soren/soren.db). Failures get a [FIX-REQUEST] (2-retry budget per task
+# key, counters in the fix_retries table); exhausted budgets escalate as
+# [VERIFY-FAILED] and set an escalation latch (fix_retries.escalated=1) that
+# suppresses further auto-fix until cleared.
 #
 # Usage:
 #   verifications recent [N]              - Last N verification events (default 20)
 #   verifications pending                 - Agents with active retry counters
 #   verifications latches                 - Escalation latches (agent, task key, age)
-#   verifications clear-latch <agent> [key] - Remove latch(es) — supervisor unblock
+#   verifications clear-latch <agent> [key] - Clear latch(es) — supervisor unblock
 #
-# Read-only except clear-latch.
-# Storage: .soren/status.log, RETRY_DIR (default .soren/.fix-retries)
+# Read-only except clear-latch (and the one-time lazy import of the legacy
+# .soren/.fix-retries/ directory into the fix_retries table).
+# Storage: fix_retries + verify_events tables in .soren/soren.db
+# (SOREN_DB overrides the DB path); .soren/status.log is the fallback source
+# for `recent` until the table has rows.
 #===============================================================================
 
 set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 STATUS_LOG="${SOREN_HOME}/.soren/status.log"
-# Same default + env override as verify-done.sh
-RETRY_DIR="${RETRY_DIR:-${SOREN_HOME}/.soren/.fix-retries}"
+# Pre-migration retry/latch dir — imported once into fix_retries, then renamed.
+LEGACY_RETRY_DIR="${SOREN_HOME}/.soren/.fix-retries"
 MAX_RETRIES=2
+
+# Shared DB access (SOREN_DB_PATH + soren_db). Same lib verify-done.sh uses.
+# shellcheck source=/dev/null
+source "${SOREN_HOME}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -44,16 +53,91 @@ warn() { echo -e "${YELLOW}!${NC} $1"; }
 # Helpers
 #-------------------------------------------------------------------------------
 
-# Epoch mtime of a file — macOS (stat -f) and Linux (stat -c)
-mtime_of() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() {
+    printf '%s' "$1" | sed "s/'/''/g"
 }
 
-# Human age from an epoch timestamp
-age_from() {
-    local then="$1" now diff
-    now=$(date +%s)
-    diff=$((now - then))
+# Schema for retry/latch state + structured verification history.
+# NOTE (shared function): duplicated in .opencode/hooks/verify-done.sh — keep in sync.
+ensure_verify_tables() {
+    soren_db <<'SQL' 2>/dev/null || true
+CREATE TABLE IF NOT EXISTS fix_retries (
+    agent      TEXT NOT NULL,
+    task_key   TEXT NOT NULL,
+    retries    INTEGER NOT NULL DEFAULT 0,
+    escalated  INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT,
+    PRIMARY KEY (agent, task_key)
+);
+CREATE TABLE IF NOT EXISTS verify_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         TEXT NOT NULL,
+    event      TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    task_key   TEXT,
+    commit_sha TEXT,
+    detail     TEXT
+);
+SQL
+}
+
+# One-time lazy import of the legacy .fix-retries directory into fix_retries.
+# mv is the atomic claim: exactly one concurrent invocation imports; the dir
+# ends up renamed to <dir>.migrated so this never runs twice.
+# NOTE (shared function): duplicated in .opencode/hooks/verify-done.sh — keep in sync.
+migrate_fix_retries_dir() {
+    local legacy="$1"
+    [[ -d "$legacy" ]] || return 0
+    local claim="${legacy}.importing.$$"
+    mv "$legacy" "$claim" 2>/dev/null || return 0
+    local now f base esc key agt count
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    for f in "$claim"/*; do
+        [[ -e "$f" ]] || continue
+        base=$(basename "$f")
+        esc=0
+        if [[ "$base" == *.escalated ]]; then
+            esc=1
+            base="${base%.escalated}"
+        fi
+        # <agent>-<key> where key is a commit sha / md5 (7-40 hex) or
+        # "default"; legacy keyless files are just <agent>.
+        key="${base##*-}"
+        agt="${base%-*}"
+        if [[ "$base" != *-* ]] || { [[ ! "$key" =~ ^[0-9a-f]{7,40}$ ]] && [[ "$key" != "default" ]]; }; then
+            agt="$base"
+            key="default"
+        fi
+        if (( esc == 1 )); then
+            soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+                VALUES ('$(sql_q "$agt")', '$(sql_q "$key")', 0, 1, '$now')
+                ON CONFLICT(agent, task_key) DO UPDATE SET escalated = 1, updated_at = '$now';" 2>/dev/null || true
+        else
+            count=$(tr -cd '0-9' < "$f" 2>/dev/null) || count=""
+            [[ -z "$count" ]] && count=0
+            soren_db "INSERT INTO fix_retries (agent, task_key, retries, escalated, updated_at)
+                VALUES ('$(sql_q "$agt")', '$(sql_q "$key")', $count, 0, '$now')
+                ON CONFLICT(agent, task_key) DO UPDATE SET retries = $count, updated_at = '$now';" 2>/dev/null || true
+        fi
+    done
+    if [[ -e "${legacy}.migrated" ]]; then
+        mv "$claim" "${legacy}.migrated.$(date +%s).$$" 2>/dev/null || true
+    else
+        mv "$claim" "${legacy}.migrated" 2>/dev/null || true
+    fi
+}
+
+# Ensure schema + one-time import; called by every command that touches state.
+init_state() {
+    ensure_verify_tables
+    migrate_fix_retries_dir "$LEGACY_RETRY_DIR"
+}
+
+# Human age from a seconds-count
+age_from_secs() {
+    local diff="$1"
+    [[ "$diff" =~ ^[0-9]+$ ]] || diff=0
     if (( diff < 60 )); then
         echo "${diff}s"
     elif (( diff < 3600 )); then
@@ -65,22 +149,21 @@ age_from() {
     fi
 }
 
-# Split a retry/latch filename into "agent<TAB>key".
-# New format: <agent>-<taskkey> where taskkey is a commit sha (7-40 hex) or an
-# md5 (32 hex) of the DONE summary, or the literal "default". Legacy files
-# (pre task-key) are just <agent>.
-split_retry_name() {
-    local base="$1"
-    local key="${base##*-}"
-    local agent="${base%-*}"
-    if [[ "$base" == *-* ]] && { [[ "$key" =~ ^[0-9a-f]{7,40}$ ]] || [[ "$key" == "default" ]]; }; then
-        printf '%s\t%s\n' "$agent" "$key"
-    else
-        printf '%s\t%s\n' "$base" "-"
-    fi
+# Classify a verify_events.event value into a colored outcome label.
+event_outcome() {
+    local event="$1"
+    case "$event" in
+        VERIFIED)        echo -e "${GREEN}VERIFIED${NC}" ;;
+        SKIP-*)          echo -e "${GREEN}VERIFIED${NC}" ;;   # no-op / research / contract-exempt
+        FIX-REQUEST)     echo -e "${YELLOW}FIX-REQUEST${NC}" ;;
+        VERIFY-FAILED)   echo -e "${RED}VERIFY-FAILED${NC}" ;;
+        LATCHED)         echo -e "${RED}LATCHED${NC}" ;;
+        *)               echo -e "${DIM}INFO${NC}" ;;
+    esac
 }
 
-# Classify a [VERIFY] detail string into an outcome label (colored).
+# Classify a [VERIFY] status.log detail string into an outcome label (colored).
+# Used by the status.log fallback in `recent` (pre-migration history).
 outcome_of() {
     local detail="$1"
     case "$detail" in
@@ -99,6 +182,11 @@ outcome_of() {
     esac
 }
 
+print_recent_header() {
+    printf "${BOLD}%-20s  %-26s  %-13s  %s${NC}\n" "TIME" "AGENT" "OUTCOME" "DETAIL"
+    echo -e "${DIM}────────────────────  ──────────────────────────  ─────────────  ──────────────────────────────${NC}"
+}
+
 #-------------------------------------------------------------------------------
 # Commands
 #-------------------------------------------------------------------------------
@@ -106,17 +194,36 @@ outcome_of() {
 cmd_recent() {
     local n="${1:-20}"
     [[ "$n" =~ ^[0-9]+$ ]] || die "usage: verifications recent [N]"
-    [[ -f "$STATUS_LOG" ]] || die "status log not found: $STATUS_LOG"
+    init_state
 
-    local lines
-    lines=$(grep ' | \[VERIFY\] | ' "$STATUS_LOG" | tail -n "$n" || true)
-    if [[ -z "$lines" ]]; then
-        echo -e "${DIM}No verification events in $STATUS_LOG${NC}"
+    # Primary source: the verify_events table (one row per outcome).
+    local rows
+    rows=$(soren_db -separator $'\t' "SELECT ts, agent, event, COALESCE(detail, '')
+        FROM (SELECT * FROM verify_events ORDER BY id DESC LIMIT $n)
+        ORDER BY id ASC;" 2>/dev/null) || rows=""
+
+    if [[ -n "$rows" ]]; then
+        print_recent_header
+        local ts agt event detail outcome
+        while IFS=$'\t' read -r ts agt event detail; do
+            [[ -z "$ts" ]] && continue
+            outcome=$(event_outcome "$event")
+            (( ${#detail} > 78 )) && detail="${detail:0:75}..."
+            printf "%-20s  %-26s  %-24b  %s\n" "$ts" "$agt" "$outcome" "$detail"
+        done <<< "$rows"
         return
     fi
 
-    printf "${BOLD}%-20s  %-26s  %-13s  %s${NC}\n" "TIME" "AGENT" "OUTCOME" "DETAIL"
-    echo -e "${DIM}────────────────────  ──────────────────────────  ─────────────  ──────────────────────────────${NC}"
+    # Fallback (first runs post-migration): parse status.log [VERIFY] lines.
+    [[ -f "$STATUS_LOG" ]] || die "no verify_events rows and status log not found: $STATUS_LOG"
+    local lines
+    lines=$(grep ' | \[VERIFY\] | ' "$STATUS_LOG" | tail -n "$n" || true)
+    if [[ -z "$lines" ]]; then
+        echo -e "${DIM}No verification events in the verify_events table or $STATUS_LOG${NC}"
+        return
+    fi
+
+    print_recent_header
     local line ts agent detail outcome
     while IFS= read -r line; do
         [[ -z "$line" ]] && continue
@@ -130,67 +237,68 @@ cmd_recent() {
 }
 
 cmd_pending() {
-    if [[ ! -d "$RETRY_DIR" ]]; then
-        echo -e "${DIM}No retry directory ($RETRY_DIR) — nothing pending${NC}"
+    init_state
+
+    # Age computed in SQL (updated_at is ISO-8601 UTC, which strftime parses).
+    local rows
+    rows=$(soren_db -separator $'\t' "SELECT agent, task_key, retries,
+            CAST(strftime('%s','now') AS INTEGER)
+              - CAST(COALESCE(strftime('%s', updated_at), strftime('%s','now')) AS INTEGER)
+        FROM fix_retries
+        WHERE retries > 0
+        ORDER BY updated_at DESC;" 2>/dev/null) || rows=""
+
+    if [[ -z "$rows" ]]; then
+        echo -e "${DIM}No active retry counters — nothing pending${NC}"
         return
     fi
 
-    local found=false
     printf "${BOLD}%-26s  %-34s  %-9s  %-5s  %s${NC}\n" "AGENT" "TASK KEY" "ATTEMPTS" "AGE" "LAST FIX-REQUEST"
     echo -e "${DIM}──────────────────────────  ──────────────────────────────────  ─────────  ─────  ──────────────────────────${NC}"
 
-    local f base agent key count age last
-    for f in "$RETRY_DIR"/*; do
-        [[ -f "$f" ]] || continue
-        base=$(basename "$f")
-        [[ "$base" == *.escalated ]] && continue
-        found=true
-        agent=$(split_retry_name "$base" | cut -f1)
-        key=$(split_retry_name "$base" | cut -f2)
-        count=$(tr -cd '0-9' < "$f")
-        [[ -z "$count" ]] && count="?"
-        age=$(age_from "$(mtime_of "$f")")
-        last=""
-        if [[ -f "$STATUS_LOG" ]]; then
+    local agent key count age_s age last
+    while IFS=$'\t' read -r agent key count age_s; do
+        [[ -z "$agent" ]] && continue
+        age=$(age_from_secs "$age_s")
+        last=$(soren_db "SELECT detail FROM verify_events
+            WHERE agent = '$(sql_q "$agent")' AND event = 'FIX-REQUEST'
+            ORDER BY id DESC LIMIT 1;" 2>/dev/null) || last=""
+        if [[ -z "$last" && -f "$STATUS_LOG" ]]; then
             last=$(grep " | \[VERIFY\] | ${agent} | FIX-REQUEST sent" "$STATUS_LOG" 2>/dev/null | tail -1 \
                 | awk -F' \\| ' '{print $4}' | sed 's/^FIX-REQUEST sent to [^ ]* //') || true
         fi
         printf "%-26s  %-34s  %-9s  %-5s  %s\n" "$agent" "$key" "${count}/${MAX_RETRIES}" "$age" "${last:--}"
-    done
+    done <<< "$rows"
 
-    if [[ "$found" == false ]]; then
-        echo -e "${DIM}No active retry counters — nothing pending${NC}"
-        return
-    fi
     echo ""
     echo -e "${DIM}Counters clear automatically on the agent's next [VERIFIED]; at ${MAX_RETRIES}/${MAX_RETRIES} the next failure escalates.${NC}"
 }
 
 cmd_latches() {
-    if [[ ! -d "$RETRY_DIR" ]]; then
-        echo -e "${DIM}No retry directory ($RETRY_DIR) — no latches${NC}"
-        return
-    fi
+    init_state
 
-    local found=false
-    printf "${BOLD}%-26s  %-34s  %s${NC}\n" "AGENT" "TASK KEY" "AGE"
-    echo -e "${DIM}──────────────────────────  ──────────────────────────────────  ─────${NC}"
+    local rows
+    rows=$(soren_db -separator $'\t' "SELECT agent, task_key,
+            CAST(strftime('%s','now') AS INTEGER)
+              - CAST(COALESCE(strftime('%s', updated_at), strftime('%s','now')) AS INTEGER)
+        FROM fix_retries
+        WHERE escalated = 1
+        ORDER BY updated_at DESC;" 2>/dev/null) || rows=""
 
-    local f base agent key age
-    for f in "$RETRY_DIR"/*.escalated; do
-        [[ -f "$f" ]] || continue
-        found=true
-        base=$(basename "$f" .escalated)
-        agent=$(split_retry_name "$base" | cut -f1)
-        key=$(split_retry_name "$base" | cut -f2)
-        age=$(age_from "$(mtime_of "$f")")
-        printf "%-26s  %-34s  %s\n" "$agent" "$key" "$age"
-    done
-
-    if [[ "$found" == false ]]; then
+    if [[ -z "$rows" ]]; then
         echo -e "${DIM}No escalation latches — no agents are blocked${NC}"
         return
     fi
+
+    printf "${BOLD}%-26s  %-34s  %s${NC}\n" "AGENT" "TASK KEY" "AGE"
+    echo -e "${DIM}──────────────────────────  ──────────────────────────────────  ─────${NC}"
+
+    local agent key age_s
+    while IFS=$'\t' read -r agent key age_s; do
+        [[ -z "$agent" ]] && continue
+        printf "%-26s  %-34s  %s\n" "$agent" "$key" "$(age_from_secs "$age_s")"
+    done <<< "$rows"
+
     echo ""
     echo -e "${DIM}While latched, further [DONE] reports for that task key get no auto FIX-REQUEST.${NC}"
     echo -e "${DIM}Unblock: ./tools/verifications clear-latch <agent> [key]  (or dispatch via ./tools/workers send <agent>, which auto-clears)${NC}"
@@ -201,21 +309,19 @@ cmd_clear_latch() {
     local key="${2:-}"
     [[ -z "$agent" ]] && die "usage: verifications clear-latch <agent> [key]"
     [[ "$agent" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid agent name: '$agent'"
-    [[ -d "$RETRY_DIR" ]] || die "retry directory not found: $RETRY_DIR"
+    init_state
 
-    local removed=0 f
+    local now removed
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     if [[ -n "$key" ]]; then
-        f="$RETRY_DIR/${agent}-${key}.escalated"
-        [[ -f "$f" ]] || die "no latch for agent '$agent' with key '$key' ($f)"
-        rm -f "$f"
-        removed=1
+        removed=$(soren_db "UPDATE fix_retries SET escalated = 0, updated_at = '$now'
+            WHERE agent = '$(sql_q "$agent")' AND task_key = '$(sql_q "$key")' AND escalated = 1;
+            SELECT changes();" 2>/dev/null) || removed=0
+        (( removed == 0 )) && die "no latch for agent '$agent' with key '$key'"
     else
-        # All latches for this agent: keyed files + legacy keyless
-        for f in "$RETRY_DIR/${agent}-"*.escalated "$RETRY_DIR/${agent}.escalated"; do
-            [[ -f "$f" ]] || continue
-            rm -f "$f"
-            removed=$((removed + 1))
-        done
+        removed=$(soren_db "UPDATE fix_retries SET escalated = 0, updated_at = '$now'
+            WHERE agent = '$(sql_q "$agent")' AND escalated = 1;
+            SELECT changes();" 2>/dev/null) || removed=0
         (( removed == 0 )) && die "no latches found for agent '$agent'"
     fi
 
@@ -231,13 +337,17 @@ USAGE:
     verifications <command> [arguments]
 
 COMMANDS:
-    recent [N]                 Last N verification events from .soren/status.log
-                               (default 20): time, agent, outcome, detail
-    pending                    Agents with active retry counters (files in the
-                               retry dir) — i.e. unresolved [FIX-REQUEST]s
-    latches                    Escalation latches (.escalated files): agent,
-                               task key, age. Latched agents get no auto-fix.
-    clear-latch <agent> [key]  Remove latch(es) for an agent — the documented
+    recent [N]                 Last N verification events from the
+                               verify_events table (default 20): time, agent,
+                               outcome, detail. Falls back to .soren/status.log
+                               [VERIFY] lines while the table is still empty.
+    pending                    Agents with active retry counters (fix_retries
+                               rows with retries > 0) — i.e. unresolved
+                               [FIX-REQUEST]s
+    latches                    Escalation latches (fix_retries rows with
+                               escalated = 1): agent, task key, age. Latched
+                               agents get no auto-fix.
+    clear-latch <agent> [key]  Clear latch(es) for an agent — the documented
                                supervisor unblock path. Without [key], clears
                                all of the agent's latches.
     help                       Show this help
@@ -247,16 +357,19 @@ PIPELINE (see .opencode/hooks/verify-done.sh):
     commit hash, verifies it exists, runs pytest/typecheck for touched areas,
     then sends [VERIFIED] to the supervisor or [FIX-REQUEST] back to the
     worker. Each task key gets 2 fix attempts; after that the failure is
-    escalated as [VERIFY-FAILED] and an .escalated latch suppresses further
-    auto-fix until a supervisor clears it (clear-latch here, or a new dispatch
-    via ./tools/workers send, which auto-clears).
+    escalated as [VERIFY-FAILED] and an escalation latch (escalated=1 in the
+    fix_retries table) suppresses further auto-fix until a supervisor clears
+    it (clear-latch here, or a new dispatch via ./tools/workers send, which
+    auto-clears).
 
 READ-ONLY:
-    All commands are read-only except clear-latch.
+    All commands are read-only except clear-latch (plus a one-time lazy import
+    of the pre-migration .soren/.fix-retries/ directory into the table; the
+    dir is renamed to .fix-retries.migrated afterwards).
 
 ENVIRONMENT:
     SOREN_HOME   Soren root (default: git rev-parse --show-toplevel)
-    RETRY_DIR    Retry/latch dir (default: $SOREN_HOME/.soren/.fix-retries —
+    SOREN_DB     Consolidated DB path (default: $SOREN_HOME/.soren/soren.db —
                  same override verify-done.sh honors)
 
 EXAMPLES:

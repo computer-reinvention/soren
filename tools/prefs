@@ -9,14 +9,27 @@
 #   prefs reset                   - Restore all to defaults
 #   prefs help                    - Show usage
 #
-# Storage: .soren/preferences.json
-# All values are integers 1-10.
+# Storage: the `prefs` key-value table in the consolidated SQLite DB
+# (.soren/soren.db). This merges the two legacy stores that had drifted apart:
+#   - .soren/preferences.json  (this tool's old file — the live copy had also
+#     accumulated server-schema keys)
+#   - .soren/prefs.json        (the server API's old file — heartbeat keys)
+# Both are imported once, lazily and verbatim (prefs.json wins on key
+# conflicts, since the server file was authoritative for its own keys), then
+# renamed *.migrated. The server route (src/server/routes/prefs.py) reads and
+# writes the same table.
+#
+# The six TARS settings managed here are integers 1-10.
 #===============================================================================
 
 set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-PREFS_FILE="${SOREN_HOME}/.soren/preferences.json"
+PREFERENCES_FILE="${SOREN_HOME}/.soren/preferences.json"   # legacy TARS store
+SERVER_PREFS_FILE="${SOREN_HOME}/.soren/prefs.json"        # legacy server store
+
+# Shared DB helpers (SOREN_DB_PATH resolution + soren_db wrapper)
+source "${SOREN_HOME}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -29,6 +42,9 @@ NC='\033[0m'
 
 die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
+
+# Escape a value for embedding in a single-quoted SQL literal.
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
 
 #-------------------------------------------------------------------------------
 # Setting descriptions
@@ -46,23 +62,73 @@ description_for() {
     esac
 }
 
+default_for() {
+    case "$1" in
+        alertness)      echo 7 ;;
+        verbosity)      echo 5 ;;
+        autonomy)       echo 7 ;;
+        humor)          echo 3 ;;
+        proactiveness)  echo 6 ;;
+        journal_detail) echo 5 ;;
+        *)              echo 5 ;;
+    esac
+}
+
 VALID_KEYS="alertness verbosity autonomy humor proactiveness journal_detail"
 
-DEFAULTS='{"alertness":7,"verbosity":5,"autonomy":7,"humor":3,"proactiveness":6,"journal_detail":5}'
-
 #-------------------------------------------------------------------------------
-# Helpers
+# State init — schema + one-time lazy import of BOTH legacy files
+# NOTE (shared schema + import): duplicated in src/server/routes/prefs.py —
+# keep in sync.
 #-------------------------------------------------------------------------------
 
-ensure_prefs() {
-    mkdir -p "$(dirname "$PREFS_FILE")"
-    if [[ ! -f "$PREFS_FILE" ]]; then
-        local now
-        now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-        jq -n --arg now "$now" \
-            '{alertness:7,verbosity:5,autonomy:7,humor:3,proactiveness:6,journal_detail:5,_meta:{updated_at:$now,updated_by:"system"}}' \
-            > "$PREFS_FILE"
+_prefs_ensure_schema() {
+    soren_db "CREATE TABLE IF NOT EXISTS prefs (
+        key        TEXT PRIMARY KEY,
+        value      TEXT,
+        updated_at TEXT,
+        updated_by TEXT
+    );" 2>/dev/null || true
+}
+
+# One-time lazy import of one legacy JSON prefs file: every top-level key
+# except _meta is imported verbatim (value stored as its JSON encoding);
+# _meta.updated_at/_meta.updated_by become the rows' audit columns. mv is the
+# atomic claim; the file ends up renamed *.migrated so this never runs twice.
+_prefs_import_file() {
+    local f="$1"
+    [[ -f "$f" ]] || return 0
+    local claim="${f}.importing.$$"
+    mv "$f" "$claim" 2>/dev/null || return 0
+    local prog sql
+    prog=$(cat <<'JQEOF'
+def q: "'" + (gsub("'"; "''")) + "'";
+select(type == "object")
+| (._meta.updated_at // "") as $ts
+| (._meta.updated_by // "import") as $by
+| to_entries[]
+| select(.key != "_meta")
+| "INSERT OR REPLACE INTO prefs (key, value, updated_at, updated_by) VALUES ("
+  + (.key | q) + ", " + ((.value | tojson) | q) + ", "
+  + ($ts | q) + ", " + ($by | q) + ");"
+JQEOF
+)
+    if sql=$(jq -r "$prog" "$claim" 2>/dev/null) && [[ -n "$sql" ]]; then
+        printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | soren_db 2>/dev/null || true
     fi
+    if [[ -e "${f}.migrated" ]]; then
+        mv "$claim" "${f}.migrated.$(date +%s).$$" 2>/dev/null || true
+    else
+        mv "$claim" "${f}.migrated" 2>/dev/null || true
+    fi
+}
+
+init_state() {
+    _prefs_ensure_schema
+    # Order matters: prefs.json (the server's store) is imported second so it
+    # wins any key conflicts.
+    _prefs_import_file "$PREFERENCES_FILE"
+    _prefs_import_file "$SERVER_PREFS_FILE"
 }
 
 is_valid_key() {
@@ -71,6 +137,18 @@ is_valid_key() {
         [[ "$k" == "$key" ]] && return 0
     done
     return 1
+}
+
+# Read one key from the table; fall back to the default when missing or not a
+# clean integer (values are stored as JSON — ints are stored bare).
+pref_value() {
+    local key="$1"
+    local val
+    val=$(soren_db "SELECT value FROM prefs WHERE key = '$(sql_q "$key")';" 2>/dev/null) || val=""
+    if ! [[ "$val" =~ ^[0-9]+$ ]]; then
+        val=$(default_for "$key")
+    fi
+    echo "$val"
 }
 
 level_bar() {
@@ -102,8 +180,6 @@ level_color() {
 #-------------------------------------------------------------------------------
 
 cmd_list() {
-    ensure_prefs
-
     echo -e "${BOLD}SOREN Agent Preferences${NC}"
     echo -e "${DIM}All values 1-10. Use 'prefs set <key> <value>' to change.${NC}"
     echo ""
@@ -112,7 +188,7 @@ cmd_list() {
 
     for key in $VALID_KEYS; do
         local val
-        val=$(jq -r --arg k "$key" '.[$k]' "$PREFS_FILE")
+        val=$(pref_value "$key")
         local color
         color=$(level_color "$val")
         local bar
@@ -124,9 +200,15 @@ cmd_list() {
     done
 
     echo ""
-    local updated_at updated_by
-    updated_at=$(jq -r '._meta.updated_at // "unknown"' "$PREFS_FILE")
-    updated_by=$(jq -r '._meta.updated_by // "unknown"' "$PREFS_FILE")
+    local meta updated_at updated_by
+    meta=$(soren_db -separator $'\t' "SELECT IFNULL(updated_at, ''), IFNULL(updated_by, '')
+        FROM prefs
+        WHERE key IN ('alertness','verbosity','autonomy','humor','proactiveness','journal_detail')
+        ORDER BY updated_at DESC LIMIT 1;" 2>/dev/null) || meta=""
+    updated_at=$(printf '%s' "$meta" | cut -f1)
+    updated_by=$(printf '%s' "$meta" | cut -f2)
+    [[ -z "$updated_at" ]] && updated_at="unknown"
+    [[ -z "$updated_by" ]] && updated_by="unknown"
     echo -e "${DIM}Last updated: ${updated_at} by ${updated_by}${NC}"
 }
 
@@ -136,10 +218,8 @@ cmd_get() {
 
     is_valid_key "$key" || die "unknown setting: $key (valid: $VALID_KEYS)"
 
-    ensure_prefs
-
     local val
-    val=$(jq -r --arg k "$key" '.[$k]' "$PREFS_FILE")
+    val=$(pref_value "$key")
     local desc
     desc=$(description_for "$key")
     local color
@@ -165,16 +245,12 @@ cmd_set() {
         die "value must be an integer from 1 to 10 (got: $value)"
     fi
 
-    ensure_prefs
-
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local agent_name="${SOREN_AGENT_NAME:-user}"
 
-    jq --arg k "$key" --argjson v "$value" --arg now "$now" --arg by "$agent_name" \
-        '.[$k] = $v | ._meta.updated_at = $now | ._meta.updated_by = $by' \
-        "$PREFS_FILE" > "${PREFS_FILE}.tmp" \
-        && mv "${PREFS_FILE}.tmp" "$PREFS_FILE"
+    soren_db "INSERT OR REPLACE INTO prefs (key, value, updated_at, updated_by)
+        VALUES ('$(sql_q "$key")', '$value', '$(sql_q "$now")', '$(sql_q "$agent_name")');"
 
     local color
     color=$(level_color "$value")
@@ -184,15 +260,16 @@ cmd_set() {
 }
 
 cmd_reset() {
-    ensure_prefs
-
     local now
     now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     local agent_name="${SOREN_AGENT_NAME:-user}"
 
-    jq -n --arg now "$now" --arg by "$agent_name" \
-        '{alertness:7,verbosity:5,autonomy:7,humor:3,proactiveness:6,journal_detail:5,_meta:{updated_at:$now,updated_by:$by}}' \
-        > "$PREFS_FILE"
+    local key sql=""
+    for key in $VALID_KEYS; do
+        sql="${sql}INSERT OR REPLACE INTO prefs (key, value, updated_at, updated_by)
+            VALUES ('$key', '$(default_for "$key")', '$(sql_q "$now")', '$(sql_q "$agent_name")');"$'\n'
+    done
+    printf 'BEGIN IMMEDIATE;\n%s\nCOMMIT;\n' "$sql" | soren_db
 
     ok "All preferences reset to defaults"
     echo ""
@@ -234,7 +311,9 @@ ENVIRONMENT:
     SOREN_AGENT_NAME    Agent name for audit trail (default: user)
 
 STORAGE:
-    .soren/preferences.json — all values are integers 1-10, with _meta timestamps.
+    The `prefs` table in .soren/soren.db (override with SOREN_DB), shared with
+    the server API (/api/prefs). The legacy .soren/preferences.json and
+    .soren/prefs.json are imported once and renamed *.migrated.
 EOF
 }
 
@@ -247,10 +326,10 @@ main() {
     shift || true
 
     case "$cmd" in
-        list|ls)    cmd_list "$@" ;;
-        get)        cmd_get "$@" ;;
-        set)        cmd_set "$@" ;;
-        reset)      cmd_reset "$@" ;;
+        list|ls)    init_state; cmd_list "$@" ;;
+        get)        init_state; cmd_get "$@" ;;
+        set)        init_state; cmd_set "$@" ;;
+        reset)      init_state; cmd_reset "$@" ;;
         help|--help|-h) cmd_help ;;
         *)          die "unknown command: $cmd (try 'prefs help')" ;;
     esac
