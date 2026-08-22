@@ -67,17 +67,19 @@ export function HeartbeatIndicator() {
       .catch(() => {});
   }, [showConfig]);
 
-  // Update "X seconds ago" every second
+  // Update "X seconds ago" every second — counts from when the client
+  // received the heartbeat, not the server's wall-clock timestamp (which
+  // is always near-current because monitor.sh re-POSTs every ~5 s).
   useEffect(() => {
     if (!latest) return;
     const update = () => {
-      const ago = Math.floor(Date.now() / 1000 - latest.timestamp);
-      setSecondsAgo(ago);
+      const ago = Math.floor((Date.now() - latest.clientReceivedAt) / 1000);
+      setSecondsAgo(Math.max(0, ago));
     };
     update();
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
-  }, [latest]);
+  }, [latest?.clientReceivedAt]);
 
   const getStatus = useCallback((): HeartStatus => {
     if (!latest) return 'idle';
