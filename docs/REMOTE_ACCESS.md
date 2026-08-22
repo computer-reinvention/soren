@@ -112,6 +112,27 @@ alias tailscale="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
    (the doctor grows a "Server mode" section once the plist exists; force it
    with `./soren.sh doctor --server`).
 
+## Flip server mode on / off
+
+After the one-time setup, `tools/server-mode` toggles the whole stack in one
+command — for when the machine moves between desk-server duty and normal
+laptop use:
+
+```bash
+./tools/server-mode on       # sleep off (lid-closed OK on AC), SSH on, launchd
+                             # agent installed, soren started detached, serve ensured
+./tools/server-mode off      # soren stopped, agent removed, serve cleared,
+                             # SSH off, sleep settings restored
+./tools/server-mode status   # one-line-per-component report
+```
+
+Also available as `./soren.sh server on|off`. Flags: `--skip-sudo` prints the
+sudo steps instead of running them; `off --keep-ssh` leaves Remote Login on;
+`off` run over an SSH connection refuses without `--force` (disabling SSH
+would sever that very session). `on` snapshots the prior pmset values to
+`.soren/server-mode.state`; `off` restores them (defaults: `disablesleep 0`,
+AC `sleep 10`).
+
 ## Direct SSH (VM-style access)
 
 Once Remote Login is on, this Mac behaves like a VM you can reach from any

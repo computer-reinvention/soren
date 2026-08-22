@@ -47,6 +47,7 @@ Thumbs.db
 # Worker contexts (generated per-spawn, not source code)
 .soren/worker-contexts/
 # Daemon state files
+.soren/server-mode.state
 .soren/.compact-timestamps
 .soren/.compact-effectiveness
 .soren/.supervisor-heartbeat

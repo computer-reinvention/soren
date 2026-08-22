@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+#
+# server-mode — flip this Mac between "always-on soren server" and "normal laptop"
+#
+# ON  (server):   never sleep (lid can be closed on AC), Remote Login (SSH) on,
+#                 launchd boot agent installed, soren started detached,
+#                 tailscale serve → 127.0.0.1:$SOREN_PORT. Prints access info.
+# OFF (laptop):   soren stopped, launchd boot agent removed, tailscale serve
+#                 cleared, Remote Login off, sleep settings restored.
+#                 Tailscale itself is left running — it is normal laptop kit.
+# STATUS:         one compact report of every component above.
+#
+# Composes existing tooling (never duplicates it): ./soren.sh server
+# install/uninstall, tools/server-boot, the app-bundle tailscale CLI.
+# One-time prerequisites (tailnet login, MagicDNS/HTTPS, hostname) are
+# tools/server-setup's job — run that once before first ON.
+#
+# Usage:
+#   server-mode on  [--skip-sudo]
+#   server-mode off [--skip-sudo] [--keep-ssh] [--force]
+#   server-mode status
+#
+#   --skip-sudo   Never invoke sudo; print the equivalent manual commands.
+#   --keep-ssh    (off) Leave Remote Login enabled.
+#   --force       (off) Proceed even when run over an SSH connection that
+#                 disabling SSH would sever.
+#
+# Power-state restore: ON snapshots pmset values to .soren/server-mode.state
+# (first ON only — repeated ONs keep the original laptop baseline); OFF
+# restores from the snapshot, falling back to disablesleep=0, AC sleep 10.
+#
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+SOREN_PORT="${SOREN_PORT:-8000}"
+SOREN_SESSION="${SOREN_SESSION:-soren}"
+STATE_FILE="${ROOT}/.soren/server-mode.state"
+
+# The Tailscale.app bundled CLI. NEVER /opt/homebrew/bin/tailscale — the
+# formula CLI talks to a different daemon socket (docs/REMOTE_ACCESS.md,
+# "two-CLI footgun").
+TS_APP="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
+BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+ok()   { printf "${GREEN}✓${NC} %s\n" "$1"; }
+warn() { printf "${YELLOW}!${NC} %s\n" "$1"; }
+info() { printf "${DIM}·${NC} %s\n" "$1"; }
+step() { printf "${CYAN}▶${NC} ${BOLD}%s${NC}\n" "$1"; }
+die()  { printf "${RED}✗${NC} %s\n" "$1" >&2; exit 1; }
+
+SKIP_SUDO=false
+KEEP_SSH=false
+FORCE=false
+
+#───────────────────────────────────────────────────────────────────────────────
+# Probes and helpers
+#───────────────────────────────────────────────────────────────────────────────
+
+# Run a tailscale command with a hang guard (serve blocks indefinitely when
+# cert provisioning is pending — same guard as tools/server-setup).
+ts_guarded() {
+    local secs="$1"; shift
+    perl -e 'alarm shift; exec @ARGV' "$secs" "$TS_APP" "$@" 2>&1
+}
+
+ssh_probe()     { nc -z -w 2 localhost 22 >/dev/null 2>&1; }
+soren_healthy() { curl -sf -m 3 "http://127.0.0.1:${SOREN_PORT}/api/webhooks/health" >/dev/null 2>&1; }
+plist_loaded()  { launchctl print "gui/$(id -u)/com.computerreinvention.soren" >/dev/null 2>&1; }
+serve_active()  { ts_guarded 10 serve status 2>/dev/null | grep -q "127\.0\.0\.1:${SOREN_PORT}"; }
+
+# Wait up to $1 seconds for ssh_probe to flip to the state in $2 (on|off).
+ssh_wait() {
+    local max="$1" want="$2" waited=0
+    while (( waited < max )); do
+        if [[ "$want" == "on" ]]; then ssh_probe && return 0; else ssh_probe || return 0; fi
+        sleep 1; waited=$((waited + 1))
+    done
+    return 1
+}
+
+sleep_disabled() { pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}'; }
+
+# Read a key from the "AC Power" section of pmset -g custom.
+ac_value() {
+    pmset -g custom 2>/dev/null | awk -v key="$1" '
+        /^AC Power:/    { ac = 1; next }
+        /^[A-Za-z].*:$/ { ac = 0 }
+        ac && $1 == key { print $2; exit }
+    '
+}
+
+tailnet_dns() {
+    ts_guarded 10 status --json 2>/dev/null \
+        | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true
+}
+
+run_sudo() {
+    # $1 = human label, rest = command. Honors --skip-sudo by printing instead.
+    local label="$1"; shift
+    if $SKIP_SUDO; then
+        warn "${label} — run manually: sudo $*"
+        return 1
+    fi
+    info "${label} (sudo may prompt)..."
+    sudo "$@"
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Power state snapshot / restore
+#───────────────────────────────────────────────────────────────────────────────
+
+save_power_state() {
+    # First ON wins: keep the original laptop baseline across repeated ONs.
+    [[ -f "$STATE_FILE" ]] && { info "power baseline already saved ($STATE_FILE)"; return 0; }
+    mkdir -p "$(dirname "$STATE_FILE")"
+    {
+        echo "SAVED_AT=$(date -Iseconds)"
+        echo "PREV_SLEEP_DISABLED=$(sleep_disabled)"
+        echo "PREV_AC_SLEEP=$(ac_value sleep)"
+        echo "PREV_AC_DISPLAYSLEEP=$(ac_value displaysleep)"
+    } > "$STATE_FILE"
+    info "power baseline saved to $STATE_FILE"
+}
+
+restore_power_state() {
+    local prev_disabled="0" prev_sleep="10" prev_display="10"
+    if [[ -f "$STATE_FILE" ]]; then
+        # shellcheck disable=SC1090
+        source "$STATE_FILE"
+        prev_disabled="${PREV_SLEEP_DISABLED:-0}"
+        prev_sleep="${PREV_AC_SLEEP:-10}"
+        prev_display="${PREV_AC_DISPLAYSLEEP:-10}"
+        # A baseline captured while already in server config would restore
+        # server values — normalize those back to laptop behavior.
+        [[ "$prev_disabled" == "1" ]] && prev_disabled="0"
+        [[ "$prev_sleep" == "0" ]] && prev_sleep="10"
+    else
+        info "no saved baseline — using laptop defaults (disablesleep 0, AC sleep 10)"
+    fi
+    if run_sudo "Restoring sleep settings" pmset -a disablesleep "$prev_disabled"; then
+        run_sudo "Restoring AC sleep timers" pmset -c sleep "$prev_sleep" displaysleep "$prev_display" \
+            && ok "sleep restored (disablesleep=${prev_disabled}, AC sleep=${prev_sleep})" \
+            || warn "AC timer restore failed — run: sudo pmset -c sleep ${prev_sleep} displaysleep ${prev_display}"
+        rm -f "$STATE_FILE"
+    else
+        warn "also needed: sudo pmset -c sleep ${prev_sleep} displaysleep ${prev_display}"
+    fi
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Remote Login (SSH)
+#───────────────────────────────────────────────────────────────────────────────
+
+enable_ssh() {
+    if ssh_probe; then ok "Remote Login (SSH) already on"; return 0; fi
+    if $SKIP_SUDO; then
+        warn "SSH off — run: sudo systemsetup -setremotelogin on"
+        info "or: sudo launchctl enable system/com.openssh.sshd && sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist"
+        info "or: System Settings → General → Sharing → 'Remote Login' ON"
+        return 1
+    fi
+    # Same three-way fallback as tools/server-setup: systemsetup needs Full
+    # Disk Access for the terminal app; launchctl works on some blocked
+    # configs; System Settings always works.
+    info "Enabling Remote Login (sudo may prompt)..."
+    sudo systemsetup -setremotelogin on >/dev/null 2>&1 || true
+    if ssh_wait 5 on; then ok "Remote Login enabled (systemsetup)"; return 0; fi
+    info "systemsetup blocked — trying launchctl route..."
+    { sudo launchctl enable system/com.openssh.sshd 2>/dev/null && \
+      sudo launchctl bootstrap system /System/Library/LaunchDaemons/ssh.plist 2>/dev/null; } || true
+    if ssh_wait 5 on; then ok "Remote Login enabled (launchctl)"; return 0; fi
+    warn "Could not enable SSH from the CLI (terminal lacks Full Disk Access?)"
+    info "Opening System Settings → General → Sharing — toggle 'Remote Login' ON"
+    open "x-apple.systempreferences:com.apple.Sharing-Settings.extension" 2>/dev/null || true
+    return 1
+}
+
+disable_ssh() {
+    if ! ssh_probe; then ok "Remote Login (SSH) already off"; return 0; fi
+    if $SKIP_SUDO; then
+        warn "SSH on — run: sudo systemsetup -f -setremotelogin off"
+        return 1
+    fi
+    info "Disabling Remote Login (sudo may prompt)..."
+    sudo systemsetup -f -setremotelogin off >/dev/null 2>&1 || true
+    if ssh_wait 5 off; then ok "Remote Login disabled"; return 0; fi
+    info "systemsetup blocked — trying launchctl route..."
+    { sudo launchctl bootout system/com.openssh.sshd 2>/dev/null; \
+      sudo launchctl disable system/com.openssh.sshd 2>/dev/null; } || true
+    if ssh_wait 5 off; then ok "Remote Login disabled (launchctl)"; return 0; fi
+    warn "Could not disable SSH from the CLI — System Settings → General → Sharing → 'Remote Login' OFF"
+    open "x-apple.systempreferences:com.apple.Sharing-Settings.extension" 2>/dev/null || true
+    return 1
+}
+
+#───────────────────────────────────────────────────────────────────────────────
+# Commands
+#───────────────────────────────────────────────────────────────────────────────
+
+cmd_on() {
+    printf "${BOLD}── server mode: ON ─────────────────────────────────────────${NC}\n"
+
+    step "1/5 Power: never sleep (lid-closed operation on AC)"
+    save_power_state
+    if [[ "$(sleep_disabled)" == "1" && "$(ac_value sleep)" == "0" ]]; then
+        ok "already configured (disablesleep=1, AC sleep=0)"
+    elif run_sudo "Disabling system sleep" pmset -a disablesleep 1; then
+        run_sudo "Setting AC timers" pmset -c sleep 0 displaysleep 10 || true
+        ok "sleep disabled (display still sleeps; lid may be closed on AC)"
+    else
+        warn "also needed: sudo pmset -c sleep 0 displaysleep 10"
+    fi
+
+    step "2/5 Remote Login (SSH)"
+    enable_ssh || true
+
+    step "3/5 launchd boot agent (auto-start at login)"
+    "${ROOT}/soren.sh" server install
+
+    step "4/5 soren + tailscale serve (detached, idempotent)"
+    "${ROOT}/tools/server-boot" || warn "server-boot reported failure — check .soren/logs/server-boot.log"
+
+    step "5/5 Verify"
+    soren_healthy      && ok "soren healthy on 127.0.0.1:${SOREN_PORT}" || warn "soren not healthy yet — ./soren.sh doctor"
+    ssh_probe          && ok "sshd answering on :22"                    || warn "SSH still off — see step 2 output"
+    serve_active       && ok "tailscale serve → 127.0.0.1:${SOREN_PORT}" || warn "serve not configured — \"$TS_APP\" serve --bg ${SOREN_PORT}"
+
+    local dns user host
+    dns="$(tailnet_dns)"; user="$(id -un)"; host="${dns%%.*}"
+    echo ""
+    printf "${BOLD}Access from any tailnet device:${NC}\n"
+    info "dashboard:      https://${dns:-<machine>.<tailnet>.ts.net}"
+    info "shell (VM):     ssh ${user}@${host:-terminal}"
+    info "agent session:  ssh -t ${host:-terminal} 'tmux attach -t ${SOREN_SESSION}'   (detach: Ctrl+b d)"
+    info "read-only view: ssh -t ${host:-terminal} 'tmux attach -rt ${SOREN_SESSION}'"
+    echo ""
+    info "Unattended reboots: enable auto-login (FileVault holds boot at the login screen)."
+    info "Keys + sshd hardening: docs/REMOTE_ACCESS.md → 'Direct SSH'."
+}
+
+cmd_off() {
+    # Footgun guard: disabling SSH over SSH severs this very connection.
+    if [[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ]] && ! $KEEP_SSH && ! $FORCE; then
+        die "running over SSH and 'off' disables SSH — re-run with --keep-ssh (leave SSH on) or --force (accept the cut)"
+    fi
+
+    printf "${BOLD}── server mode: OFF (normal laptop) ────────────────────────${NC}\n"
+
+    step "1/5 Stop soren"
+    if tmux has-session -t "$SOREN_SESSION" 2>/dev/null || soren_healthy; then
+        "${ROOT}/soren.sh" stop || warn "soren.sh stop reported failure — check ./soren.sh status"
+    else
+        ok "soren already stopped"
+    fi
+
+    step "2/5 Remove launchd boot agent"
+    "${ROOT}/soren.sh" server uninstall
+
+    step "3/5 Clear tailscale serve (tailscale itself stays on)"
+    if [[ -x "$TS_APP" ]] && ts_guarded 10 status >/dev/null 2>&1; then
+        if serve_active; then
+            if ts_guarded 15 serve reset >/dev/null 2>&1; then
+                ok "tailscale serve cleared"
+            else
+                warn "serve reset failed — run: \"$TS_APP\" serve reset"
+            fi
+        else
+            ok "tailscale serve already clear"
+        fi
+    else
+        info "tailscale app not running — nothing to clear"
+    fi
+
+    step "4/5 Remote Login (SSH)"
+    if $KEEP_SSH; then
+        info "keeping SSH on (--keep-ssh)"
+    else
+        disable_ssh || true
+    fi
+
+    step "5/5 Restore sleep settings"
+    restore_power_state
+
+    echo ""
+    ok "Normal laptop mode. Bring the server back with: ./tools/server-mode on"
+}
+
+cmd_status() {
+    printf "${BOLD}── server-mode status ──────────────────────────────────────${NC}\n"
+
+    soren_healthy && ok "soren: healthy on 127.0.0.1:${SOREN_PORT}" \
+                  || warn "soren: not responding on port ${SOREN_PORT}"
+    tmux has-session -t "$SOREN_SESSION" 2>/dev/null \
+        && ok "tmux: session '${SOREN_SESSION}' running ($(tmux list-windows -t "$SOREN_SESSION" 2>/dev/null | wc -l | tr -d ' ') windows)" \
+        || warn "tmux: session '${SOREN_SESSION}' not running"
+    plist_loaded && ok "launchd: boot agent loaded" \
+                 || warn "launchd: boot agent not loaded"
+    ssh_probe && ok "ssh: Remote Login on (port 22 open)" \
+              || warn "ssh: Remote Login off"
+
+    if [[ -x "$TS_APP" ]] && ts_guarded 10 status >/dev/null 2>&1; then
+        local dns; dns="$(tailnet_dns)"
+        ok "tailscale: up (${dns:-hostname unknown})"
+        serve_active && ok "serve: tailnet HTTPS → 127.0.0.1:${SOREN_PORT}" \
+                     || warn "serve: not configured for port ${SOREN_PORT}"
+    else
+        warn "tailscale: app not running or logged out (open -a Tailscale)"
+    fi
+
+    local sd ac
+    sd="$(sleep_disabled)"; ac="$(ac_value sleep)"
+    if [[ "$sd" == "1" ]]; then
+        ok "power: sleep disabled (server profile; lid-closed OK on AC)"
+    elif [[ "$ac" == "0" ]]; then
+        ok "power: no sleep on AC (display may sleep)"
+    else
+        warn "power: laptop profile (AC sleep=${ac:-?}, disablesleep=${sd:-0})"
+    fi
+    [[ -f "$STATE_FILE" ]] && info "saved laptop baseline: $STATE_FILE"
+}
+
+usage() { sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+
+#───────────────────────────────────────────────────────────────────────────────
+# Main
+#───────────────────────────────────────────────────────────────────────────────
+
+ACTION="${1:-status}"
+[[ $# -gt 0 ]] && shift
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-sudo) SKIP_SUDO=true ;;
+        --keep-ssh)  KEEP_SSH=true ;;
+        --force)     FORCE=true ;;
+        *) die "unknown flag: $1 (see --help)" ;;
+    esac
+    shift
+done
+
+case "$ACTION" in
+    on)     cmd_on ;;
+    off)    cmd_off ;;
+    status) cmd_status ;;
+    help|--help|-h) usage ;;
+    *) die "usage: server-mode on|off|status [--skip-sudo] [--keep-ssh] [--force]" ;;
+esac

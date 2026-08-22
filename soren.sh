@@ -17,6 +17,8 @@
 #   ./soren.sh smoke            End-to-end smoke test: spawn a test worker
 #   ./soren.sh team up [core]   Bootstrap the permanent worker team (core = 3)
 #   ./soren.sh team status      Show permanent worker roster
+#   ./soren.sh server on        Full server mode: sleep off, SSH on, boot agent, start, serve
+#   ./soren.sh server off       Normal laptop: stop, remove agent, clear serve, SSH off, sleep back
 #   ./soren.sh server install   Install launchd agent: auto-start at login (always-on server)
 #   ./soren.sh server uninstall Unload + remove the launchd agent
 #   ./soren.sh server status    Server-mode status: launchd, health, tailscale serve
@@ -165,7 +167,13 @@ tailscale_serve_configured() {
 
 cmd_server() {
     local action="${1:-status}"
+    [[ $# -gt 0 ]] && shift
     case "$action" in
+        on|off)
+            # Whole-machine toggle (power, SSH, agent, soren, serve) —
+            # delegated to the dedicated tool. Flags pass through.
+            exec "${ROOT}/tools/server-mode" "$action" "$@"
+            ;;
         install)
             mkdir -p "${ROOT}/.soren/logs"
             write_server_plist "$SERVER_PLIST"
@@ -233,12 +241,12 @@ cmd_server() {
         plist)
             # Write the plist to an arbitrary path without loading it
             # (used for linting/inspection; not part of normal workflows).
-            local dest="${2:-$SERVER_PLIST}"
+            local dest="${1:-$SERVER_PLIST}"
             write_server_plist "$dest"
             ok "plist written (not loaded): ${dest}"
             ;;
         *)
-            die "usage: soren.sh server [install | uninstall | status]"
+            die "usage: soren.sh server [on | off | install | uninstall | status]"
             ;;
     esac
 }
@@ -535,7 +543,7 @@ cmd_team() {
 }
 
 cmd_help() {
-    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 #───────────────────────────────────────────────────────────────────────────────
