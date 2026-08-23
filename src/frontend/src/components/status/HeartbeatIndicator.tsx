@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { Heart, HeartCrack, Clock, Inbox, Users, ListTodo, Monitor, Shield, Bell, GitBranch, Activity, Settings, Check, AlertTriangle } from 'lucide-react';
 import { useHeartbeatStore } from '../../stores/heartbeatStore';
 import { cn } from '../../lib/utils';
-import { API_BASE } from '../../lib/constants';
+import { api } from '../../lib/api';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -49,12 +49,18 @@ export function HeartbeatIndicator() {
   const [editKey, setEditKey] = useState<keyof HeartbeatPrefs | null>(null);
   const [editValue, setEditValue] = useState('');
 
-  // Fetch initial heartbeat on mount
+  // Fetch initial heartbeat on mount (via api client: auth + 401 handling)
   useEffect(() => {
-    fetch(`${API_BASE}/api/heartbeat`)
-      .then((r) => r.json())
+    api
+      .getHeartbeat()
       .then((data) => {
-        if (data.timestamp) setLatest(data);
+        if (data.timestamp) {
+          setLatest({
+            ...data,
+            supervisor_idle_seconds: data.supervisor_idle_seconds ?? null,
+            supervisor_state: data.supervisor_state ?? null,
+          });
+        }
       })
       .catch(() => {});
   }, [setLatest]);
@@ -62,9 +68,9 @@ export function HeartbeatIndicator() {
   // Fetch prefs when config section is shown
   useEffect(() => {
     if (!showConfig) return;
-    fetch(`${API_BASE}/api/prefs`)
-      .then((r) => r.json())
-      .then(setPrefs)
+    api
+      .getPrefs()
+      .then((p) => setPrefs(p as unknown as HeartbeatPrefs))
       .catch(() => {});
   }, [showConfig]);
 
@@ -121,15 +127,8 @@ export function HeartbeatIndicator() {
     const num = parseInt(editValue, 10);
     if (isNaN(num) || num < 0) return;
     try {
-      const res = await fetch(`${API_BASE}/api/prefs`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ [key]: num }),
-      });
-      if (res.ok) {
-        const updated = await res.json();
-        setPrefs(updated);
-      }
+      const updated = await api.updatePrefs({ [key]: num });
+      setPrefs(updated as unknown as HeartbeatPrefs);
     } catch { /* ignore */ }
     setEditKey(null);
   };

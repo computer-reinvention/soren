@@ -535,4 +535,73 @@ export const api = {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to delete secret');
     return res.json();
   },
+
+  // ── System metrics (scorecard / reliability / heartbeat / prefs) ─────────
+
+  async getScorecard(): Promise<ScorecardResponse> {
+    const res = await apiFetch(`${API_BASE}/api/webhooks/scorecard`);
+    if (!res.ok) throw new Error('Failed to fetch scorecard');
+    return res.json();
+  },
+
+  async getAgentReliability(): Promise<{ agents: AgentReliability[] }> {
+    const res = await apiFetch(`${API_BASE}/api/agents/reliability`);
+    if (!res.ok) throw new Error('Failed to fetch agent reliability');
+    return res.json();
+  },
+
+  async getHeartbeat(): Promise<HeartbeatEntry> {
+    const res = await apiFetch(`${API_BASE}/api/heartbeat`);
+    if (!res.ok) throw new Error('Failed to fetch heartbeat');
+    return res.json();
+  },
+
+  async getHeartbeatHistory(limit = 50): Promise<{ heartbeats: HeartbeatEntry[]; total: number }> {
+    const res = await apiFetch(`${API_BASE}/api/heartbeat/history?limit=${limit}`);
+    if (!res.ok) throw new Error('Failed to fetch heartbeat history');
+    return res.json();
+  },
+
+  async getPrefs(): Promise<Record<string, unknown>> {
+    const res = await apiFetch(`${API_BASE}/api/prefs`);
+    if (!res.ok) throw new Error('Failed to fetch prefs');
+    return res.json();
+  },
+
+  async updatePrefs(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const res = await apiFetch(`${API_BASE}/api/prefs`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new Error('Failed to update prefs');
+    return res.json();
+  },
 };
+
+export interface ScorecardResponse {
+  uptime_seconds: number;
+  tasks_completed_today: number;
+  budget_usage_pct: number;
+  agents_active: number;
+  agents_sleeping: number;
+  git_branch: string;
+  git_sha: string;
+}
+
+export interface AgentReliability {
+  agent_id: string;
+  verified: number;
+  failed: number;
+  success_rate: number;
+}
+
+export interface HeartbeatEntry {
+  timestamp: number;
+  sections: Record<string, string>;
+  highest_priority: string | null;
+  all_clear: boolean;
+  received_at: string;
+  supervisor_idle_seconds?: number | null;
+  supervisor_state?: string | null;
+}

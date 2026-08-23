@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Activity, AlertTriangle, Bot, CircleDollarSign, MessageSquare, Moon } from 'lucide-react';
+import { Activity, AlertTriangle, Bot, CheckCircle2, CircleDollarSign, GitBranch, MessageSquare } from 'lucide-react';
 import { api } from '@/lib/api';
 import { cn, formatTokenCount } from '@/lib/utils';
 import { routes } from '@/lib/navigation';
@@ -9,6 +9,13 @@ import { useAgents } from '@/hooks/useAgents';
 import { useProjects } from '@/hooks/useProjects';
 import { groupAgentsByProject } from '@/components/sidebar/sidebar-utils';
 import { PRICING } from '@/lib/pricing';
+
+function formatUptime(seconds: number): string {
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  const h = Math.floor(seconds / 3600);
+  if (h < 24) return `${h}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
 
 /**
  * System overview — the default view. At-a-glance health, fleet status by
@@ -30,6 +37,43 @@ export function OverviewPage() {
     staleTime: 30_000,
     refetchOnWindowFocus: false,
   });
+
+  const { data: scorecard } = useQuery({
+    queryKey: ['scorecard'],
+    queryFn: () => api.getScorecard(),
+    refetchInterval: 30_000,
+  });
+
+  const { data: reliability } = useQuery({
+    queryKey: ['agent-reliability'],
+    queryFn: () => api.getAgentReliability(),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: heartbeatHistory } = useQuery({
+    queryKey: ['heartbeat-history'],
+    queryFn: () => api.getHeartbeatHistory(60),
+    refetchInterval: 30_000,
+  });
+
+  const idleSeries = useMemo(
+    () =>
+      (heartbeatHistory?.heartbeats ?? [])
+        .slice()
+        .reverse()
+        .map((h) => h.supervisor_idle_seconds ?? 0),
+    [heartbeatHistory]
+  );
+
+  const topAgents = useMemo(
+    () =>
+      (reliability?.agents ?? [])
+        .filter((a) => a.verified + a.failed > 0)
+        .sort((a, b) => b.verified + b.failed - (a.verified + a.failed))
+        .slice(0, 5),
+    [reliability]
+  );
 
   const groups = useMemo(
     () => groupAgentsByProject(agentsData?.agents ?? [], projectsData?.projects ?? []),
@@ -66,25 +110,37 @@ export function OverviewPage() {
   return (
     <div className="h-full overflow-y-auto p-4">
       <div className="mx-auto max-w-3xl space-y-4">
-        <div className="flex items-baseline justify-between">
+        <div className="flex items-baseline justify-between gap-3">
           <h1 className="font-mono text-sm font-semibold uppercase tracking-wider text-muted-foreground">
             system overview
           </h1>
-          <span
-            className={cn(
-              'flex items-center gap-1.5 font-mono text-xs',
-              healthy ? 'text-emerald-500' : 'text-red-400'
+          <div className="flex items-center gap-3 font-mono text-xs text-muted-foreground">
+            {scorecard && (
+              <>
+                <span className="flex items-center gap-1" title={scorecard.git_sha}>
+                  <GitBranch className="h-3 w-3" aria-hidden />
+                  {scorecard.git_branch}
+                  <span className="text-muted-foreground/60">@{scorecard.git_sha.slice(0, 7)}</span>
+                </span>
+                <span title="server uptime">up {formatUptime(scorecard.uptime_seconds)}</span>
+              </>
             )}
-          >
             <span
               className={cn(
-                'h-1.5 w-1.5 rounded-full',
-                healthy ? 'bg-emerald-500' : 'bg-red-400 animate-pulse motion-reduce:animate-none'
+                'flex items-center gap-1.5',
+                healthy ? 'text-emerald-500' : 'text-red-400'
               )}
-              aria-hidden
-            />
-            {healthy ? 'healthy' : (health?.status ?? 'unknown')}
-          </span>
+            >
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  healthy ? 'bg-emerald-500' : 'bg-red-400 animate-pulse motion-reduce:animate-none'
+                )}
+                aria-hidden
+              />
+              {healthy ? 'healthy' : (health?.status ?? 'unknown')}
+            </span>
+          </div>
         </div>
 
         {/* Stat tiles */}
@@ -105,11 +161,11 @@ export function OverviewPage() {
             to={routes.chat()}
           />
           <StatTile
-            icon={Moon}
-            label="sleeping"
-            value={String(fleet.sleeping)}
-            sub="wake on message"
-            to={routes.chat()}
+            icon={CheckCircle2}
+            label="tasks today"
+            value={String(scorecard?.tasks_completed_today ?? '—')}
+            sub={`${fleet.sleeping} sleeping`}
+            to={routes.tasks()}
           />
           <StatTile
             icon={CircleDollarSign}
@@ -118,6 +174,71 @@ export function OverviewPage() {
             sub={`${formatTokenCount(spend.tokens)} tok`}
             to={routes.tasks()}
           />
+        </div>
+
+        {/* Reliability + supervisor idle */}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <section
+            aria-label="agent reliability"
+            className="rounded border border-border/60 bg-card px-3 py-2"
+          >
+            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+              verification success
+            </h2>
+            {topAgents.length === 0 ? (
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">no verifications yet</p>
+            ) : (
+              <ul className="mt-1.5 space-y-1">
+                {topAgents.map((a) => (
+                  <li key={a.agent_id} className="flex items-center gap-2">
+                    <Link
+                      to={routes.agent(a.agent_id)}
+                      className="w-32 truncate font-mono text-[11px] text-foreground/90 hover:text-primary"
+                    >
+                      {a.agent_id}
+                    </Link>
+                    <div
+                      className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"
+                      role="meter"
+                      aria-valuenow={Math.round(a.success_rate * 100)}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`${a.agent_id} success rate`}
+                    >
+                      <div
+                        className={cn(
+                          'h-full rounded-full',
+                          a.success_rate >= 0.9
+                            ? 'bg-emerald-500'
+                            : a.success_rate >= 0.6
+                              ? 'bg-amber-500'
+                              : 'bg-red-400'
+                        )}
+                        style={{ width: `${Math.max(4, a.success_rate * 100)}%` }}
+                      />
+                    </div>
+                    <span className="w-16 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
+                      {Math.round(a.success_rate * 100)}% · {a.verified + a.failed}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section
+            aria-label="supervisor idle history"
+            className="rounded border border-border/60 bg-card px-3 py-2"
+          >
+            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+              supervisor idle (last {idleSeries.length || 0} beats)
+            </h2>
+            {idleSeries.length < 2 ? (
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">not enough data</p>
+            ) : (
+              <Sparkline data={idleSeries} className="mt-2 h-10 w-full text-primary" />
+            )}
+          </section>
         </div>
 
         {/* Fleet by project */}
@@ -181,6 +302,34 @@ export function OverviewPage() {
         </section>
       </div>
     </div>
+  );
+}
+
+/** Dependency-free inline sparkline (no recharts in the overview bundle). */
+function Sparkline({ data, className }: { data: number[]; className?: string }) {
+  const w = 200;
+  const h = 40;
+  const max = Math.max(...data, 1);
+  const points = data
+    .map((v, i) => `${((i / (data.length - 1)) * w).toFixed(1)},${(h - (v / max) * (h - 4) - 2).toFixed(1)}`)
+    .join(' ');
+  const latest = data[data.length - 1] ?? 0;
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      preserveAspectRatio="none"
+      className={className}
+      role="img"
+      aria-label={`supervisor idle seconds, latest ${latest}s, peak ${max}s`}
+    >
+      <polyline
+        points={points}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
   );
 }
 

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { api } from '../../lib/api';
 import { routes } from '../../lib/navigation';
 import { useThemeStore } from '../../stores/themeStore';
 import { useProjectStore } from '../../stores/projectStore';
@@ -68,10 +70,7 @@ export function Header() {
           </span>
         </div>
         <div className="h-4 w-px bg-border" />
-        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono">
-          <GitBranch className="h-3.5 w-3.5" />
-          <span>main</span>
-        </div>
+        <GitBranchIndicator />
 
         {/* Project Selector */}
         {projects.length > 0 && (
@@ -168,5 +167,23 @@ export function Header() {
       </div>
       <RegisterProjectDialog open={registerOpen} onOpenChange={setRegisterOpen} />
     </header>
+  );
+}
+
+/** Live git branch/sha from the scorecard endpoint (was hardcoded "main"). */
+function GitBranchIndicator() {
+  const { data: scorecard } = useQuery({
+    queryKey: ['scorecard'],
+    queryFn: () => api.getScorecard(),
+    refetchInterval: 30_000,
+  });
+  return (
+    <div
+      className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono"
+      title={scorecard ? `${scorecard.git_branch}@${scorecard.git_sha}` : undefined}
+    >
+      <GitBranch className="h-3.5 w-3.5" aria-hidden />
+      <span>{scorecard?.git_branch ?? '…'}</span>
+    </div>
   );
 }
