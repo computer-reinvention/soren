@@ -24,5 +24,15 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-xterm': ['@xterm/xterm', '@xterm/addon-fit'],
+          'vendor-markdown': ['react-markdown', 'remark-gfm'],
+          'vendor-charts': ['recharts'],
+          'vendor-shiki': ['shiki'],
+        },
+      },
+    },
   },
 });
