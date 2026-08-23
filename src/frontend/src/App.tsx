@@ -13,6 +13,7 @@ import { useAgentEvents } from './hooks/useAgentEvents';
 import { useThoughts } from './hooks/useThoughts';
 import { useThemeStore } from './stores/themeStore';
 import { AuthGuard } from './components/auth/AuthGuard';
+import { CommandPalette } from './components/CommandPalette';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -50,6 +51,7 @@ function Dashboard() {
         right={<ActivityTimeline />}
       />
       <StatusBar />
+      <CommandPalette />
       <OnboardingModal />
     </Layout>
   );
