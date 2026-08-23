@@ -5,14 +5,9 @@ import {
   ChevronRight,
   Zap,
   Brain,
-  FileText,
-  FileEdit,
-  Play,
-  FolderSearch,
-  Search,
-  Globe,
   Terminal,
 } from 'lucide-react';
+import { toolIcons } from '@/lib/tool-icons';
 import type { Activity } from '@/types/activity';
 import type { Thought } from '@/stores/thoughtStore';
 
@@ -27,17 +22,6 @@ interface TimelineStep {
   tool?: Activity;
   timestamp: string;
 }
-
-const toolIcons: Record<string, typeof Terminal> = {
-  Read: FileText,
-  Write: FileEdit,
-  Edit: FileEdit,
-  Bash: Play,
-  Glob: FolderSearch,
-  Grep: Search,
-  WebFetch: Globe,
-  WebSearch: Globe,
-};
 
 const MAX_SHOWN = 30;
 

@@ -15,14 +15,9 @@ import {
   User,
   ChevronRight,
   Mail,
-  FileText,
-  FileEdit,
-  FolderSearch,
-  Search,
-  Play,
-  Globe,
   Heart,
 } from 'lucide-react';
+import { toolIcons } from '@/lib/tool-icons';
 import { formatDistanceToNow } from 'date-fns';
 import { getToolSummary, getToolInputDetails, getToolOutputSummary } from '@/lib/toolSummary';
 import type { Activity, ActivityType } from '@/types/activity';
@@ -85,18 +80,6 @@ const typeConfig: Record<
     bgColor: 'bg-red-500/10',
     label: 'Heartbeat',
   },
-};
-
-// Map tool names to specific icons for more visual distinction
-const toolIcons: Record<string, typeof Terminal> = {
-  Read: FileText,
-  Write: FileEdit,
-  Edit: FileEdit,
-  Bash: Play,
-  Glob: FolderSearch,
-  Grep: Search,
-  WebFetch: Globe,
-  WebSearch: Globe,
 };
 
 const LOW_SIGNAL_TYPES: ReadonlySet<ActivityType> = new Set(['heartbeat', 'status_change']);

@@ -4,30 +4,14 @@ import { getToolSummary } from '@/lib/toolSummary';
 import {
   ChevronRight,
   Zap,
-  FileText,
-  FileEdit,
-  Play,
-  FolderSearch,
-  Search,
-  Globe,
   Terminal,
 } from 'lucide-react';
+import { toolIcons } from '@/lib/tool-icons';
 import type { Activity } from '@/types/activity';
 
 interface ToolCallGroupProps {
   events: Activity[];
 }
-
-const toolIcons: Record<string, typeof Terminal> = {
-  Read: FileText,
-  Write: FileEdit,
-  Edit: FileEdit,
-  Bash: Play,
-  Glob: FolderSearch,
-  Grep: Search,
-  WebFetch: Globe,
-  WebSearch: Globe,
-};
 
 /** "Read x5, Bash x2, Edit x1" */
 function getToolCountSummary(events: Activity[]): string {
