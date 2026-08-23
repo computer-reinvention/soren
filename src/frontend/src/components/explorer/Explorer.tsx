@@ -36,7 +36,7 @@ import { api } from '@/lib/api';
 import type { Agent } from '@/types/agent';
 import type { Project } from '@/types/project';
 import type { Team, TeamMember } from '@/types/team';
-// import type { Message } from '@/types/message'; // Hidden: mailbox panel disabled
+
 
 /** Agents that belong to THE SYSTEM (SOREN) rather than a registered project. */
 function isSorenScope(projectId?: string | null): boolean {
@@ -100,7 +100,7 @@ interface ProjectEntryData {
 
 export function Explorer() {
   const [archivedOpen, setArchivedOpen] = useState(false);
-  // const [mailboxOpen, setMailboxOpen] = useState(true); // Hidden: mailbox panel disabled
+
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [secretsOpen, setSecretsOpen] = useState(false);
   const [createSessionOpen, setCreateSessionOpen] = useState(false);
@@ -256,12 +256,12 @@ export function Explorer() {
   // Total agent count
   const totalAgents = agents.length;
 
-  // Build file tree and separate mailbox and journal
+  // Build file tree and separate journal
   const allItems: FileTreeItem[] = filesystemData?.items
     ? buildFileTree(filesystemData.items)
     : [];
 
-  // const mailboxItem = allItems.find(item => item.name === 'mailbox'); // Hidden: mailbox panel disabled
+
   const journalFolder = allItems.find(item => item.name === 'journal' && item.type === 'directory');
   const fileTree = allItems.filter(item => item.name !== 'mailbox' && item.name !== 'journal');
 
@@ -463,15 +463,7 @@ export function Explorer() {
             </Collapsible>
           )}
 
-          {/* MAILBOX Section - Agent Communication (hidden for now, re-enable by uncommenting)
-          <MailboxSection
-            mailboxOpen={mailboxOpen}
-            setMailboxOpen={setMailboxOpen}
-            mailboxItem={mailboxItem}
-            selectedFile={selectedFile}
-            handleFileSelect={handleFileSelect}
-          />
-          */}
+
 
           {/* MEMORY Section */}
           <Collapsible open={memoryOpen} onOpenChange={setMemoryOpen} className="mt-4">
@@ -839,103 +831,4 @@ function ProjectEntry({
   );
 }
 
-/* MailboxSection — hidden for now, re-enable by uncommenting
-function MailboxSection({
-  mailboxOpen,
-  setMailboxOpen,
-  mailboxItem,
-  selectedFile,
-  handleFileSelect,
-}: {
-  mailboxOpen: boolean;
-  setMailboxOpen: (open: boolean) => void;
-  mailboxItem: FileTreeItem | undefined;
-  selectedFile: FileTreeItem | null;
-  handleFileSelect: (item: FileTreeItem) => void;
-}) {
-  const { data: messagesData, isLoading } = useQuery({
-    queryKey: ['mailboxMessages'],
-    queryFn: () => api.getMailboxMessages(10),
-    refetchInterval: 30_000,
-  });
 
-  const recentMessages = messagesData?.messages || [];
-  const messageCount = recentMessages.length;
-
-  const parseSubject = (content: string) => {
-    const seeIdx = content.indexOf(' (see:');
-    if (seeIdx > 0) return content.substring(0, seeIdx);
-    return content;
-  };
-
-  return (
-    <Collapsible open={mailboxOpen} onOpenChange={setMailboxOpen} className="mt-4">
-      <CollapsibleTrigger asChild>
-        <button className="w-full flex items-center gap-1 px-2 py-1.5 text-xs font-semibold uppercase tracking-wider text-sidebar-foreground/70 hover:text-sidebar-foreground">
-          <ChevronRight
-            className={cn(
-              'h-3.5 w-3.5 transition-transform',
-              mailboxOpen && 'rotate-90'
-            )}
-          />
-          <Mail className="h-3.5 w-3.5" />
-          <span className="flex-1 text-left">Mailbox</span>
-          {messageCount > 0 && (
-            <Badge
-              variant="secondary"
-              className="h-5 px-1.5 text-xs bg-blue-500/20 text-blue-400 animate-pulse"
-            >
-              {messageCount}
-            </Badge>
-          )}
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-1 space-y-0.5">
-        {mailboxItem && (
-          <button
-            onClick={() => handleFileSelect(mailboxItem)}
-            className={cn(
-              'w-full flex items-center gap-2 px-3 py-1.5 text-sm rounded-md transition-colors text-left',
-              'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-              selectedFile?.path === mailboxItem.path && 'bg-sidebar-accent text-sidebar-accent-foreground'
-            )}
-          >
-            <Inbox className="h-4 w-4 text-blue-500 flex-shrink-0" />
-            <span className="truncate">View Raw Mailbox</span>
-          </button>
-        )}
-        {isLoading ? (
-          <div className="px-3 py-2">
-            <Skeleton className="h-4 w-full" />
-          </div>
-        ) : recentMessages.length > 0 ? (
-          <div className="space-y-0.5 pt-1">
-            {recentMessages.slice(0, 5).map((msg: Message) => (
-              <div
-                key={msg.id}
-                className="w-full flex items-start gap-2 px-3 py-1.5 text-xs rounded-md hover:bg-sidebar-accent/50"
-              >
-                <MessageSquare className="h-3.5 w-3.5 text-blue-400 flex-shrink-0 mt-0.5" />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1 text-muted-foreground">
-                    <span className="font-medium text-foreground/80">{msg.from_agent}</span>
-                    <ArrowRight className="h-2.5 w-2.5" />
-                    <span className="font-medium text-foreground/80">{msg.to_agent}</span>
-                  </div>
-                  <p className="truncate text-muted-foreground mt-0.5">
-                    {parseSubject(msg.content)}
-                  </p>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="px-3 py-2 text-xs text-muted-foreground">
-            No recent agent messages
-          </p>
-        )}
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-*/
