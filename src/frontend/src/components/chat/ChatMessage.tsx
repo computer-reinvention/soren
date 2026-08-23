@@ -78,8 +78,6 @@ interface ChatMessageProps {
   toolCalls?: Activity[];
   thoughts?: Thought[];
   collapseCount?: number;
-  /** When set, flips alignment: messages FROM this agent align left, others right. */
-  inboxAgentId?: string;
 }
 
 const PREVIEW_LENGTH = 1200;
@@ -347,7 +345,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   );
 }
 
-export function ChatMessage({ message, toolCalls, thoughts, collapseCount, inboxAgentId: _inboxAgentId }: ChatMessageProps) {
+export function ChatMessage({ message, toolCalls, thoughts, collapseCount }: ChatMessageProps) {
   const agents = useAgentStore((s) => s.agents);
   const { username } = useAuthStore();
 
