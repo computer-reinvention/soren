@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
 import { useAgentStore } from '@/stores/agentStore';
 import { Copy, Check } from 'lucide-react';
-import { codeToHtml, type BundledLanguage } from 'shiki';
+import { codeToHtml, type BundledLanguage } from 'shiki/bundle/web';
 
 interface MarkdownContentProps {
   content: string;
@@ -13,13 +13,14 @@ interface MarkdownContentProps {
 
 const MENTION_REGEX = /@([\w-]+)/g;
 
-// Languages to support — add more as needed, shiki lazy-loads grammars
+// Languages available in shiki/bundle/web — curated subset for common web/dev use
 const SUPPORTED_LANGS = new Set<string>([
   'javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx',
-  'python', 'py', 'bash', 'sh', 'shell', 'zsh',
-  'json', 'yaml', 'yml', 'toml', 'css', 'html', 'xml',
-  'sql', 'rust', 'go', 'c', 'cpp', 'java', 'ruby', 'rb',
-  'markdown', 'md', 'diff', 'dockerfile', 'makefile',
+  'python', 'py', 'bash', 'sh', 'shell', 'shellscript', 'zsh',
+  'json', 'json5', 'jsonc', 'yaml', 'yml', 'css', 'html', 'xml',
+  'sql', 'c', 'cpp', 'c++', 'java', 'markdown', 'md', 'mdx',
+  'less', 'scss', 'sass', 'svelte', 'vue', 'php',
+  'graphql', 'gql', 'http', 'hurl', 'julia', 'jl', 'r',
 ]);
 
 function normalizeLanguage(lang: string | undefined): BundledLanguage | null {
