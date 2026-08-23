@@ -58,11 +58,13 @@ export function Sidebar() {
           aria-hidden
         />
         <input
+          id="sidebar-filter"
           type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="filter agents, projects…"
+          placeholder="filter agents, projects…  ( / )"
           aria-label="filter agents and projects"
+          aria-keyshortcuts="/"
           className={cn(
             'h-6 w-full rounded border border-border/60 bg-background pl-7 pr-6',
             'font-mono text-[11px] text-foreground placeholder:text-muted-foreground/50',

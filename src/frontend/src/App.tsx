@@ -12,8 +12,10 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useAgentEvents } from './hooks/useAgentEvents';
 import { useThoughts } from './hooks/useThoughts';
+import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { CommandPalette } from './components/CommandPalette';
+import { ShortcutHelp } from './components/ShortcutHelp';
 import { OverviewPage } from './routes/OverviewPage';
 import { AgentPage, ArchivedPage, ChatFirehosePage, FilePage } from './routes/pages';
 import { TasksPanel } from './components/tasks/TasksPanel';
@@ -36,6 +38,7 @@ function Shell() {
   useWebSocket();
   useAgentEvents(); // Load historical events on app start
   useThoughts(); // Load historical thoughts so they persist across refreshes
+  const { helpOpen, setHelpOpen } = useKeyboardShortcuts();
 
   return (
     <Layout>
@@ -54,6 +57,7 @@ function Shell() {
       />
       <StatusBar />
       <CommandPalette />
+      <ShortcutHelp open={helpOpen} onOpenChange={setHelpOpen} />
       <OnboardingModal />
     </Layout>
   );
