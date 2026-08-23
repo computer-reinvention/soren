@@ -13,6 +13,15 @@ interface ResizableLayoutProps {
 
 const COLLAPSED_SIZE = 3; // percentage when collapsed
 
+// Explicit constraint bounds to prevent ARIA valuemin > valuemax issues.
+// The library computes separator ranges from adjacent panels' min/max;
+// if any panel omits a bound, the computed range can invert.
+const LEFT_MIN = 10;
+const LEFT_MAX = 25;
+const RIGHT_MIN = 15;
+const RIGHT_MAX = 40;
+const CENTER_MIN = 30;
+
 export function ResizableLayout({ left, center, right }: ResizableLayoutProps) {
   const {
     leftPanelSize,
@@ -22,7 +31,12 @@ export function ResizableLayout({ left, center, right }: ResizableLayoutProps) {
     setRightPanelSize
   } = useLayoutStore();
 
+  const effectiveRightMin = activityPanelCollapsed ? COLLAPSED_SIZE : RIGHT_MIN;
+  const effectiveRightMax = activityPanelCollapsed ? COLLAPSED_SIZE : RIGHT_MAX;
   const effectiveRightSize = activityPanelCollapsed ? COLLAPSED_SIZE : rightPanelSize;
+
+  // Center max = whatever is left when neighbours are at their minimums
+  const centerMax = 100 - LEFT_MIN - effectiveRightMin;
 
   return (
     <ResizablePanelGroup
@@ -44,8 +58,8 @@ export function ResizableLayout({ left, center, right }: ResizableLayoutProps) {
       <ResizablePanel
         id="left-panel"
         defaultSize={`${leftPanelSize}%`}
-        minSize="10%"
-        maxSize="25%"
+        minSize={`${LEFT_MIN}%`}
+        maxSize={`${LEFT_MAX}%`}
         className="bg-sidebar-background"
         style={{ overflow: 'visible' }}
       >
@@ -58,7 +72,8 @@ export function ResizableLayout({ left, center, right }: ResizableLayoutProps) {
       <ResizablePanel
         id="center-panel"
         defaultSize={`${100 - leftPanelSize - effectiveRightSize}%`}
-        minSize="30%"
+        minSize={`${CENTER_MIN}%`}
+        maxSize={`${centerMax}%`}
       >
         {center}
       </ResizablePanel>
@@ -69,8 +84,8 @@ export function ResizableLayout({ left, center, right }: ResizableLayoutProps) {
       <ResizablePanel
         id="right-panel"
         defaultSize={`${effectiveRightSize}%`}
-        minSize={activityPanelCollapsed ? `${COLLAPSED_SIZE}%` : "15%"}
-        maxSize={activityPanelCollapsed ? `${COLLAPSED_SIZE}%` : "40%"}
+        minSize={`${effectiveRightMin}%`}
+        maxSize={`${effectiveRightMax}%`}
         className="bg-sidebar-background"
       >
         {right}
