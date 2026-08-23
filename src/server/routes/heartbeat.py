@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 
@@ -21,6 +22,8 @@ class HeartbeatData(BaseModel):
     sections: Dict[str, str] = {}
     highest_priority: Optional[str] = None
     all_clear: bool = False
+    supervisor_idle_seconds: Optional[int] = None
+    supervisor_state: Optional[str] = None
 
 
 class HeartbeatResponse(BaseModel):
@@ -29,6 +32,8 @@ class HeartbeatResponse(BaseModel):
     highest_priority: Optional[str]
     all_clear: bool
     received_at: str
+    supervisor_idle_seconds: Optional[int] = None
+    supervisor_state: Optional[str] = None
 
 
 class HeartbeatHistoryResponse(BaseModel):
@@ -49,14 +54,27 @@ _SCHEMA = """CREATE TABLE IF NOT EXISTS heartbeat_history (
     sections TEXT NOT NULL,
     highest_priority TEXT,
     all_clear BOOLEAN NOT NULL DEFAULT 0,
-    received_at TEXT NOT NULL
+    received_at TEXT NOT NULL,
+    supervisor_idle_seconds INTEGER,
+    supervisor_state TEXT
 )"""
 
 
+def _migrate_db(conn):
+    """Add new columns to existing heartbeat_history tables."""
+    cursor = conn.execute("PRAGMA table_info(heartbeat_history)")
+    existing_cols = {row[1] for row in cursor.fetchall()}
+    if "supervisor_idle_seconds" not in existing_cols:
+        conn.execute("ALTER TABLE heartbeat_history ADD COLUMN supervisor_idle_seconds INTEGER")
+    if "supervisor_state" not in existing_cols:
+        conn.execute("ALTER TABLE heartbeat_history ADD COLUMN supervisor_state TEXT")
+
+
 def _init_db():
-    """Create heartbeat_history table if it doesn't exist."""
+    """Create heartbeat_history table if it doesn't exist, then migrate."""
     with get_db() as conn:
         conn.execute(_SCHEMA)
+        _migrate_db(conn)
 
 
 _init_db()
@@ -69,6 +87,7 @@ def _get_connection():
         # Idempotent ensure — the DB path can change under tests, and this is
         # a single cheap DDL statement on an existing table.
         conn.execute(_SCHEMA)
+        _migrate_db(conn)
         yield conn
 
 
@@ -76,14 +95,18 @@ def _store_heartbeat(hb: HeartbeatResponse):
     """Persist a heartbeat record to the database."""
     with _get_connection() as conn:
         conn.execute(
-            """INSERT INTO heartbeat_history (timestamp, sections, highest_priority, all_clear, received_at)
-               VALUES (?, ?, ?, ?, ?)""",
+            """INSERT INTO heartbeat_history
+               (timestamp, sections, highest_priority, all_clear, received_at,
+                supervisor_idle_seconds, supervisor_state)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 hb.timestamp,
                 json.dumps(hb.sections),
                 hb.highest_priority,
                 hb.all_clear,
                 hb.received_at,
+                hb.supervisor_idle_seconds,
+                hb.supervisor_state,
             ),
         )
 
@@ -96,12 +119,26 @@ def _row_to_heartbeat(row: sqlite3.Row) -> HeartbeatResponse:
     except (json.JSONDecodeError, TypeError):
         sections = {}
 
+    # New columns may not exist in older rows; use safe access
+    sup_idle = None
+    sup_state = None
+    try:
+        sup_idle = row["supervisor_idle_seconds"]
+    except (IndexError, KeyError):
+        pass
+    try:
+        sup_state = row["supervisor_state"]
+    except (IndexError, KeyError):
+        pass
+
     return HeartbeatResponse(
         timestamp=row["timestamp"],
         sections=sections,
         highest_priority=row["highest_priority"],
         all_clear=bool(row["all_clear"]),
         received_at=row["received_at"],
+        supervisor_idle_seconds=sup_idle,
+        supervisor_state=sup_state,
     )
 
 
@@ -113,12 +150,30 @@ async def post_heartbeat(data: HeartbeatData):
     """Accept heartbeat scan data from monitor and broadcast via WebSocket."""
     global _latest_heartbeat
 
+    sup_idle = data.supervisor_idle_seconds
+    sup_state = data.supervisor_state
+
+    # Fallback: parse structured supervisor info from sections string
+    sup_section = data.sections.get("supervisor", "")
+    if sup_idle is None and sup_section:
+        idle_s = re.search(r"\((\d+)s idle\)", sup_section)
+        if idle_s:
+            sup_idle = int(idle_s.group(1))
+        else:
+            idle_m = re.search(r"\((\d+)m idle\)", sup_section)
+            if idle_m:
+                sup_idle = int(idle_m.group(1)) * 60
+    if sup_state is None and sup_section:
+        sup_state = sup_section.split("(")[0].strip() or sup_section
+
     _latest_heartbeat = HeartbeatResponse(
         timestamp=data.timestamp,
         sections=data.sections,
         highest_priority=data.highest_priority,
         all_clear=data.all_clear,
         received_at=datetime.now(timezone.utc).isoformat(),
+        supervisor_idle_seconds=sup_idle,
+        supervisor_state=sup_state,
     )
 
     _store_heartbeat(_latest_heartbeat)

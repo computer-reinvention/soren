@@ -707,7 +707,7 @@ check_supervisor_heartbeat() {
 
         curl -sf --max-time 2 -X POST "http://localhost:${SOREN_PORT}/api/heartbeat" \
             -H "Content-Type: application/json" \
-            -d "{\"timestamp\": ${now}, \"sections\": ${hb_sections}, \"highest_priority\": null, \"all_clear\": true}" \
+            -d "{\"timestamp\": ${now}, \"sections\": ${hb_sections}, \"highest_priority\": null, \"all_clear\": true, \"supervisor_idle_seconds\": ${staleness}, \"supervisor_state\": \"active\"}" \
             >/dev/null 2>&1 || true
         return
     fi
