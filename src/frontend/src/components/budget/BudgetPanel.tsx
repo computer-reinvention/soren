@@ -2,20 +2,13 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { formatTokenCount } from '@/lib/utils';
+import { PRICING } from '@/lib/pricing';
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { Coins } from 'lucide-react';
-
-// Claude Opus 4.6 (via opencode) pricing per 1M tokens
-const PRICING = {
-  input: 5,
-  output: 25,
-  cache_read: 0.50,
-  cache_creation: 6.25,
-};
 
 function formatCost(cost: number): string {
   if (cost < 0.01) return '<$0.01';

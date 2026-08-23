@@ -12,6 +12,7 @@ import { useAgents } from '@/hooks/useAgents';
 import { useProjectAgents } from '@/hooks/useProjects';
 import { useChatKeyboard } from '@/hooks/useChatKeyboard';
 import { formatTokenCount } from '@/lib/utils';
+import { PRICING } from '@/lib/pricing';
 import { ChatMessages } from './ChatMessages';
 import { ChatInput } from './ChatInput';
 import { ChatHeader } from './ChatHeader';
@@ -21,13 +22,6 @@ import { WorkerConfirmModal } from './WorkerConfirmModal';
 import { ArchivedAgentView } from './ArchivedAgentView';
 import { MemoryViewer } from '@/components/explorer/MemoryViewer';
 
-
-const PRICING = {
-  input: 5,
-  output: 25,
-  cache_read: 0.50,
-  cache_creation: 6.25,
-};
 
 export function ChatPanel() {
   const { selectedAgentId, viewingArchivedId } = useAgentStore();

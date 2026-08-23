@@ -9,16 +9,9 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { api } from '@/lib/api';
+import { PRICING } from '@/lib/pricing';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AlertTriangle, TrendingUp, Zap, DollarSign } from 'lucide-react';
-
-// Claude Opus 4.6 (via opencode) pricing per 1M tokens — matches BudgetPanel.tsx
-const PRICING = {
-  input: 5,
-  output: 25,
-  cache_read: 0.50,
-  cache_creation: 6.25,
-};
 
 function computeDayCost(day: {
   input_tokens: number;
