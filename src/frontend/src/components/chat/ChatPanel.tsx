@@ -3,10 +3,7 @@ import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAgentEventStore } from '@/stores/agentEventStore';
 import { api } from '@/lib/api';
 import { useMessages } from '@/hooks/useMessages';
-import { useAgentStore } from '@/stores/agentStore';
 import { useAuthStore } from '@/stores/authStore';
-import { useViewerStore } from '@/stores/viewerStore';
-import { useTerminalStore } from '@/stores/terminalStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useAgents } from '@/hooks/useAgents';
 import { useProjectAgents } from '@/hooks/useProjects';
@@ -19,15 +16,19 @@ import { ChatHeader } from './ChatHeader';
 import { InboxView } from './InboxView';
 import { AgentActivityIndicator } from './AgentActivityIndicator';
 import { WorkerConfirmModal } from './WorkerConfirmModal';
-import { ArchivedAgentView } from './ArchivedAgentView';
-import { MemoryViewer } from '@/components/explorer/MemoryViewer';
 
+interface ChatPanelProps {
+  /**
+   * Agent scope from the route: /agents/:agentId. null = firehose view
+   * (all messages, sends resolve to supervisor with @mention routing).
+   * The route remounts this component per agent (key), so per-agent local
+   * state resets naturally — no manual sync needed.
+   */
+  agentId: string | null;
+}
 
-export function ChatPanel() {
-  const { selectedAgentId, viewingArchivedId } = useAgentStore();
+export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
   const { username } = useAuthStore();
-  const { selectedFile } = useViewerStore();
-  const terminalShowing = useTerminalStore((state) => state.centerMode === 'terminal');
   const { selectedProjectId } = useProjectStore();
   const {
     messages: allLoadedMessages,
@@ -57,14 +58,6 @@ export function ChatPanel() {
   const [showAllMessages, setShowAllMessages] = useState(
     selectedAgentId !== null && selectedAgentId !== 'supervisor'
   );
-
-  // Reset to default when selected agent changes — done synchronously during render
-  // (not in useEffect) to avoid a visible intermediate render with the wrong filter.
-  const [prevAgentId, setPrevAgentId] = useState(selectedAgentId);
-  if (prevAgentId !== selectedAgentId) {
-    setPrevAgentId(selectedAgentId);
-    setShowAllMessages(selectedAgentId !== null && selectedAgentId !== 'supervisor');
-  }
 
   // Filter messages for selected agent
   // Also filter by project when a project is selected
@@ -190,24 +183,8 @@ export function ChatPanel() {
         textarea.value = '';
       }
     },
-    // Disabled while the terminal covers the chat (ChatPanel stays mounted
-    // behind it) so Cmd+K/Cmd+Enter/Escape don't act on the hidden input.
-    enabled: !selectedFile && !terminalShowing,
+    enabled: true,
   });
-
-  // If a file is selected, show the file viewer instead of chat
-  if (selectedFile) {
-    return (
-      <div className="h-full flex flex-col">
-        <MemoryViewer file={selectedFile} />
-      </div>
-    );
-  }
-
-  // If viewing an archived agent, show the archive view
-  if (viewingArchivedId) {
-    return <ArchivedAgentView archiveId={viewingArchivedId} />;
-  }
 
   return (
     <div className="h-full flex flex-col">

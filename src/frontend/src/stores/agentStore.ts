@@ -1,55 +1,38 @@
 import { create } from 'zustand';
-import type { Agent, ArchivedAgentSummary } from '../types/agent';
-import { useViewerStore } from './viewerStore';
+import type { Agent, ArchivedAgentSummary } from '@/types/agent';
 
+/**
+ * Server-cache store for agent data, fed by REST snapshots (useAgents) and
+ * WebSocket deltas (useWebSocket). Holds DATA ONLY — selection state lives in
+ * the URL (see lib/navigation.ts), not here.
+ */
 interface AgentState {
   agents: Agent[];
-  selectedAgentId: string | null;
   archivedAgents: ArchivedAgentSummary[];
-  viewingArchivedId: string | null;
   setAgents: (agents: Agent[]) => void;
-  updateAgent: (id: string, updates: Partial<Agent>) => void;
-  selectAgent: (id: string | null) => void;
+  /** Idempotent merge-by-id; unknown ids are ignored (snapshot owns membership). */
+  updateAgent: (agentId: string, updates: Partial<Agent>) => void;
   setArchivedAgents: (agents: ArchivedAgentSummary[]) => void;
   addArchivedAgent: (agent: ArchivedAgentSummary) => void;
-  viewArchive: (id: string | null) => void;
 }
 
-export const useAgentStore = create<AgentState>((set) => ({
+export const useAgentStore = create<AgentState>()((set) => ({
   agents: [],
-  selectedAgentId: null,
   archivedAgents: [],
-  viewingArchivedId: null,
 
   setAgents: (agents) => set({ agents }),
 
-  updateAgent: (id, updates) =>
+  updateAgent: (agentId, updates) =>
     set((state) => ({
-      agents: state.agents.map((agent) =>
-        agent.id === id ? { ...agent, ...updates } : agent
-      ),
+      agents: state.agents.map((a) => (a.id === agentId ? { ...a, ...updates } : a)),
     })),
 
-  selectAgent: (id) => {
-    // Clear file selection and archived view when switching to an agent
-    useViewerStore.getState().clearSelectedFile();
-    set({ selectedAgentId: id, viewingArchivedId: null });
-  },
-
-  setArchivedAgents: (agents) => set({ archivedAgents: agents }),
+  setArchivedAgents: (archivedAgents) => set({ archivedAgents }),
 
   addArchivedAgent: (agent) =>
-    set((state) => {
-      // Avoid duplicates
-      if (state.archivedAgents.some((a) => a.id === agent.id)) {
-        return state;
-      }
-      return { archivedAgents: [agent, ...state.archivedAgents] };
-    }),
-
-  viewArchive: (id) => {
-    // Clear file selection when viewing archive
-    useViewerStore.getState().clearSelectedFile();
-    set({ viewingArchivedId: id, selectedAgentId: null });
-  },
+    set((state) => ({
+      archivedAgents: state.archivedAgents.some((a) => a.id === agent.id)
+        ? state.archivedAgents
+        : [agent, ...state.archivedAgents],
+    })),
 }));

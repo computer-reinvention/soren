@@ -1,54 +1,43 @@
-import { useEffect, useRef } from 'react';
-import { ChatPanel } from '@/components/chat/ChatPanel';
+import { useEffect } from 'react';
+import { Outlet, useLocation } from 'react-router-dom';
 import { WebTerminal } from '@/components/terminal/WebTerminal';
+import { CenterTabs } from './CenterTabs';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { useTerminalStore } from '@/stores/terminalStore';
-import { useAgentStore } from '@/stores/agentStore';
-import { useViewerStore } from '@/stores/viewerStore';
+import { routes } from '@/lib/navigation';
 
 /**
- * Center panel host: switches between the chat stack (ChatPanel, which
- * itself gates on agentStore/viewerStore selection) and the web terminal.
- *
- * Once opened, the terminal stays mounted with display:none when the user
- * flips back to chat, so the WS session and scrollback survive tab flips;
- * WebTerminal re-fits itself on re-show. The terminal never touches
- * agent/file selection, so closing it restores exactly what was shown
- * before.
+ * Center panel host: tab bar + routed content. The terminal is special-cased:
+ * once opened it stays mounted (hidden) across route changes so the PTY
+ * session and scrollback survive tab flips.
  */
 export function CenterPanel() {
-  const centerMode = useTerminalStore((s) => s.centerMode);
+  const location = useLocation();
+  const isTerminal = location.pathname === routes.terminal();
   const hasOpenedTerminal = useTerminalStore((s) => s.hasOpenedTerminal);
-  const setCenterMode = useTerminalStore((s) => s.setCenterMode);
-  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
-  const viewingArchivedId = useAgentStore((s) => s.viewingArchivedId);
-  const selectedFile = useViewerStore((s) => s.selectedFile);
+  const markTerminalOpened = useTerminalStore((s) => s.markTerminalOpened);
 
-  const isTerminal = centerMode === 'terminal';
-
-  // If the user picks a new agent/file/archive in the Explorer while the
-  // terminal is showing, flip back to chat so the selection is visible.
-  // Change-detection via ref so opening the terminal itself never triggers it.
-  const prevSelectionRef = useRef({ selectedAgentId, viewingArchivedId, selectedFile });
   useEffect(() => {
-    const prev = prevSelectionRef.current;
-    const changed =
-      prev.selectedAgentId !== selectedAgentId ||
-      prev.viewingArchivedId !== viewingArchivedId ||
-      prev.selectedFile !== selectedFile;
-    prevSelectionRef.current = { selectedAgentId, viewingArchivedId, selectedFile };
-    if (changed) setCenterMode('chat');
-  }, [selectedAgentId, viewingArchivedId, selectedFile, setCenterMode]);
+    if (isTerminal) markTerminalOpened();
+  }, [isTerminal, markTerminalOpened]);
 
   return (
-    <div className="relative h-full">
-      <div className={isTerminal ? 'hidden' : 'h-full'}>
-        <ChatPanel />
-      </div>
-      {hasOpenedTerminal && (
-        <div className={isTerminal ? 'h-full' : 'hidden'}>
-          <WebTerminal active={isTerminal} />
+    <div className="flex h-full flex-col">
+      <CenterTabs />
+      <div className="relative min-h-0 flex-1">
+        <div className={isTerminal ? 'hidden' : 'h-full'}>
+          <ErrorBoundary label="center panel">
+            <Outlet />
+          </ErrorBoundary>
         </div>
-      )}
+        {(hasOpenedTerminal || isTerminal) && (
+          <div className={isTerminal ? 'h-full' : 'hidden'}>
+            <ErrorBoundary label="terminal">
+              <WebTerminal active={isTerminal} />
+            </ErrorBoundary>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

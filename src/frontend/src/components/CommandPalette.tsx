@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { Bot, Moon, Sun, Monitor, Terminal } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
+import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo } from 'lucide-react';
 import {
   CommandDialog,
   CommandEmpty,
@@ -11,15 +12,14 @@ import {
 } from '@/components/ui/command';
 import { useAgentStore } from '@/stores/agentStore';
 import { useThemeStore } from '@/stores/themeStore';
-import { useTerminalStore } from '@/stores/terminalStore';
+import { routes } from '@/lib/navigation';
 
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
 
   const agents = useAgentStore((s) => s.agents);
-  const selectAgent = useAgentStore((s) => s.selectAgent);
   const { theme, setTheme, toggleTheme } = useThemeStore();
-  const setCenterMode = useTerminalStore((s) => s.setCenterMode);
 
   // Cmd+K / Ctrl+K to open
   useEffect(() => {
@@ -65,7 +65,7 @@ export function CommandPalette() {
             <CommandItem
               key={agent.id}
               value={`agent ${agent.display_name || agent.name} ${agent.name}`}
-              onSelect={() => runAction(() => selectAgent(agent.id))}
+              onSelect={() => runAction(() => navigate(routes.agent(agent.id)))}
             >
               <Bot className="h-4 w-4 mr-2 shrink-0" />
               <span className="font-mono text-sm">
@@ -76,6 +76,29 @@ export function CommandPalette() {
               </span>
             </CommandItem>
           ))}
+        </CommandGroup>
+
+        <CommandGroup heading="Navigate">
+          <CommandItem value="overview home" onSelect={() => runAction(() => navigate(routes.overview()))}>
+            <LayoutDashboard className="h-4 w-4 mr-2" />
+            <span>Overview</span>
+            <CommandShortcut>⌘1</CommandShortcut>
+          </CommandItem>
+          <CommandItem value="chat firehose" onSelect={() => runAction(() => navigate(routes.chat()))}>
+            <MessageSquare className="h-4 w-4 mr-2" />
+            <span>Chat</span>
+            <CommandShortcut>⌘2</CommandShortcut>
+          </CommandItem>
+          <CommandItem value="open terminal" onSelect={() => runAction(() => navigate(routes.terminal()))}>
+            <Terminal className="h-4 w-4 mr-2" />
+            <span>Terminal</span>
+            <CommandShortcut>⌘3</CommandShortcut>
+          </CommandItem>
+          <CommandItem value="tasks board" onSelect={() => runAction(() => navigate(routes.tasks()))}>
+            <ListTodo className="h-4 w-4 mr-2" />
+            <span>Tasks</span>
+            <CommandShortcut>⌘4</CommandShortcut>
+          </CommandItem>
         </CommandGroup>
 
         <CommandGroup heading="Actions">
@@ -114,14 +137,6 @@ export function CommandPalette() {
           >
             <Monitor className="h-4 w-4 mr-2" />
             <span>Theme: System</span>
-          </CommandItem>
-
-          <CommandItem
-            value="open terminal"
-            onSelect={() => runAction(() => setCenterMode('terminal'))}
-          >
-            <Terminal className="h-4 w-4 mr-2" />
-            <span>Open terminal</span>
           </CommandItem>
         </CommandGroup>
       </CommandList>

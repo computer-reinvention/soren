@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { routes } from '../../lib/navigation';
 import { useThemeStore } from '../../stores/themeStore';
-import { useTerminalStore } from '../../stores/terminalStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjects } from '../../hooks/useProjects';
 import { RegisterProjectDialog } from '../projects/RegisterProjectDialog';
@@ -22,9 +23,21 @@ export function Header() {
   const { data: projectsData } = useProjects();
   const [registerOpen, setRegisterOpen] = useState(false);
   const { username, isAuthenticated, logout } = useAuthStore();
-  const centerMode = useTerminalStore((state) => state.centerMode);
-  const toggleTerminal = useTerminalStore((state) => state.toggleTerminal);
-  const terminalActive = centerMode === 'terminal';
+  const navigate = useNavigate();
+  const location = useLocation();
+  const terminalActive = location.pathname === routes.terminal();
+
+  // Toggle between the terminal route and the previous center view. Going
+  // "back" from the terminal uses history when we came from inside the app,
+  // falling back to the chat view for direct deep links.
+  const toggleTerminal = useCallback(() => {
+    if (terminalActive) {
+      if (window.history.length > 1) navigate(-1);
+      else navigate(routes.chat());
+    } else {
+      navigate(routes.terminal());
+    }
+  }, [terminalActive, navigate]);
 
   // Ctrl+` toggles the terminal (WebTerminal lets this combo pass through
   // its own key handling so it works while the terminal is focused too).

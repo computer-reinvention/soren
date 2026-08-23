@@ -1,8 +1,9 @@
 import { Fragment, useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils';
-import { useAgentStore } from '@/stores/agentStore';
+import { routes } from '@/lib/navigation';
 import { Copy, Check } from 'lucide-react';
 import { codeToHtml, type BundledLanguage } from 'shiki/bundle/web';
 
@@ -56,16 +57,14 @@ function renderMentionsInText(text: string): React.ReactNode {
 
     const mentionName = match[1];
     parts.push(
-      <button
+      <Link
         key={key++}
+        to={routes.agent(mentionName)}
         className="inline-flex items-center bg-primary/20 text-primary font-medium rounded px-1 py-0.5 text-[0.9em] hover:bg-primary/30 transition-colors cursor-pointer"
-        onClick={(e) => {
-          e.stopPropagation();
-          useAgentStore.getState().selectAgent(mentionName);
-        }}
+        onClick={(e) => e.stopPropagation()}
       >
         {mentionFull}
-      </button>
+      </Link>
     );
 
     lastIndex = matchIndex + mentionFull.length;

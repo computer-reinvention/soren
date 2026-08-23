@@ -7,10 +7,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { Link } from 'react-router-dom';
 import { MarkdownContent } from './MarkdownContent';
 import { MessageActions } from './MessageActions';
 import { useAgentStore } from '@/stores/agentStore';
 import { useAuthStore } from '@/stores/authStore';
+import { routes } from '@/lib/navigation';
 import { ChevronDown, ChevronUp, HeartPulse, ShieldAlert, Radio, ImageIcon } from 'lucide-react';
 import { format } from 'date-fns';
 import { InterleavedTimeline } from './InterleavedTimeline';
@@ -206,15 +208,17 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
         <div className="flex items-center gap-1 truncate">
           {isCurrentUser ? (
             <span className="text-xs font-mono font-medium text-primary truncate">you</span>
+          ) : isUser ? (
+            <span className="text-xs font-mono font-medium text-foreground truncate">
+              {displayName}
+            </span>
           ) : (
-            <button
+            <Link
+              to={routes.agent(message.from_agent)}
               className="text-xs font-mono font-medium text-foreground hover:text-primary truncate transition-colors cursor-pointer"
-              onClick={() => {
-                if (!isUser) useAgentStore.getState().selectAgent(message.from_agent);
-              }}
             >
               {displayName}
-            </button>
+            </Link>
           )}
           {showToIndicator && (
             <span className="text-2xs text-muted-foreground/40 font-mono shrink-0">

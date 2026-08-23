@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import asyncio
@@ -236,7 +237,25 @@ app.include_router(terminal.router, prefix="/api/terminal", tags=["terminal"])
 # Static files (frontend) - only mount if directory exists
 frontend_dir = Path("src/frontend/dist")
 if frontend_dir.exists():
-    app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
+
+    class SPAStaticFiles(StaticFiles):
+        """Serve the SPA: unknown non-API paths fall back to index.html.
+
+        The dashboard uses client-side routing (react-router). Deep links like
+        /agents/supervisor must serve index.html and let the router resolve;
+        without this, hard refreshes on any route 404. Starlette raises
+        HTTPException(404) for missing files, so we catch — not inspect — it.
+        """
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code == 404 and not path.startswith("api"):
+                    return await super().get_response("index.html", scope)
+                raise
+
+    app.mount("/", SPAStaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
 
 if __name__ == "__main__":

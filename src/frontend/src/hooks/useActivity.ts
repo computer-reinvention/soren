@@ -1,12 +1,12 @@
 import { useActivityStore } from '../stores/activityStore';
-import { useAgentStore } from '../stores/agentStore';
 import { useProjectStore } from '../stores/projectStore';
+import { useRouteAgentId } from '../lib/navigation';
 import { useProjectAgents } from './useProjects';
 import { useMemo } from 'react';
 
 export function useActivity() {
   const { activities, clearActivities } = useActivityStore();
-  const { selectedAgentId } = useAgentStore();
+  const selectedAgentId = useRouteAgentId();
   const { selectedProjectId } = useProjectStore();
   const { data: projectAgentsData } = useProjectAgents(selectedProjectId);
 

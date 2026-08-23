@@ -3,6 +3,7 @@ import { useActivity } from '@/hooks/useActivity';
 import { useLayoutStore } from '@/stores/layoutStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useAgentStore } from '@/stores/agentStore';
+import { useRouteAgentId } from '@/lib/navigation';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -10,7 +11,6 @@ import { ActivityTimelineItem } from './ActivityTimelineItem';
 import { ActivityFilters } from './ActivityFilters';
 import { SuggestedActions } from './SuggestedActions';
 import { ThoughtStream } from './ThoughtStream';
-import { TasksPanel } from '@/components/tasks/TasksPanel';
 import { ObservabilityPanel } from '@/components/observability/ObservabilityPanel';
 import { PanelHeader } from '@/components/layout/PanelHeader';
 import { Activity as ActivityIcon, PanelRightClose, PanelRightOpen } from 'lucide-react';
@@ -22,7 +22,8 @@ export function ActivityTimeline() {
   const { activities } = useActivity();
   const { activityPanelCollapsed, toggleActivityPanel } = useLayoutStore();
   const { selectedProjectId } = useProjectStore();
-  const { selectedAgentId, agents } = useAgentStore();
+  const agents = useAgentStore((s) => s.agents);
+  const selectedAgentId = useRouteAgentId();
   const [filters, setFilters] = useState<ActivityType[]>([]);
 
   // Compute panel title based on selected agent
@@ -88,7 +89,6 @@ export function ActivityTimeline() {
           <TabsList className="h-7 w-full">
             <TabsTrigger value="thoughts" className="text-xs h-5 flex-1">Thoughts</TabsTrigger>
             <TabsTrigger value="activity" className="text-xs h-5 flex-1">Events</TabsTrigger>
-            <TabsTrigger value="tasks" className="text-xs h-5 flex-1">Tasks</TabsTrigger>
             <TabsTrigger value="metrics" className="text-xs h-5 flex-1">Metrics</TabsTrigger>
           </TabsList>
         </div>
@@ -123,10 +123,6 @@ export function ActivityTimeline() {
               )}
             </div>
           </ScrollArea>
-        </TabsContent>
-
-        <TabsContent value="tasks" className="flex-1 overflow-hidden mt-2">
-          <TasksPanel />
         </TabsContent>
 
         <TabsContent value="metrics" className="flex-1 overflow-hidden mt-2">
