@@ -4,6 +4,14 @@ module.exports = {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
   	extend: {
+  		fontFamily: {
+  			mono: ['JetBrains Mono', 'Fira Code', 'SF Mono', 'Cascadia Code', 'ui-monospace', 'monospace'],
+  			sans: ['Inter', '-apple-system', 'BlinkMacSystemFont', 'system-ui', 'sans-serif'],
+  			display: ['JetBrains Mono', 'Fira Code', 'SF Mono', 'ui-monospace', 'monospace'],
+  		},
+  		fontSize: {
+  			'2xs': ['0.65rem', { lineHeight: '0.85rem' }],
+  		},
   		colors: {
   			border: 'hsl(var(--border))',
   			input: 'hsl(var(--input))',
@@ -47,7 +55,16 @@ module.exports = {
   				'accent-foreground': 'hsl(var(--sidebar-accent-foreground))',
   				border: 'hsl(var(--sidebar-border))',
   				ring: 'hsl(var(--sidebar-ring))'
-  			}
+  			},
+  			// Operational status colors
+  			status: {
+  				green: 'hsl(var(--status-green))',
+  				amber: 'hsl(var(--status-amber))',
+  				red: 'hsl(var(--status-red))',
+  				blue: 'hsl(var(--status-blue))',
+  				purple: 'hsl(var(--status-purple))',
+  				cyan: 'hsl(var(--status-cyan))',
+  			},
   		},
   		borderRadius: {
   			lg: 'var(--radius)',

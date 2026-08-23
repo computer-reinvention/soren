@@ -1,7 +1,18 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-type Theme = 'light' | 'dark';
+type Theme = 'light' | 'dark' | 'system';
+
+function getSystemTheme(): 'light' | 'dark' {
+  if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark';
+  }
+  return 'dark'; // default to dark for a coding tool
+}
+
+function resolveTheme(theme: Theme): 'light' | 'dark' {
+  return theme === 'system' ? getSystemTheme() : theme;
+}
 
 interface ThemeState {
   theme: Theme;
@@ -12,29 +23,40 @@ interface ThemeState {
 export const useThemeStore = create<ThemeState>()(
   persist(
     (set, get) => ({
-      theme: 'light',
+      theme: 'system',
       setTheme: (theme) => {
         set({ theme });
-        applyTheme(theme);
+        applyTheme(resolveTheme(theme));
       },
       toggleTheme: () => {
-        const newTheme = get().theme === 'dark' ? 'light' : 'dark';
+        const current = resolveTheme(get().theme);
+        const newTheme: Theme = current === 'dark' ? 'light' : 'dark';
         set({ theme: newTheme });
-        applyTheme(newTheme);
+        applyTheme(resolveTheme(newTheme));
       },
     }),
     {
       name: 'soren-theme',
       onRehydrateStorage: () => (state) => {
         if (state) {
-          applyTheme(state.theme);
+          applyTheme(resolveTheme(state.theme));
         }
       },
     }
   )
 );
 
-function applyTheme(theme: Theme) {
+// Listen for OS theme changes when in 'system' mode
+if (typeof window !== 'undefined') {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    const store = useThemeStore.getState();
+    if (store.theme === 'system') {
+      applyTheme(getSystemTheme());
+    }
+  });
+}
+
+function applyTheme(theme: 'light' | 'dark') {
   const root = document.documentElement;
   if (theme === 'dark') {
     root.classList.add('dark');

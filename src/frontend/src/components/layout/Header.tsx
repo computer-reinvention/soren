@@ -126,10 +126,10 @@ export function Header() {
             onClick={toggleTheme}
             className="h-8 w-8"
           >
-          {theme === 'dark' ? (
-            <Sun className="h-4 w-4 text-yellow-500" />
-          ) : (
+          {theme === 'light' ? (
             <Moon className="h-4 w-4 text-slate-600" />
+          ) : (
+            <Sun className="h-4 w-4 text-yellow-500" />
           )}
           <span className="sr-only">Toggle theme</span>
           </Button>

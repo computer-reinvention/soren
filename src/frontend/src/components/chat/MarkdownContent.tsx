@@ -1,8 +1,10 @@
-import { Fragment } from 'react';
+import { Fragment, useState, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn } from '@/lib/utils';
 import { useAgentStore } from '@/stores/agentStore';
+import { Copy, Check } from 'lucide-react';
+import { codeToHtml, type BundledLanguage } from 'shiki';
 
 interface MarkdownContentProps {
   content: string;
@@ -10,6 +12,30 @@ interface MarkdownContentProps {
 }
 
 const MENTION_REGEX = /@([\w-]+)/g;
+
+// Languages to support — add more as needed, shiki lazy-loads grammars
+const SUPPORTED_LANGS = new Set<string>([
+  'javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx',
+  'python', 'py', 'bash', 'sh', 'shell', 'zsh',
+  'json', 'yaml', 'yml', 'toml', 'css', 'html', 'xml',
+  'sql', 'rust', 'go', 'c', 'cpp', 'java', 'ruby', 'rb',
+  'markdown', 'md', 'diff', 'dockerfile', 'makefile',
+]);
+
+function normalizeLanguage(lang: string | undefined): BundledLanguage | null {
+  if (!lang) return null;
+  const l = lang.toLowerCase().replace('language-', '');
+  // Map aliases
+  const aliases: Record<string, string> = {
+    js: 'javascript', ts: 'typescript', py: 'python',
+    sh: 'bash', shell: 'bash', zsh: 'bash',
+    yml: 'yaml', rb: 'ruby', md: 'markdown',
+  };
+  const resolved = aliases[l] || l;
+  return SUPPORTED_LANGS.has(l) || SUPPORTED_LANGS.has(resolved)
+    ? (resolved as BundledLanguage)
+    : null;
+}
 
 /**
  * Splits a text string into parts, highlighting @mentions.
@@ -53,34 +79,126 @@ function renderMentionsInText(text: string): React.ReactNode {
   return <>{parts}</>;
 }
 
+/** Copy-to-clipboard button for code blocks */
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for non-secure contexts
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }, [text]);
+
+  return (
+    <button
+      onClick={handleCopy}
+      className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 hover:bg-background border border-border/50 text-muted-foreground hover:text-foreground transition-all opacity-0 group-hover:opacity-100"
+      title={copied ? 'Copied!' : 'Copy code'}
+    >
+      {copied ? (
+        <Check className="h-3.5 w-3.5 text-status-green" />
+      ) : (
+        <Copy className="h-3.5 w-3.5" />
+      )}
+    </button>
+  );
+}
+
+/** Syntax-highlighted code block using shiki */
+function HighlightedCode({ code, language, className }: { code: string; language: string | undefined; className?: string }) {
+  const [html, setHtml] = useState<string | null>(null);
+  const lang = normalizeLanguage(language);
+
+  useEffect(() => {
+    if (!lang) {
+      setHtml(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    codeToHtml(code, {
+      lang,
+      theme: 'github-dark-default',
+    }).then((result) => {
+      if (!cancelled) setHtml(result);
+    }).catch(() => {
+      if (!cancelled) setHtml(null);
+    });
+
+    return () => { cancelled = true; };
+  }, [code, lang]);
+
+  if (html) {
+    return (
+      <div
+        className={cn('shiki-wrapper text-xs font-mono [&_pre]:!bg-transparent [&_pre]:!p-0 [&_pre]:!m-0 [&_code]:!bg-transparent', className)}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  }
+
+  // Fallback: plain code
+  return (
+    <code className={cn('text-xs font-mono', className)}>
+      {code}
+    </code>
+  );
+}
+
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
   return (
     <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          // Style code blocks
-          pre: ({ children, ...props }) => (
-            <pre
-              className="bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded-md p-3 overflow-x-auto text-xs border border-zinc-200 dark:border-zinc-700"
-              {...props}
-            >
-              {children}
-            </pre>
-          ),
-          code: ({ children, className, ...props }) => {
-            const isInline = !className;
+          // Code blocks with syntax highlighting and copy button
+          pre: ({ children, ...props }) => {
+            // Extract code text for copy button
+            const codeElement = (children as React.ReactElement)?.props;
+            const codeText = typeof codeElement?.children === 'string' ? codeElement.children : '';
+
+            return (
+              <div className="group relative">
+                <pre
+                  className="bg-card rounded-md p-3 overflow-x-auto text-xs border border-border font-mono"
+                  {...props}
+                >
+                  {children}
+                </pre>
+                {codeText && <CopyButton text={codeText.replace(/\n$/, '')} />}
+              </div>
+            );
+          },
+          code: ({ children, className: codeClassName, ...props }) => {
+            const isInline = !codeClassName;
+            const language = codeClassName?.replace('language-', '');
+            const codeString = typeof children === 'string' ? children : String(children || '');
+
             return isInline ? (
               <code
-                className="bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 rounded px-1.5 py-0.5 text-xs font-mono border border-zinc-200/60 dark:border-zinc-700/60"
+                className="bg-card text-foreground rounded px-1.5 py-0.5 text-xs font-mono border border-border/60"
                 {...props}
               >
                 {children}
               </code>
             ) : (
-              <code className="text-xs font-mono" {...props}>
-                {children}
-              </code>
+              <HighlightedCode
+                code={codeString.replace(/\n$/, '')}
+                language={language}
+              />
             );
           },
           // Style links
@@ -93,6 +211,29 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
             >
               {children}
             </a>
+          ),
+          // Style tables for Terminal Console look
+          table: ({ children, ...props }) => (
+            <div className="overflow-x-auto my-2">
+              <table className="w-full text-xs font-mono border-collapse" {...props}>
+                {children}
+              </table>
+            </div>
+          ),
+          thead: ({ children, ...props }) => (
+            <thead className="border-b border-border" {...props}>
+              {children}
+            </thead>
+          ),
+          th: ({ children, ...props }) => (
+            <th className="text-left text-2xs uppercase tracking-wider text-muted-foreground font-medium px-2 py-1.5" {...props}>
+              {children}
+            </th>
+          ),
+          td: ({ children, ...props }) => (
+            <td className="px-2 py-1.5 border-b border-border/50 text-xs" {...props}>
+              {children}
+            </td>
           ),
           // Style lists
           ul: ({ children, ...props }) => (

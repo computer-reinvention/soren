@@ -28,10 +28,14 @@ function Dashboard() {
   useThoughts(); // Load historical thoughts so they persist across refreshes
   const theme = useThemeStore((state) => state.theme);
 
-  // Apply theme on mount and when it changes
+  // Theme is applied by themeStore (applyTheme + onRehydrate + system listener)
+  // This effect ensures the DOM stays in sync when the store value changes
   useEffect(() => {
     const root = document.documentElement;
-    if (theme === 'dark') {
+    const resolved = theme === 'system'
+      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'dark')
+      : theme;
+    if (resolved === 'dark') {
       root.classList.add('dark');
     } else {
       root.classList.remove('dark');
