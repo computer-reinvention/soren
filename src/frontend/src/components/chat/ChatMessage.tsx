@@ -188,7 +188,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   const showToIndicator = !isUser && !(message.from_agent === 'supervisor' && (message.to_agent === 'user'));
 
   return (
-    <div className={cn('group flex gap-0 py-1 hover:bg-muted/20 transition-colors rounded-sm px-1 -mx-1')}>
+    <div className={cn('group relative flex gap-0 py-1 hover:bg-muted/20 transition-colors rounded-sm px-1 -mx-1')}>
       {/* Timestamp column - fixed width */}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -226,39 +226,46 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
 
       {/* Content column */}
       <div className="flex-1 min-w-0">
-        {/* Badges row */}
-        <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-          {!isUser && agentData && (() => {
-            const label = getAgentBadgeLabel(agentData);
-            return (
+        {/* Badges row — only render when there is visible static content */}
+        {((!isUser && agentData) || prefixInfo || (collapseCount && collapseCount > 1)) && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
+            {!isUser && agentData && (() => {
+              const label = getAgentBadgeLabel(agentData);
+              return (
+                <Badge
+                  variant="outline"
+                  className={cn('text-2xs h-4 px-1 font-mono', getAgentBadgeColor(label))}
+                >
+                  {label}
+                </Badge>
+              );
+            })()}
+            {prefixInfo && (
               <Badge
                 variant="outline"
-                className={cn('text-2xs h-4 px-1 font-mono', getAgentBadgeColor(label))}
+                className={cn('text-2xs h-4 px-1 font-mono font-semibold', prefixInfo.className)}
               >
-                {label}
+                {prefixInfo.label}
               </Badge>
-            );
-          })()}
-          {prefixInfo && (
-            <Badge
-              variant="outline"
-              className={cn('text-2xs h-4 px-1 font-mono font-semibold', prefixInfo.className)}
-            >
-              {prefixInfo.label}
-            </Badge>
-          )}
-          {collapseCount && collapseCount > 1 && (
-            <span className="text-2xs font-mono text-muted-foreground/50">
-              x{collapseCount}
-            </span>
-          )}
-          {/* Actions on hover */}
-          <MessageActions
-            content={message.content}
-            isUser={isCurrentUser}
-            className="ml-auto"
-          />
-        </div>
+            )}
+            {collapseCount && collapseCount > 1 && (
+              <span className="text-2xs font-mono text-muted-foreground/50">
+                x{collapseCount}
+              </span>
+            )}
+            <MessageActions
+              content={message.content}
+              isUser={isCurrentUser}
+              className="ml-auto"
+            />
+          </div>
+        )}
+        {/* Actions for user messages — absolutely positioned */}
+        {!(!isUser && agentData) && !prefixInfo && !(collapseCount && collapseCount > 1) && (
+          <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <MessageActions content={message.content} isUser={isCurrentUser} />
+          </div>
+        )}
 
         {/* Tool calls / thoughts timeline */}
         {!isUser && ((thoughts && thoughts.length > 0) || (toolCalls && toolCalls.length > 0)) && (
