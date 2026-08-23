@@ -223,7 +223,10 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
     },
 
     // ── PreToolUse: structural write guards ────────────────────────────────
-    // Three layers, all bypassed by SOREN_PROTECTED_OVERRIDE=1 (manual ops):
+    // Four layers, all bypassed by SOREN_PROTECTED_OVERRIDE=1 (manual ops):
+    //   0. Lifecycle guard  — full-stack `soren.sh stop|restart` and killing
+    //                         the main tmux session are human-only (sudo-
+    //                         gated in the script; blocked outright here).
     //   1. Worktree jail    — a worker spawned with --worktree may not write
     //                         to the live checkout at all; its writes belong
     //                         in its worktree (merged via supervisor review).
@@ -296,6 +299,28 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       if (input.tool === "bash") {
         const command: string = output.args?.command ?? input.args?.command ?? ""
         if (!command) return
+
+        // Layer 0: full-stack lifecycle guard. `soren.sh stop|restart` (and
+        // killing the main tmux session directly) destroys every agent —
+        // including the one running the command, mid-execution. Both outages
+        // on 2026-08-23 were exactly this: the supervisor self-decapitated
+        // via `restart`, then the guard-implementing worker nuked the system
+        // again by "testing" its own override against the live stack. The
+        // script side is sudo-gated (human-only); this block makes agents
+        // fail fast with guidance instead of hanging on a password prompt.
+        // Applies in worktrees too: the session/port targets are global.
+        const fullStackLifecycle = /soren\.sh['"]?\s+(stop|restart)\b/.test(command)
+        const killsMainSession =
+          /tmux\s+kill-session\s+-t\s+("?\$\{?SOREN_SESSION\}?"?|['"]?soren['"]?)($|[\s'";&|])/.test(command)
+        if (fullStackLifecycle || killsMainSession) {
+          throw new Error(
+            `[SOREN] Human-only command blocked: full-stack stop/restart (or killing the main tmux session) ` +
+              `takes down every agent including you, mid-command — this caused both 2026-08-23 outages. ` +
+              `It is sudo-gated at the script level; there is no agent override and nothing to "test" against ` +
+              `the live system. Server-only restart: ./soren.sh detached-restart --restart --detach`,
+          )
+        }
+
         const writey =
           /(^|[\s|;&])(>>?|sed\s+-i|tee\s|mv\s|cp\s|rm\s|chmod\s|truncate\s|git\s+(checkout|restore)\s)/.test(command)
         if (!writey) return

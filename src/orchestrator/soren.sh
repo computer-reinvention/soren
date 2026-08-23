@@ -17,6 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/lib/common.sh"
 source "${SCRIPT_DIR}/lib/logging.sh"
 
+# Spoof-proofing: the human-gate flag is process-internal state set only by
+# require_human() after verification. It must never arrive via the environment.
+unset _SOREN_HUMAN_OK
+
 # Configuration
 SOREN_SESSION="${SOREN_SESSION:-soren}"
 SOREN_PORT="${SOREN_PORT:-8000}"
@@ -30,6 +34,95 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 BOLD='\033[1m'
 NC='\033[0m'
+
+#───────────────────────────────────────────────────────────────────────────────
+# Human gate — full-stack 'stop' and 'restart' are sudo-guarded
+#
+# These commands kill the tmux session: every agent, the monitor, and (when
+# invoked from inside the session) the invoker itself, mid-command. Agents did
+# exactly this twice on 2026-08-23 — the supervisor self-decapitated running
+# 'restart', then the worker sent to fix it nuked the system again testing its
+# own env-var override. Env overrides are spoofable; sudo is not.
+#
+# Rule: stop/restart require proof-of-human via sudo. Agents have no sudo
+# password. The sanctioned agent path is:  soren.sh detached-restart --restart
+#
+# Accepted proofs (checked in order):
+#   1. _SOREN_HUMAN_OK=1        process-internal only (restart -> stop chain);
+#                               force-unset at startup, cannot come from env
+#   2. EUID 0 via sudo          'sudo ./soren.sh stop' — plants a root-owned
+#                               single-use token and re-execs as $SUDO_USER,
+#                               because the work must NOT run as root (tmux
+#                               sockets are per-user; root would miss the
+#                               user's tmux server entirely)
+#   3. fresh root-owned token   minted by (2) within the last 60s; agents
+#                               cannot forge root-owned files
+#   4. interactive 'sudo -v'    inline password prompt on this TTY
+#───────────────────────────────────────────────────────────────────────────────
+
+_HUMAN_GATE_TOKEN="${SOREN_PROJECT_ROOT:-$(pwd)}/.soren/.human-gate-token"
+
+require_human() {
+    local action="$1"
+
+    # (1) Already verified within this process (restart -> internal stop).
+    [[ "${_SOREN_HUMAN_OK:-}" == "1" ]] && return 0
+
+    # (2) Invoked as root ('sudo ./soren.sh stop'): mint token, drop to user.
+    if [[ $EUID -eq 0 ]]; then
+        if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+            if [[ ! -d "${SOREN_PROJECT_ROOT}/.soren" ]]; then
+                printf "${RED}No .soren directory at ${SOREN_PROJECT_ROOT} — nothing to ${action}${NC}\n" >&2
+                exit 1
+            fi
+            date +%s > "$_HUMAN_GATE_TOKEN"
+            chmod 644 "$_HUMAN_GATE_TOKEN"
+            exec sudo -u "$SUDO_USER" env PATH="$PATH" \
+                SOREN_SESSION="$SOREN_SESSION" SOREN_PORT="$SOREN_PORT" \
+                SOREN_HOST="$SOREN_HOST" SOREN_PROJECT_ROOT="$SOREN_PROJECT_ROOT" \
+                "${SCRIPT_DIR}/soren.sh" "$action"
+        fi
+        _SOREN_HUMAN_OK=1   # genuine root shell (no SUDO_USER): proceed as-is
+        return 0
+    fi
+
+    # (3) Fresh root-owned single-use token from path (2).
+    if [[ -f "$_HUMAN_GATE_TOKEN" ]]; then
+        local owner mtime age
+        owner=$(stat -f %u "$_HUMAN_GATE_TOKEN" 2>/dev/null || echo -1)
+        mtime=$(stat -f %m "$_HUMAN_GATE_TOKEN" 2>/dev/null || echo 0)
+        age=$(( $(date +%s) - mtime ))
+        rm -f "$_HUMAN_GATE_TOKEN" 2>/dev/null || true   # single-use, always consumed
+        if [[ "$owner" == "0" && $age -ge 0 && $age -le 60 ]]; then
+            _SOREN_HUMAN_OK=1
+            return 0
+        fi
+    fi
+
+    # Agents are refused outright — clearly, and without a prompt to hang on.
+    if [[ "${SOREN_AGENT:-}" == "true" ]]; then
+        printf "${RED}[SOREN] '${action}' is human-only (sudo-gated).${NC}\n" >&2
+        printf "  Full-stack ${action} kills the tmux session: every agent, the monitor,\n" >&2
+        printf "  and YOU — mid-command. This exact mistake caused both outages on 2026-08-23.\n" >&2
+        printf "  There is no env-var override. Do not test this against the live system.\n" >&2
+        printf "  Server-only restart (safe): ${CYAN}./soren.sh detached-restart --restart --detach${NC}\n" >&2
+        printf "  Humans run:                 ${CYAN}sudo ./soren.sh ${action}${NC}\n" >&2
+        log_status "GUARD" "Blocked '${action}' from agent ${SOREN_AGENT_NAME:-unknown} (sudo human gate)"
+        exit 87
+    fi
+
+    # (4) Interactive human: authenticate here, then continue as this user.
+    printf "${YELLOW}[SOREN] '${action}' stops the whole system (server + tmux session + all agents).${NC}\n"
+    printf "${YELLOW}        sudo authentication required — agents cannot pass this gate.${NC}\n"
+    if sudo -p "[soren human gate] sudo password for %p: " -v; then
+        _SOREN_HUMAN_OK=1
+        return 0
+    fi
+    log_status "GUARD" "Blocked '${action}': sudo authentication failed (uid $(id -u))"
+    printf "${RED}sudo authentication required for '${action}' — refused.${NC}\n" >&2
+    printf "Agents: use ${CYAN}./soren.sh detached-restart --restart --detach${NC} instead.\n" >&2
+    exit 87
+}
 
 #───────────────────────────────────────────────────────────────────────────────
 # Commands
@@ -104,8 +197,9 @@ EOF
 }
 
 cmd_stop() {
+    require_human "stop"
     log_info "Stopping soren system..."
-    log_status "SHUTDOWN" "soren.sh stop invoked"
+    log_status "SHUTDOWN" "soren.sh stop invoked (human-verified)"
 
     local STOP_TIMEOUT=15
 
@@ -177,6 +271,7 @@ cmd_stop() {
 }
 
 cmd_restart() {
+    require_human "restart"
     cmd_stop
     sleep 2
     cmd_start
@@ -283,8 +378,8 @@ cmd_help() {
     echo ""
     printf "${BOLD}Commands:${NC}\n"
     printf "  ${CYAN}start${NC}              Start the soren system (creates tmux session)\n"
-    printf "  ${CYAN}stop${NC}               Stop the soren system\n"
-    printf "  ${CYAN}restart${NC}            Restart the soren system\n"
+    printf "  ${CYAN}stop${NC}               Stop the soren system (human-only: sudo-gated)\n"
+    printf "  ${CYAN}restart${NC}            Restart the soren system (human-only: sudo-gated)\n"
     printf "  ${CYAN}status${NC}             Show system status\n"
     printf "  ${CYAN}attach${NC}             Attach to tmux session\n"
     printf "  ${CYAN}logs [type]${NC}        Tail logs (server|orch|status|all)\n"

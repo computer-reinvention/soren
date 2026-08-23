@@ -6,8 +6,8 @@
 #   ./soren.sh setup            First-time setup: check deps, install, build
 #   ./soren.sh doctor           Diagnose prerequisites, auth, and system health
 #   ./soren.sh start            Start the system (runs quick checks first)
-#   ./soren.sh stop             Stop everything
-#   ./soren.sh restart          Restart the system
+#   ./soren.sh stop             Stop everything (human-only: sudo-gated)
+#   ./soren.sh restart          Restart the system (human-only: sudo-gated)
 #   ./soren.sh status           System status
 #   ./soren.sh logs [type]      Tail logs (server|status|router|monitor)
 #   ./soren.sh attach           Attach to the tmux session

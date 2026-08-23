@@ -80,11 +80,18 @@ npm run typecheck             # typescript check
 
 ```bash
 ./soren.sh start    # start the system
-./soren.sh stop     # stop everything
+./soren.sh stop     # stop everything (HUMAN-ONLY: sudo-gated — agents are refused)
 ./soren.sh status   # status
 ./soren.sh logs     # view logs
 tmux attach -t soren                 # attach to the tmux session
 ```
+
+> **Agents:** full-stack `stop`/`restart` kill the tmux session — every agent,
+> including whoever runs the command, mid-execution (this caused both
+> 2026-08-23 outages). Both commands require sudo (proof-of-human); there is no
+> env-var override, and the soren-bridge plugin blocks them outright. To deploy
+> backend changes, use the server-only path: `./soren.sh detached-restart
+> --restart --detach`.
 
 ## Architecture
 
