@@ -170,11 +170,32 @@ async def health_scorecard():
         if a.get("status") == "SLEEPING"
     )
 
+    # Git branch and commit info
+    git_branch = "unknown"
+    git_sha = "unknown"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            git_branch = result.stdout.strip()
+        result2 = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result2.returncode == 0:
+            git_sha = result2.stdout.strip()
+    except Exception:
+        pass
+
     return {
         "uptime_seconds": uptime_seconds,
         "tasks_completed_today": tasks_completed_today,
         "budget_usage_pct": round(budget_usage_pct, 1),
         "agents_active": agents_active,
         "agents_sleeping": agents_sleeping,
+        "git_branch": git_branch,
+        "git_sha": git_sha,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
