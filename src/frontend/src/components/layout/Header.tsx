@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut } from 'lucide-react';
+import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut, Bell, BellOff } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { api } from '../../lib/api';
 import { routes } from '../../lib/navigation';
+import { requestNotificationPermission } from '../../lib/notifications';
+import { useNotificationStore } from '../../stores/notificationStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjects } from '../../hooks/useProjects';
@@ -130,6 +132,7 @@ export function Header() {
               terminal (ctrl+`)
             </TooltipContent>
           </Tooltip>
+          <NotificationToggle />
           <HeartbeatIndicator />
           <BudgetStatusline />
           <Button
@@ -167,6 +170,46 @@ export function Header() {
       </div>
       <RegisterProjectDialog open={registerOpen} onOpenChange={setRegisterOpen} />
     </header>
+  );
+}
+
+/** Bell toggle for away-state browser notifications (P3.7). */
+function NotificationToggle() {
+  const { enabled, setEnabled } = useNotificationStore();
+
+  const handleToggle = async () => {
+    if (enabled) {
+      setEnabled(false);
+      return;
+    }
+    const granted = await requestNotificationPermission();
+    setEnabled(granted);
+  };
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleToggle}
+          className="h-8 w-8"
+          aria-pressed={enabled}
+        >
+          {enabled ? (
+            <Bell className="h-4 w-4 text-emerald-500" aria-hidden />
+          ) : (
+            <BellOff className="h-4 w-4 text-muted-foreground" aria-hidden />
+          )}
+          <span className="sr-only">
+            {enabled ? 'Disable' : 'Enable'} browser notifications
+          </span>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="text-xs font-mono">
+        {enabled ? 'notifications on (fires when tab is hidden)' : 'notifications off'}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

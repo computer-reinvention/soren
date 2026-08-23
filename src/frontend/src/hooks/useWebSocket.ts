@@ -9,6 +9,7 @@ import { useAgentStore } from '../stores/agentStore';
 import { useThoughtStore } from '../stores/thoughtStore';
 import { useHeartbeatStore } from '../stores/heartbeatStore';
 import { WS_URL, RECONNECT_DELAY_BASE, RECONNECT_DELAY_MAX } from '../lib/constants';
+import { maybeNotify } from '../lib/notifications';
 import type { Activity } from '../types/activity';
 import type { AgentEvent } from '../types/agent_event';
 
@@ -138,6 +139,7 @@ export function useWebSocket() {
             }
           );
           queryClient.invalidateQueries({ queryKey: ['mailboxMessages'] });
+          maybeNotify(newMsg); // browser notification when tab is hidden (P3.7)
         }
 
         // Handle session events
