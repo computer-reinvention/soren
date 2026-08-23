@@ -6,6 +6,8 @@ export interface HeartbeatData {
   highest_priority: string | null;
   all_clear: boolean;
   received_at: string;
+  supervisor_idle_seconds: number | null;
+  supervisor_state: string | null;
   /** Epoch ms when the client received this heartbeat (set by the store). */
   clientReceivedAt: number;
 }

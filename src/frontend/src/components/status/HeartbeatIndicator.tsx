@@ -43,6 +43,7 @@ const PREF_LABELS: Record<keyof HeartbeatPrefs, { label: string; unit: string; t
 export function HeartbeatIndicator() {
   const { latest, setLatest } = useHeartbeatStore();
   const [secondsAgo, setSecondsAgo] = useState<number | null>(null);
+  const [supervisorIdleAgo, setSupervisorIdleAgo] = useState<number | null>(null);
   const [prefs, setPrefs] = useState<HeartbeatPrefs | null>(null);
   const [showConfig, setShowConfig] = useState(false);
   const [editKey, setEditKey] = useState<keyof HeartbeatPrefs | null>(null);
@@ -70,16 +71,23 @@ export function HeartbeatIndicator() {
   // Update "X seconds ago" every second — counts from when the client
   // received the heartbeat, not the server's wall-clock timestamp (which
   // is always near-current because monitor.sh re-POSTs every ~5 s).
+  // Also tick supervisor idle time: when a new heartbeat arrives with
+  // supervisor_idle_seconds = N, start ticking from N using client time.
   useEffect(() => {
     if (!latest) return;
     const update = () => {
-      const ago = Math.floor((Date.now() - latest.clientReceivedAt) / 1000);
-      setSecondsAgo(Math.max(0, ago));
+      const clientElapsed = Math.floor((Date.now() - latest.clientReceivedAt) / 1000);
+      setSecondsAgo(Math.max(0, clientElapsed));
+      if (latest.supervisor_idle_seconds != null) {
+        setSupervisorIdleAgo(Math.max(0, latest.supervisor_idle_seconds + clientElapsed));
+      } else {
+        setSupervisorIdleAgo(null);
+      }
     };
     update();
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
-  }, [latest?.clientReceivedAt]);
+  }, [latest?.clientReceivedAt, latest?.supervisor_idle_seconds]);
 
   const getStatus = useCallback((): HeartStatus => {
     if (!latest) return 'idle';
@@ -101,6 +109,12 @@ export function HeartbeatIndicator() {
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.floor(s / 60)}m ago`;
     return `${Math.floor(s / 3600)}h ago`;
+  };
+
+  const formatIdleDuration = (s: number) => {
+    if (s < 60) return `${s}s`;
+    if (s < 3600) return `${Math.floor(s / 60)}m`;
+    return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
   };
 
   const savePref = async (key: keyof HeartbeatPrefs) => {
@@ -146,14 +160,25 @@ export function HeartbeatIndicator() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
-        <DropdownMenuLabel className="flex items-center justify-between">
-          <span className="flex items-center gap-1.5">
-            <HeartIcon className="h-3.5 w-3.5 text-red-500 fill-red-500" />
-            Heartbeat
-          </span>
-          <span className="text-[11px] font-normal text-muted-foreground flex items-center gap-1">
-            <Clock className="h-3 w-3" />
-            {formatAgo(secondsAgo)}
+        <DropdownMenuLabel className="flex flex-col gap-0.5">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5">
+              <HeartIcon className="h-3.5 w-3.5 text-red-500 fill-red-500" />
+              {latest?.supervisor_state ? (
+                <span>
+                  Supervisor: {latest.supervisor_state}
+                  {supervisorIdleAgo != null && (
+                    <span className="text-muted-foreground font-normal"> (idle {formatIdleDuration(supervisorIdleAgo)})</span>
+                  )}
+                </span>
+              ) : (
+                'Heartbeat'
+              )}
+            </span>
+          </div>
+          <span className="text-[10px] font-normal text-muted-foreground flex items-center gap-1 ml-5">
+            <Clock className="h-2.5 w-2.5" />
+            Last scan {formatAgo(secondsAgo)}
           </span>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
