@@ -1,5 +1,7 @@
+import { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { Loader2 } from 'lucide-react';
 import { Layout } from './components/layout/Layout';
 import { ResizableLayout } from './components/layout/ResizableLayout';
 import { Sidebar } from './components/sidebar/Sidebar';
@@ -18,8 +20,20 @@ import { CommandPalette } from './components/CommandPalette';
 import { ShortcutHelp } from './components/ShortcutHelp';
 import { OverviewPage } from './routes/OverviewPage';
 import { AgentPage, ArchivedPage, ChatFirehosePage, FilePage } from './routes/pages';
-import { DiffPage } from './routes/DiffPage';
 import { TasksPanel } from './components/tasks/TasksPanel';
+
+// react-diff-viewer-continued is only needed on /diff/:sha — lazy-loaded so
+// it doesn't ride along in the main bundle for every other route (it was
+// adding ~150KB+ eagerly; caught via bundle inspection while adding P3.5/3.6).
+const DiffPage = lazy(() => import('./routes/DiffPage').then((m) => ({ default: m.DiffPage })));
+
+function RouteLoading() {
+  return (
+    <div className="flex h-full items-center justify-center">
+      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden />
+    </div>
+  );
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -77,7 +91,14 @@ export default function App() {
                 <Route path="/agents/:agentId" element={<AgentPage />} />
                 <Route path="/archived/:archiveId" element={<ArchivedPage />} />
                 <Route path="/files/*" element={<FilePage />} />
-                <Route path="/diff/:sha" element={<DiffPage />} />
+                <Route
+                  path="/diff/:sha"
+                  element={
+                    <Suspense fallback={<RouteLoading />}>
+                      <DiffPage />
+                    </Suspense>
+                  }
+                />
                 <Route path="/tasks" element={<TasksPanel />} />
                 {/* Terminal renders inside CenterPanel (persistent mount); the
                     route itself has no content of its own. */}

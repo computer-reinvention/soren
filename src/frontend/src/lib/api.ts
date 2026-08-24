@@ -6,7 +6,7 @@ import type { FilesystemResponse } from '../types/filesystem';
 import type { SessionListResponse, Session, SessionCreateRequest } from '../types/session';
 import type { ProjectList, Project, ProjectCreate, ProjectAgentsResponse } from '../types/project';
 import type { TeamList, Team } from '../types/team';
-import type { TaskListResponse, TaskTreeResponse, TaskStatsResponse, Task } from '../types/task';
+import type { TaskListResponse, TaskTreeResponse, TaskStatsResponse, Task, TaskDagResponse } from '../types/task';
 import { API_BASE } from './constants';
 import { useAuthStore } from '../stores/authStore';
 
@@ -424,6 +424,13 @@ export const api = {
   async getTaskStats(): Promise<TaskStatsResponse> {
     const res = await apiFetch(`${API_BASE}/api/tasks/stats`);
     if (!res.ok) throw new Error('Failed to fetch task stats');
+    return res.json();
+  },
+
+  async getTaskDag(project?: string): Promise<TaskDagResponse> {
+    const qs = project ? `?project=${encodeURIComponent(project)}` : '';
+    const res = await apiFetch(`${API_BASE}/api/tasks/dag${qs}`);
+    if (!res.ok) throw new Error('Failed to fetch task dag');
     return res.json();
   },
 

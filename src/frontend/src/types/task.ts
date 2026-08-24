@@ -38,3 +38,22 @@ export interface TaskStatsResponse {
 export type TaskStatus = 'backlog' | 'pending' | 'assigned' | 'in-progress' | 'review' | 'done' | 'blocked' | 'failed';
 export type TaskPriority = 'critical' | 'high' | 'medium' | 'low';
 export type TaskSource = 'user' | 'backlog' | 'self-generated' | 'worker-escalation' | 'system';
+
+export interface TaskDagNode {
+  id: string;
+  title: string;
+  status: string;
+  priority: string;
+  assigned_to: string;
+}
+
+/** Edge direction: from = dependency (must come first), to = dependent. */
+export interface TaskDagEdge {
+  from: string;
+  to: string;
+}
+
+export interface TaskDagResponse {
+  nodes: TaskDagNode[];
+  edges: TaskDagEdge[];
+}
