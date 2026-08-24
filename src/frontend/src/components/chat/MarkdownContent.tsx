@@ -5,7 +5,8 @@ import { Link } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { routes } from '@/lib/navigation';
 import { Copy, Check } from 'lucide-react';
-import { codeToHtml, type BundledLanguage } from 'shiki/bundle/web';
+import { codeToHtml } from 'shiki/bundle/web';
+import { normalizeLanguage } from '@/lib/syntax';
 
 interface MarkdownContentProps {
   content: string;
@@ -13,31 +14,6 @@ interface MarkdownContentProps {
 }
 
 const MENTION_REGEX = /@([\w-]+)/g;
-
-// Languages available in shiki/bundle/web — curated subset for common web/dev use
-const SUPPORTED_LANGS = new Set<string>([
-  'javascript', 'js', 'typescript', 'ts', 'tsx', 'jsx',
-  'python', 'py', 'bash', 'sh', 'shell', 'shellscript', 'zsh',
-  'json', 'json5', 'jsonc', 'yaml', 'yml', 'css', 'html', 'xml',
-  'sql', 'c', 'cpp', 'c++', 'java', 'markdown', 'md', 'mdx',
-  'less', 'scss', 'sass', 'svelte', 'vue', 'php',
-  'graphql', 'gql', 'http', 'hurl', 'julia', 'jl', 'r',
-]);
-
-function normalizeLanguage(lang: string | undefined): BundledLanguage | null {
-  if (!lang) return null;
-  const l = lang.toLowerCase().replace('language-', '');
-  // Map aliases
-  const aliases: Record<string, string> = {
-    js: 'javascript', ts: 'typescript', py: 'python',
-    sh: 'bash', shell: 'bash', zsh: 'bash',
-    yml: 'yaml', rb: 'ruby', md: 'markdown',
-  };
-  const resolved = aliases[l] || l;
-  return SUPPORTED_LANGS.has(l) || SUPPORTED_LANGS.has(resolved)
-    ? (resolved as BundledLanguage)
-    : null;
-}
 
 /**
  * Splits a text string into parts, highlighting @mentions.

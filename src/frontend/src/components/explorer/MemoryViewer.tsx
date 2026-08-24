@@ -7,6 +7,8 @@ import type { FileTreeItem } from './FileTree';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { API_BASE } from '@/lib/constants';
+import { CodeViewer } from '@/components/code/CodeViewer';
+import { languageFromFilename } from '@/lib/syntax';
 
 // File type detection helpers
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico', '.bmp'];
@@ -55,6 +57,7 @@ export function MemoryViewer({ file }: MemoryViewerProps) {
   const isStatusLog = file.name === 'status.log';
   const isMarkdown = file.name.endsWith('.md');
   const isJournalEntry = file.path.includes('/journal/');
+  const isCode = !isMarkdown && !isJournalEntry && languageFromFilename(file.name) !== null;
 
   // Get appropriate icon for file type
   const FileIcon = fileType === 'image' ? Image
@@ -89,16 +92,18 @@ export function MemoryViewer({ file }: MemoryViewerProps) {
             )}
           </div>
         </div>
+      ) : isLoading ? (
+        <div className="p-3 space-y-2">
+          <Skeleton className="h-4 w-full" />
+          <Skeleton className="h-4 w-3/4" />
+          <Skeleton className="h-4 w-1/2" />
+        </div>
+      ) : isCode ? (
+        <CodeViewer code={content || ''} filename={file.name} className="flex-1 min-h-0" />
       ) : (
         <ScrollArea className="flex-1">
           <div className="p-3">
-            {isLoading ? (
-              <div className="space-y-2">
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-3/4" />
-                <Skeleton className="h-4 w-1/2" />
-              </div>
-            ) : isMarkdown || isJournalEntry ? (
+            {isMarkdown || isJournalEntry ? (
               <MarkdownViewer content={content || ''} />
             ) : (
               <pre className="text-xs font-mono whitespace-pre-wrap text-muted-foreground">

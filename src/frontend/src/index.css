@@ -159,3 +159,52 @@
 .animate-heartbeat {
   animation: heartbeat-pump 1.2s ease-in-out infinite;
 }
+
+/* CodeViewer (P3.1) — line numbers via CSS counter on shiki's per-line
+   spans; no extra parsing needed since shiki emits one <span class="line">
+   per source line. */
+.code-viewer-lines pre,
+.code-viewer-lines code {
+  counter-reset: code-line;
+}
+
+.code-viewer-lines .line {
+  counter-increment: code-line;
+  display: inline-block;
+  width: 100%;
+  padding-left: 3.5rem;
+  position: relative;
+  white-space: pre;
+}
+
+.code-viewer-lines.code-viewer-wrap .line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.code-viewer-lines .line::before {
+  content: counter(code-line);
+  position: absolute;
+  left: 0;
+  width: 2.75rem;
+  text-align: right;
+  padding-right: 0.75rem;
+  color: hsl(220 6% 44% / 0.6);
+  user-select: none;
+}
+
+.code-viewer-lines .code-line-flash {
+  animation: code-line-flash 0.9s ease-out;
+}
+
+@keyframes code-line-flash {
+  0% { background-color: hsl(38 92% 56% / 0.35); }
+  100% { background-color: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-viewer-lines .code-line-flash {
+    animation: none;
+    background-color: hsl(38 92% 56% / 0.35);
+  }
+}
