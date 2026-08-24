@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { Terminal, TerminalSquare, Sun, Moon, GitBranch, FolderPlus, LogOut, Bell, BellOff } from 'lucide-react';
+import { Terminal, TerminalSquare, Sun, Moon, FolderPlus, LogOut, Bell, BellOff } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { api } from '../../lib/api';
 import { routes } from '../../lib/navigation';
 import { requestNotificationPermission } from '../../lib/notifications';
 import { useNotificationStore } from '../../stores/notificationStore';
+import { GitPanel } from '../git/GitPanel';
 import { useThemeStore } from '../../stores/themeStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useProjects } from '../../hooks/useProjects';
@@ -72,7 +71,7 @@ export function Header() {
           </span>
         </div>
         <div className="h-4 w-px bg-border" />
-        <GitBranchIndicator />
+        <GitPanel />
 
         {/* Project Selector */}
         {projects.length > 0 && (
@@ -213,20 +212,4 @@ function NotificationToggle() {
   );
 }
 
-/** Live git branch/sha from the scorecard endpoint (was hardcoded "main"). */
-function GitBranchIndicator() {
-  const { data: scorecard } = useQuery({
-    queryKey: ['scorecard'],
-    queryFn: () => api.getScorecard(),
-    refetchInterval: 30_000,
-  });
-  return (
-    <div
-      className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono"
-      title={scorecard ? `${scorecard.git_branch}@${scorecard.git_sha}` : undefined}
-    >
-      <GitBranch className="h-3.5 w-3.5" aria-hidden />
-      <span>{scorecard?.git_branch ?? '…'}</span>
-    </div>
-  );
-}
+

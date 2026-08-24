@@ -577,7 +577,36 @@ export const api = {
     if (!res.ok) throw new Error('Failed to update prefs');
     return res.json();
   },
+
+  async getGitStatus(): Promise<GitStatusResponse> {
+    const res = await apiFetch(`${API_BASE}/api/webhooks/git-status`);
+    if (!res.ok) throw new Error('Failed to fetch git status');
+    return res.json();
+  },
 };
+
+export interface GitChangedFile {
+  path: string;
+  status: string;
+}
+
+export interface GitCommit {
+  sha: string;
+  author: string;
+  date: string;
+  message: string;
+}
+
+export interface GitStatusResponse {
+  branch: string;
+  sha: string;
+  ahead: number;
+  behind: number;
+  has_upstream: boolean;
+  uncommitted_count: number;
+  changed_files: GitChangedFile[];
+  recent_commits: GitCommit[];
+}
 
 export interface ScorecardResponse {
   uptime_seconds: number;

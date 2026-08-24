@@ -199,3 +199,97 @@ async def health_scorecard():
         "git_sha": git_sha,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+_GIT_STATUS_CODES = {
+    "M": "modified", "A": "added", "D": "deleted", "R": "renamed",
+    "C": "copied", "U": "unmerged", "?": "untracked", "!": "ignored",
+}
+
+
+def _run_git(args: list[str], timeout: float = 5) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, timeout=timeout,
+    )
+
+
+@router.get("/git-status")
+async def git_status():
+    """Working-tree status for the git status panel (P3.3).
+
+    Read-only; every git call is individually guarded so a missing repo,
+    detached HEAD, or no-upstream branch degrades to defaults instead of
+    a 500. Collections are capped — this is a dashboard summary, not a
+    full `git log`/`git status` dump.
+    """
+    branch = "unknown"
+    sha = "unknown"
+    ahead = 0
+    behind = 0
+    has_upstream = False
+    changed_files: list[dict] = []
+    recent_commits: list[dict] = []
+
+    try:
+        r = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+        if r.returncode == 0:
+            branch = r.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        r = _run_git(["rev-parse", "--short", "HEAD"])
+        if r.returncode == 0:
+            sha = r.stdout.strip()
+    except Exception:
+        pass
+
+    try:
+        r = _run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        has_upstream = r.returncode == 0
+        if has_upstream:
+            counts = _run_git(["rev-list", "--left-right", "--count", "HEAD...@{u}"])
+            if counts.returncode == 0:
+                parts = counts.stdout.split()
+                if len(parts) == 2:
+                    ahead, behind = int(parts[0]), int(parts[1])
+    except Exception:
+        pass
+
+    try:
+        r = _run_git(["status", "--porcelain=v1"])
+        if r.returncode == 0:
+            lines = [ln for ln in r.stdout.splitlines() if ln]
+            for line in lines[:50]:
+                code = line[:2].strip() or "?"
+                path = line[3:]
+                changed_files.append({
+                    "path": path,
+                    "status": _GIT_STATUS_CODES.get(code[0], code),
+                })
+    except Exception:
+        pass
+
+    try:
+        r = _run_git(["log", "-15", "--pretty=format:%h\x1f%an\x1f%ad\x1f%s", "--date=iso-strict"])
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                parts = line.split("\x1f", 3)
+                if len(parts) == 4:
+                    recent_commits.append({
+                        "sha": parts[0], "author": parts[1],
+                        "date": parts[2], "message": parts[3],
+                    })
+    except Exception:
+        pass
+
+    return {
+        "branch": branch,
+        "sha": sha,
+        "ahead": ahead,
+        "behind": behind,
+        "has_upstream": has_upstream,
+        "uncommitted_count": len(changed_files),
+        "changed_files": changed_files,
+        "recent_commits": recent_commits,
+    }

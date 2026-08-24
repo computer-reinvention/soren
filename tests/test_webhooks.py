@@ -26,3 +26,23 @@ def test_receive_webhook(client):
 def test_webhook_invalid_payload(client):
     response = client.post("/api/webhooks/test", json={})
     assert response.status_code == 422  # Validation error
+
+
+def test_git_status(client):
+    response = client.get("/api/webhooks/git-status")
+    assert response.status_code == 200
+    body = response.json()
+    for key in (
+        "branch", "sha", "ahead", "behind", "has_upstream",
+        "uncommitted_count", "changed_files", "recent_commits",
+    ):
+        assert key in body
+    assert isinstance(body["changed_files"], list)
+    assert isinstance(body["recent_commits"], list)
+    # Every changed file has a real path and a known status label
+    for f in body["changed_files"]:
+        assert f["path"]
+        assert f["status"]
+    # Commits, when present, carry sha/author/date/message
+    for c in body["recent_commits"]:
+        assert set(c.keys()) == {"sha", "author", "date", "message"}
