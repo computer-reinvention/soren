@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { useActivity } from '@/hooks/useActivity';
 import { useLayoutStore } from '@/stores/layoutStore';
 import { useProjectStore } from '@/stores/projectStore';
@@ -11,10 +11,17 @@ import { ActivityTimelineItem } from './ActivityTimelineItem';
 import { ActivityFilters } from './ActivityFilters';
 import { SuggestedActions } from './SuggestedActions';
 import { ThoughtStream } from './ThoughtStream';
-import { ObservabilityPanel } from '@/components/observability/ObservabilityPanel';
 import { PanelHeader } from '@/components/layout/PanelHeader';
-import { Activity as ActivityIcon, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Activity as ActivityIcon, Loader2, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import type { ActivityType } from '@/types/activity';
+
+// ActivityTimeline is mounted for the lifetime of the app on desktop (it's
+// the permanent right-rail panel), so a static import here means recharts
+// (~150KB gzip) rides in the main bundle on every single page load even
+// though the Metrics tab requires an explicit click to ever see a chart.
+const ObservabilityPanel = lazy(() =>
+  import('@/components/observability/ObservabilityPanel').then((m) => ({ default: m.ObservabilityPanel }))
+);
 
 const MAX_DISPLAYED = 50;
 
@@ -138,7 +145,15 @@ export function ActivityTimeline({ forceExpanded = false }: ActivityTimelineProp
         </TabsContent>
 
         <TabsContent value="metrics" className="flex-1 overflow-hidden mt-2">
-          <ObservabilityPanel />
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-4 w-4 animate-spin text-muted-foreground motion-reduce:animate-none" aria-hidden />
+              </div>
+            }
+          >
+            <ObservabilityPanel />
+          </Suspense>
         </TabsContent>
       </Tabs>
     </div>
