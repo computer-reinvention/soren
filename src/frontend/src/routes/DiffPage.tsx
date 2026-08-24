@@ -7,6 +7,7 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import { languageFromFilename } from '@/lib/syntax';
 import { routes } from '@/lib/navigation';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 const STATUS_ICON: Record<string, typeof FileEdit> = {
   added: FilePlus,
@@ -33,6 +34,7 @@ export function DiffPage() {
   // themeStore.applyTheme toggles this class — it's the single source of
   // truth for what's actually rendered (handles 'system' resolution too).
   const isDark = document.documentElement.classList.contains('dark');
+  const isMobile = useIsMobile();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['commit-diff', sha],
@@ -74,9 +76,11 @@ export function DiffPage() {
   }
 
   return (
-    <div className="flex h-full">
-      {/* File list */}
-      <div className="w-56 shrink-0 overflow-y-auto border-r border-border/50 bg-muted/10">
+    <div className="flex h-full flex-col md:flex-row">
+      {/* File list — stacks above the diff on mobile (capped height, its own
+          scroll) instead of a fixed 224px sidebar, which left no room for
+          the diff itself on a phone-width viewport. */}
+      <div className="w-full shrink-0 overflow-y-auto border-b border-border/50 bg-muted/10 max-h-40 md:max-h-none md:w-56 md:border-b-0 md:border-r">
         <div className="border-b border-border/50 px-3 py-2">
           <div className="flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
             <GitCommitHorizontal className="h-3 w-3 shrink-0" aria-hidden />
@@ -120,7 +124,7 @@ export function DiffPage() {
             <ReactDiffViewer
               oldValue={activeFile.old_content}
               newValue={activeFile.new_content}
-              splitView
+              splitView={!isMobile}
               useDarkTheme={isDark}
               highlightLanguage={languageFromFilename(activeFile.path) ?? undefined}
               leftTitle={activeFile.status === 'added' ? '(new file)' : activeFile.path}

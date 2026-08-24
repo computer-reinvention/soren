@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Terminal, TerminalSquare, Sun, Moon, FolderPlus, LogOut, Bell, BellOff } from 'lucide-react';
+import { Terminal, TerminalSquare, Sun, Moon, FolderPlus, LogOut, Bell, BellOff, Menu } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { routes } from '../../lib/navigation';
 import { requestNotificationPermission } from '../../lib/notifications';
 import { useNotificationStore } from '../../stores/notificationStore';
+import { useMobileNavStore } from '../../stores/mobileNavStore';
+import { useIsMobile } from '../../hooks/use-mobile';
 import { GitPanel } from '../git/GitPanel';
 import { useThemeStore } from '../../stores/themeStore';
 import { useProjectStore } from '../../stores/projectStore';
@@ -29,6 +31,8 @@ export function Header() {
   const navigate = useNavigate();
   const location = useLocation();
   const terminalActive = location.pathname === routes.terminal();
+  const isMobile = useIsMobile();
+  const { sidebarOpen, setSidebarOpen } = useMobileNavStore();
 
   // Toggle between the terminal route and the previous center view. Going
   // "back" from the terminal uses history when we came from inside the app,
@@ -60,6 +64,18 @@ export function Header() {
   return (
     <header className="h-12 border-b border-border/50 flex items-center justify-between px-4 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex items-center gap-3">
+        {isMobile && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 -ml-1"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-pressed={sidebarOpen}
+          >
+            <Menu className="h-4 w-4" aria-hidden />
+            <span className="sr-only">Toggle agents panel</span>
+          </Button>
+        )}
         {/* Dev-toolish logo */}
         <div className="flex items-center gap-2">
           <div className="relative">
@@ -70,34 +86,38 @@ export function Header() {
             soren
           </span>
         </div>
-        <div className="h-4 w-px bg-border" />
-        <GitPanel />
 
-        {/* Project Selector */}
-        {projects.length > 0 && (
-          <>
-            <div className="h-4 w-px bg-border" />
-            <select
-              value={selectedProjectId ?? ''}
-              onChange={(e) => selectProject(e.target.value || null)}
-              className="h-7 text-xs font-mono rounded-md border bg-background px-2 text-foreground"
-            >
-              <option value="">All Projects</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          </>
-        )}
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-7 w-7"
-          onClick={() => setRegisterOpen(true)}
-          title="Register project"
-        >
-          <FolderPlus className="h-3.5 w-3.5" />
-        </Button>
+        {/* Git status, project selector: real estate the phone-sized header
+            doesn't have room for. Reachable via the sidebar/overview instead. */}
+        <div className="hidden md:flex items-center gap-3">
+          <div className="h-4 w-px bg-border" />
+          <GitPanel />
+
+          {projects.length > 0 && (
+            <>
+              <div className="h-4 w-px bg-border" />
+              <select
+                value={selectedProjectId ?? ''}
+                onChange={(e) => selectProject(e.target.value || null)}
+                className="h-7 text-xs font-mono rounded-md border bg-background px-2 text-foreground"
+              >
+                <option value="">All Projects</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            </>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={() => setRegisterOpen(true)}
+            title="Register project"
+          >
+            <FolderPlus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-2">
@@ -105,7 +125,7 @@ export function Header() {
           multi-agent orchestrator
         </span>
 
-        <div className="h-4 w-px bg-border" />
+        <div className="h-4 w-px bg-border hidden md:block" />
 
         {/* Heartbeat + cost badge + dark mode grouped tight */}
         <div className="flex items-center">
@@ -132,8 +152,10 @@ export function Header() {
             </TooltipContent>
           </Tooltip>
           <NotificationToggle />
-          <HeartbeatIndicator />
-          <BudgetStatusline />
+          <div className="hidden md:flex items-center">
+            <HeartbeatIndicator />
+            <BudgetStatusline />
+          </div>
           <Button
             variant="ghost"
             size="icon"

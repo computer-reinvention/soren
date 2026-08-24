@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate, useParams } from 'react-router-dom';
 import { LayoutDashboard, MessageSquare, TerminalSquare, ListTodo, FileCode, Bot, Archive, GitCompare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { decodeFileSplat } from '@/lib/navigation';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 const TABS = [
   { to: '/', label: 'overview', icon: LayoutDashboard, shortcut: '1', end: true },
@@ -19,6 +20,7 @@ export function CenterTabs() {
   const location = useLocation();
   const navigate = useNavigate();
   const params = useParams();
+  const isMobile = useIsMobile();
 
   // Cmd/Ctrl+1..4 switch tabs
   useEffect(() => {
@@ -50,6 +52,24 @@ export function CenterTabs() {
     }
     return null;
   })();
+
+  // MobileNav (bottom tabs) already covers overview/chat/tasks and Header's
+  // terminal toggle covers terminal — the static tab row would be pure
+  // duplication here. Keep only the contextual crumb (which agent/file/diff
+  // is open), since that's the one piece of routing state MobileNav can't
+  // represent.
+  if (isMobile) {
+    if (!context) return null;
+    return (
+      <div
+        className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border/50 px-2 font-mono text-[11px] text-foreground"
+        role="status"
+      >
+        <context.icon className="h-3 w-3 text-primary shrink-0" aria-hidden />
+        <span className="truncate">{context.label}</span>
+      </div>
+    );
+  }
 
   return (
     <div

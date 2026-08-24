@@ -18,7 +18,17 @@ import type { ActivityType } from '@/types/activity';
 
 const MAX_DISPLAYED = 50;
 
-export function ActivityTimeline() {
+interface ActivityTimelineProps {
+  /**
+   * The mobile Sheet reuses this component as a full-screen overlay, not a
+   * resizable side panel — the desktop "collapse to a thin strip" toggle
+   * (layoutStore.activityPanelCollapsed) doesn't apply there and would
+   * otherwise leak a collapsed desktop state into the mobile view.
+   */
+  forceExpanded?: boolean;
+}
+
+export function ActivityTimeline({ forceExpanded = false }: ActivityTimelineProps) {
   const { activities } = useActivity();
   const { activityPanelCollapsed, toggleActivityPanel } = useLayoutStore();
   const { selectedProjectId } = useProjectStore();
@@ -41,7 +51,7 @@ export function ActivityTimeline() {
   const displayedActivities = filteredActivities.slice(0, MAX_DISPLAYED);
 
   // Collapsed state - just show a minimal header with expand button
-  if (activityPanelCollapsed) {
+  if (activityPanelCollapsed && !forceExpanded) {
     return (
       <div className="h-full flex flex-col items-center py-2">
         <Button
@@ -69,15 +79,17 @@ export function ActivityTimeline() {
         actions={
           <div className="flex items-center gap-1">
             <ActivityFilters activeFilters={filters} onFiltersChange={setFilters} />
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-6 w-6"
-              onClick={toggleActivityPanel}
-              title="Collapse activity panel"
-            >
-              <PanelRightClose className="h-3.5 w-3.5" />
-            </Button>
+            {!forceExpanded && (
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={toggleActivityPanel}
+                title="Collapse activity panel"
+              >
+                <PanelRightClose className="h-3.5 w-3.5" />
+              </Button>
+            )}
           </div>
         }
       />
