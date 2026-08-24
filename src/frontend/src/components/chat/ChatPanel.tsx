@@ -16,6 +16,7 @@ import { ChatHeader } from './ChatHeader';
 import { InboxView } from './InboxView';
 import { AgentActivityIndicator } from './AgentActivityIndicator';
 import { WorkerConfirmModal } from './WorkerConfirmModal';
+import { AgentLog } from '@/components/agents/AgentLog';
 
 interface ChatPanelProps {
   /**
@@ -58,6 +59,10 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
   const [showAllMessages, setShowAllMessages] = useState(
     selectedAgentId !== null && selectedAgentId !== 'supervisor'
   );
+
+  // Conversation vs. live tool-call log (P3.4). Component remounts per
+  // agent (route key), so this naturally resets to 'chat' on agent switch.
+  const [view, setView] = useState<'chat' | 'log'>('chat');
 
   // Filter messages for selected agent
   // Also filter by project when a project is selected
@@ -196,10 +201,14 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
         onClearChat={handleClearChat}
         showAllMessages={showAllMessages}
         onToggleFilter={isWorker ? undefined : () => setShowAllMessages(prev => !prev)}
+        view={view}
+        onToggleView={selectedAgentId ? () => setView((v) => (v === 'chat' ? 'log' : 'chat')) : undefined}
       />
 
-      {/* Chat Content — Inbox view for workers, DM view for everything else */}
-      {isWorker && selectedAgentId ? (
+      {/* Chat Content — live tool-call log, inbox (workers), or DM view */}
+      {view === 'log' && selectedAgentId ? (
+        <AgentLog agentId={selectedAgentId} />
+      ) : isWorker && selectedAgentId ? (
         <InboxView
           messages={messages}
           agentId={selectedAgentId}

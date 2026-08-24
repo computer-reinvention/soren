@@ -25,6 +25,7 @@ import {
   MessageSquare,
   GitBranch,
   AlertTriangle,
+  ListTree,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useAgentStore } from '@/stores/agentStore';
@@ -39,6 +40,8 @@ interface ChatHeaderProps {
   onClearChat?: () => void;
   showAllMessages?: boolean;
   onToggleFilter?: () => void;
+  view?: 'chat' | 'log';
+  onToggleView?: () => void;
 }
 
 // Map agent status to display style
@@ -96,6 +99,8 @@ export function ChatHeader({
   onClearChat,
   showAllMessages,
   onToggleFilter,
+  view = 'chat',
+  onToggleView,
 }: ChatHeaderProps) {
   const { isConnected, isReconnecting } = useConnectionStore();
   const { getActiveSessions, latestEventBySession } = useAgentEventStore();
@@ -242,6 +247,26 @@ export function ChatHeader({
 
       {/* Right side - connection status and actions */}
       <div className="flex items-center gap-2">
+        {/* Chat / live tool-call log toggle — agent pages only (P3.4) */}
+        {agentId && onToggleView && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className={cn('h-8 w-8', view === 'log' && 'bg-accent')}
+                onClick={onToggleView}
+                aria-pressed={view === 'log'}
+              >
+                <ListTree className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs">
+              {view === 'log' ? 'Showing tool-call log — click for conversation' : 'Show live tool-call log'}
+            </TooltipContent>
+          </Tooltip>
+        )}
+
         {/* Message filter toggle - only show when viewing a specific agent */}
         {agentId && onToggleFilter && (
           <Tooltip>
