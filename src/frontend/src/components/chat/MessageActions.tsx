@@ -56,7 +56,7 @@ export function MessageActions({
   return (
     <div
       className={cn(
-        'flex items-center gap-0.5 opacity-0 group-hover:opacity-100',
+        'flex items-center gap-0.5 opacity-100 can-hover:opacity-0 can-hover:group-hover:opacity-100',
         'transition-opacity duration-150',
         className
       )}

@@ -80,7 +80,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 hover:bg-background border border-border/50 text-muted-foreground hover:text-foreground transition-all opacity-0 group-hover:opacity-100"
+      className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 hover:bg-background border border-border/50 text-muted-foreground hover:text-foreground transition-all opacity-100 can-hover:opacity-0 can-hover:group-hover:opacity-100"
       title={copied ? 'Copied!' : 'Copy code'}
     >
       {copied ? (

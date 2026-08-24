@@ -264,7 +264,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
         )}
         {/* Actions for user messages — absolutely positioned */}
         {!(!isUser && agentData) && !prefixInfo && !(collapseCount && collapseCount > 1) && (
-          <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div className="absolute top-1 right-1 opacity-100 can-hover:opacity-0 can-hover:group-hover:opacity-100 transition-opacity">
             <MessageActions content={message.content} isUser={isCurrentUser} />
           </div>
         )}

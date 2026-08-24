@@ -1,3 +1,5 @@
+const plugin = require('tailwindcss/plugin');
+
 /** @type {import('tailwindcss').Config} */
 module.exports = {
   darkMode: ['class'],
@@ -73,5 +75,16 @@ module.exports = {
   		}
   	}
   },
-  plugins: [require('tailwindcss-animate'), require('@tailwindcss/typography')],
+  plugins: [
+    require('tailwindcss-animate'),
+    require('@tailwindcss/typography'),
+    // P4.2: `opacity-0 group-hover:opacity-100` patterns (message actions,
+    // code-block copy buttons, task/secret row menus) are permanently
+    // invisible on touch devices — there's no hover state to reveal them.
+    // `can-hover:` gates those classes behind `@media (hover: hover)` so
+    // touch devices fall through to visible-by-default instead.
+    plugin(({ addVariant }) => {
+      addVariant('can-hover', '@media (hover: hover)');
+    }),
+  ],
 };

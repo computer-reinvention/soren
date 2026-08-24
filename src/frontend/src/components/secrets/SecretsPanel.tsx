@@ -160,7 +160,7 @@ export function SecretsPanel() {
                 variant="ghost"
                 size="icon"
                 className={cn(
-                  'h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity',
+                  'h-5 w-5 opacity-100 can-hover:opacity-0 can-hover:group-hover:opacity-100 transition-opacity',
                   'text-destructive hover:text-destructive hover:bg-destructive/10'
                 )}
                 onClick={() => deleteMutation.mutate(name)}
