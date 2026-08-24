@@ -1,5 +1,6 @@
 import { ReactNode } from 'react';
 import { Header } from './Header';
+import { OfflineBanner } from '@/components/status/OfflineBanner';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
 
@@ -16,6 +17,7 @@ export function Layout({ children, bottomBar }: LayoutProps) {
   return (
     <div className="h-screen flex flex-col bg-background">
       <Header />
+      <OfflineBanner />
       <main className={cn('flex-1 overflow-hidden', isMobile ? 'pb-14' : 'pb-8')}>
         {children}
       </main>

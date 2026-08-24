@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, type Ref } from 'react';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { Send, Loader2, Bot, Square } from 'lucide-react';
+import { Send, Loader2, Bot, Square, AlertTriangle } from 'lucide-react';
 import { cn, getAgentBadgeLabel, getAgentBadgeColor } from '@/lib/utils';
 import type { Agent } from '@/types/agent';
 
@@ -18,6 +18,14 @@ interface ChatInputProps {
   isAgentWorking?: boolean;
   isInterrupting?: boolean;
   interruptedAt?: number | null;
+  /**
+   * P4.3: the send is optimistic (input clears immediately) so it feels
+   * instant — but that means a failed send (e.g. offline) silently
+   * discarded the user's message with zero feedback. The parent bumps
+   * `nonce` on mutation error to restore `content` back into the textarea
+   * instead of losing it.
+   */
+  failedSend?: { content: string; nonce: number } | null;
 }
 
 interface MentionState {
@@ -27,9 +35,10 @@ interface MentionState {
   selectedIndex: number;
 }
 
-export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt }: ChatInputProps) {
+export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt, failedSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [showInterruptFeedback, setShowInterruptFeedback] = useState(false);
+  const lastRestoredNonce = useRef<number | null>(null);
   const internalRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [mention, setMention] = useState<MentionState>({
@@ -45,6 +54,15 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
       (inputRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = internalRef.current;
     }
   }, [inputRef]);
+
+  // Restore a failed send back into the textarea instead of losing it.
+  useEffect(() => {
+    if (!failedSend || failedSend.nonce === lastRestoredNonce.current) return;
+    lastRestoredNonce.current = failedSend.nonce;
+    setMessage((current) => current || failedSend.content);
+    internalRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [failedSend]);
 
   const textareaRef = internalRef;
 
@@ -286,6 +304,17 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
           <div className="mb-2 flex items-center gap-1.5 text-xs text-orange-500 dark:text-orange-400 animate-in fade-in duration-200">
             <Square className="h-3 w-3 fill-current" />
             Agent interrupted
+          </div>
+        )}
+
+        {/* Failed send — message restored above, not lost (P4.3) */}
+        {failedSend && failedSend.nonce === lastRestoredNonce.current && (
+          <div
+            role="alert"
+            className="mb-2 flex items-center gap-1.5 text-xs text-red-500 dark:text-red-400 animate-in fade-in duration-200"
+          >
+            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
+            Send failed — message restored below, check your connection and retry
           </div>
         )}
 
