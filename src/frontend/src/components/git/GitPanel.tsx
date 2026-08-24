@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   DropdownMenu,
@@ -7,7 +8,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuSeparator,
 } from '@/components/ui/dropdown-menu';
-import { GitBranch, GitCommitHorizontal, ArrowDown, ArrowUp, Loader2 } from 'lucide-react';
+import { GitBranch, GitCommitHorizontal, ArrowDown, ArrowUp, Loader2, FileDiff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
 
@@ -84,9 +85,21 @@ export function GitPanel() {
         {data && (
           <>
             <div className="px-2 py-1.5">
-              <h4 className="mb-1 font-mono text-[10px] font-semibold uppercase text-muted-foreground/80">
-                changes ({data.uncommitted_count})
-              </h4>
+              <div className="mb-1 flex items-center justify-between">
+                <h4 className="font-mono text-[10px] font-semibold uppercase text-muted-foreground/80">
+                  changes ({data.uncommitted_count})
+                </h4>
+                {data.uncommitted_count > 0 && (
+                  <Link
+                    to="/diff/working"
+                    onClick={() => setOpen(false)}
+                    className="flex items-center gap-1 font-mono text-[10px] text-primary hover:underline"
+                  >
+                    <FileDiff className="h-2.5 w-2.5" aria-hidden />
+                    view diff
+                  </Link>
+                )}
+              </div>
               {data.changed_files.length === 0 ? (
                 <p className="font-mono text-[11px] text-muted-foreground/60">clean</p>
               ) : (
@@ -109,15 +122,21 @@ export function GitPanel() {
               <h4 className="mb-1 font-mono text-[10px] font-semibold uppercase text-muted-foreground/80">
                 recent commits
               </h4>
-              <ul className="space-y-1.5">
+              <ul className="space-y-0.5">
                 {data.recent_commits.map((c) => (
-                  <li key={c.sha} className="font-mono text-[11px]">
-                    <div className="flex items-center gap-1.5 text-muted-foreground">
-                      <GitCommitHorizontal className="h-2.5 w-2.5 shrink-0" aria-hidden />
-                      <span className="text-primary">{c.sha}</span>
-                      <span className="truncate">{c.author}</span>
-                    </div>
-                    <p className="truncate text-foreground/80 pl-4">{c.message}</p>
+                  <li key={c.sha}>
+                    <Link
+                      to={`/diff/${c.sha}`}
+                      onClick={() => setOpen(false)}
+                      className="block rounded px-1 py-0.5 -mx-1 font-mono text-[11px] hover:bg-accent transition-colors"
+                    >
+                      <div className="flex items-center gap-1.5 text-muted-foreground">
+                        <GitCommitHorizontal className="h-2.5 w-2.5 shrink-0" aria-hidden />
+                        <span className="text-primary">{c.sha}</span>
+                        <span className="truncate">{c.author}</span>
+                      </div>
+                      <p className="truncate text-foreground/80 pl-4">{c.message}</p>
+                    </Link>
                   </li>
                 ))}
               </ul>

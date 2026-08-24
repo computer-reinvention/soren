@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { NavLink, useLocation, useNavigate, useParams } from 'react-router-dom';
-import { LayoutDashboard, MessageSquare, TerminalSquare, ListTodo, FileCode, Bot, Archive } from 'lucide-react';
+import { LayoutDashboard, MessageSquare, TerminalSquare, ListTodo, FileCode, Bot, Archive, GitCompare } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { decodeFileSplat } from '@/lib/navigation';
 
@@ -44,6 +44,9 @@ export function CenterTabs() {
     if (location.pathname.startsWith('/files/')) {
       const path = decodeFileSplat(params['*'] ?? '');
       return { icon: FileCode, label: path.split('/').pop() || 'file' };
+    }
+    if (location.pathname.startsWith('/diff/') && params.sha) {
+      return { icon: GitCompare, label: params.sha === 'working' ? 'working diff' : `diff ${params.sha}` };
     }
     return null;
   })();

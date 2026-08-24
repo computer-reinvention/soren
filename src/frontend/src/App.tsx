@@ -18,6 +18,7 @@ import { CommandPalette } from './components/CommandPalette';
 import { ShortcutHelp } from './components/ShortcutHelp';
 import { OverviewPage } from './routes/OverviewPage';
 import { AgentPage, ArchivedPage, ChatFirehosePage, FilePage } from './routes/pages';
+import { DiffPage } from './routes/DiffPage';
 import { TasksPanel } from './components/tasks/TasksPanel';
 
 const queryClient = new QueryClient({
@@ -76,6 +77,7 @@ export default function App() {
                 <Route path="/agents/:agentId" element={<AgentPage />} />
                 <Route path="/archived/:archiveId" element={<ArchivedPage />} />
                 <Route path="/files/*" element={<FilePage />} />
+                <Route path="/diff/:sha" element={<DiffPage />} />
                 <Route path="/tasks" element={<TasksPanel />} />
                 {/* Terminal renders inside CenterPanel (persistent mount); the
                     route itself has no content of its own. */}

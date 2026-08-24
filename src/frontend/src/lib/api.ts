@@ -583,6 +583,12 @@ export const api = {
     if (!res.ok) throw new Error('Failed to fetch git status');
     return res.json();
   },
+
+  async getCommitDiff(sha: string): Promise<CommitDiffResponse> {
+    const res = await apiFetch(`${API_BASE}/api/webhooks/commit-diff?sha=${encodeURIComponent(sha)}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to fetch diff');
+    return res.json();
+  },
 };
 
 export interface GitChangedFile {
@@ -606,6 +612,21 @@ export interface GitStatusResponse {
   uncommitted_count: number;
   changed_files: GitChangedFile[];
   recent_commits: GitCommit[];
+}
+
+export interface CommitDiffFile {
+  path: string;
+  status: string;
+  binary: boolean;
+  old_content: string;
+  new_content: string;
+}
+
+export interface CommitDiffResponse {
+  sha: string;
+  title: string;
+  files: CommitDiffFile[];
+  truncated: boolean;
 }
 
 export interface ScorecardResponse {

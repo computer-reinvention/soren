@@ -46,3 +46,36 @@ def test_git_status(client):
     # Commits, when present, carry sha/author/date/message
     for c in body["recent_commits"]:
         assert set(c.keys()) == {"sha", "author", "date", "message"}
+
+
+def test_commit_diff_working_tree(client):
+    response = client.get("/api/webhooks/commit-diff?sha=working")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sha"] == "working"
+    assert isinstance(body["files"], list)
+    for f in body["files"]:
+        assert set(f.keys()) == {"path", "status", "binary", "old_content", "new_content"}
+
+
+def test_commit_diff_real_commit(client):
+    # HEAD always exists in this repo's test environment.
+    head_sha = __import__("subprocess").run(
+        ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True
+    ).stdout.strip()
+    response = client.get(f"/api/webhooks/commit-diff?sha={head_sha}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sha"] == head_sha
+    assert body["title"]  # commit metadata line, non-empty
+    assert isinstance(body["files"], list)
+
+
+def test_commit_diff_rejects_unsafe_ref(client):
+    response = client.get("/api/webhooks/commit-diff?sha=--upload-pack=x")
+    assert response.status_code == 422
+
+
+def test_commit_diff_unknown_commit(client):
+    response = client.get("/api/webhooks/commit-diff?sha=0000000000000000000000000000000000000000")
+    assert response.status_code == 404

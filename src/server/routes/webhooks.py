@@ -1,10 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
 from pathlib import Path
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -293,3 +294,87 @@ async def git_status():
         "changed_files": changed_files,
         "recent_commits": recent_commits,
     }
+
+
+_SAFE_REF = re.compile(r"^[A-Za-z0-9._/-]{1,64}$")
+_MAX_DIFF_FILES = 20
+_MAX_DIFF_FILE_BYTES = 300_000
+
+
+def _safe_ref(ref: str) -> bool:
+    """Reject anything that isn't a plain git ref — no flags, no shell metachars.
+
+    `git show <sha>` treats a leading '-' as an option, so validating shape
+    (not just "is this a string") matters even though subprocess.run's list
+    form already rules out shell injection.
+    """
+    return bool(_SAFE_REF.match(ref)) and not ref.startswith("-")
+
+
+def _blob_at(ref: str, path: str) -> tuple[str, bool]:
+    """Read a file's content at a git ref. Returns (content, is_binary)."""
+    r = _run_git(["show", f"{ref}:{path}"])
+    if r.returncode != 0:
+        return "", False  # file didn't exist at this ref (added/deleted)
+    if "\x00" in r.stdout:
+        return "", True
+    return r.stdout[:_MAX_DIFF_FILE_BYTES], False
+
+
+@router.get("/commit-diff")
+async def commit_diff(sha: str = Query(..., description="Commit sha, or 'working' for uncommitted changes")):
+    """Per-file before/after content for the diff viewer (P3.2).
+
+    `sha='working'` diffs the working tree against HEAD (covers uncommitted
+    changes already surfaced by /git-status); any other value is a real
+    commit, diffed against its first parent. Capped at 20 files / 300KB per
+    file — this feeds a browser diff view, not a patch export.
+    """
+    if sha != "working" and not _safe_ref(sha):
+        raise HTTPException(status_code=422, detail="Invalid ref")
+
+    if sha == "working":
+        name_status = _run_git(["diff", "--name-status", "HEAD"])
+        base_ref = "HEAD"
+        head_ref = None  # read from working tree
+        title = "Working tree changes"
+    else:
+        name_status = _run_git(["show", "--name-status", "--format=", sha])
+        base_ref = f"{sha}~1"
+        head_ref = sha
+        show_meta = _run_git(["show", "-s", "--format=%h\x1f%an\x1f%ad\x1f%s", "--date=iso-strict", sha])
+        if show_meta.returncode != 0:
+            raise HTTPException(status_code=404, detail=f"Unknown commit: {sha}")
+        title = show_meta.stdout.strip()
+
+    if name_status.returncode != 0:
+        raise HTTPException(status_code=404, detail=f"Unknown ref: {sha}")
+
+    entries = [ln for ln in name_status.stdout.splitlines() if ln.strip()][:_MAX_DIFF_FILES]
+    files = []
+    for line in entries:
+        parts = line.split("\t")
+        status_code, path = parts[0], parts[-1]
+        status = _GIT_STATUS_CODES.get(status_code[0], status_code)
+
+        old_content, old_binary = ("", False) if status == "added" else _blob_at(base_ref, path)
+
+        if head_ref is None:
+            try:
+                file_path = Path(path)
+                new_binary = b"\x00" in file_path.read_bytes()[:8192] if file_path.exists() else False
+                new_content = "" if new_binary or not file_path.exists() else file_path.read_text(errors="replace")[:_MAX_DIFF_FILE_BYTES]
+            except Exception:
+                new_content, new_binary = "", False
+        else:
+            new_content, new_binary = ("", False) if status == "deleted" else _blob_at(head_ref, path)
+
+        files.append({
+            "path": path,
+            "status": status,
+            "binary": old_binary or new_binary,
+            "old_content": old_content,
+            "new_content": new_content,
+        })
+
+    return {"sha": sha, "title": title, "files": files, "truncated": len(entries) == _MAX_DIFF_FILES}
