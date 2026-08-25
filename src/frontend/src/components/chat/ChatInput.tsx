@@ -35,6 +35,32 @@ interface MentionState {
   selectedIndex: number;
 }
 
+// P5.6: message history recall. sessionStorage (not localStorage) — history
+// is meant to be "what I typed this browsing session", not a permanent
+// cross-session log; it also naturally clears on browser close, which
+// matters more here than in a normal shell since messages can contain
+// sensitive task content.
+const HISTORY_KEY = 'soren_chat_history';
+const HISTORY_MAX = 50;
+
+function loadHistory(): string[] {
+  try {
+    const raw = sessionStorage.getItem(HISTORY_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveHistory(history: string[]) {
+  try {
+    sessionStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(-HISTORY_MAX)));
+  } catch {
+    // sessionStorage unavailable/full — history just won't persist, non-fatal
+  }
+}
+
 export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt, failedSend }: ChatInputProps) {
   const [message, setMessage] = useState('');
   const [showInterruptFeedback, setShowInterruptFeedback] = useState(false);
@@ -47,6 +73,10 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     startIndex: 0,
     selectedIndex: 0,
   });
+  // History recall (P5.6): null = not currently browsing history.
+  const historyRef = useRef<string[]>(loadHistory());
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const draftRef = useRef('');
 
   // Use effect to sync internal ref with external ref
   useEffect(() => {
@@ -135,6 +165,15 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     const trimmed = message.trim();
     if (trimmed && !isPending) {
       onSend(trimmed);
+      // Record history (skip immediate consecutive duplicates, e.g. retrying
+      // the exact same failed send shouldn't produce two identical entries).
+      const hist = historyRef.current;
+      if (hist[hist.length - 1] !== trimmed) {
+        hist.push(trimmed);
+        if (hist.length > HISTORY_MAX) hist.shift();
+        saveHistory(hist);
+      }
+      setHistoryIndex(null);
       setMessage('');
       setMention({ active: false, query: '', startIndex: 0, selectedIndex: 0 });
       // Reset height after sending
@@ -142,6 +181,55 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
         textareaRef.current.style.height = 'auto';
       }
     }
+  };
+
+  /**
+   * ArrowUp/Down history recall — only when not navigating the @mention
+   * dropdown. Entering history mode (first ArrowUp) requires the cursor at
+   * the very start, so it doesn't hijack normal cursor movement while
+   * drafting a fresh multi-line message. Once already browsing
+   * (historyIndex !== null), further ArrowUp/ArrowDown presses continue
+   * paging regardless of cursor position — gating continuation on cursor
+   * position too caused a real bug: recalling a shorter/longer entry moves
+   * the cursor to a different edge than the one the *other* direction's
+   * gate expects, so switching direction (or repeating the same direction
+   * past the first press) silently fell through to native cursor movement
+   * and ate a keypress instead of paging.
+   */
+  const handleHistoryKey = (e: React.KeyboardEvent): boolean => {
+    const textarea = textareaRef.current;
+    if (!textarea) return false;
+    const atStart = textarea.selectionStart === 0 && textarea.selectionEnd === 0;
+    const hist = historyRef.current;
+
+    if (e.key === 'ArrowUp' && (historyIndex !== null || atStart) && hist.length > 0) {
+      e.preventDefault();
+      const newIndex = historyIndex === null ? hist.length - 1 : Math.max(0, historyIndex - 1);
+      if (historyIndex === null) draftRef.current = message;
+      const recalled = hist[newIndex];
+      setMessage(recalled);
+      setHistoryIndex(newIndex);
+      // Cosmetic only — continuing to page no longer depends on cursor
+      // position (see comment above), so this is purely for a nicer
+      // editing experience (cursor ready at the end of the recalled line).
+      requestAnimationFrame(() => {
+        textarea.selectionStart = textarea.selectionEnd = recalled.length;
+      });
+      return true;
+    }
+
+    if (e.key === 'ArrowDown' && historyIndex !== null) {
+      e.preventDefault();
+      const next = historyIndex >= hist.length - 1 ? draftRef.current : hist[historyIndex + 1];
+      setMessage(next);
+      setHistoryIndex(historyIndex >= hist.length - 1 ? null : historyIndex + 1);
+      requestAnimationFrame(() => {
+        textarea.selectionStart = textarea.selectionEnd = next.length;
+      });
+      return true;
+    }
+
+    return false;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -179,6 +267,11 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
+      return;
+    }
+
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      handleHistoryKey(e);
     }
   };
 
@@ -186,6 +279,10 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     const value = e.target.value;
     const cursorPos = e.target.selectionStart;
     setMessage(value);
+    // A real edit (not our own programmatic recall) means the user is now
+    // drafting something new — stop treating further ArrowDown as "return
+    // to draft" once they've already started typing over a recalled entry.
+    if (historyIndex !== null) setHistoryIndex(null);
 
     // Detect @mention trigger
     // Look backwards from cursor to find an '@' that starts a mention
