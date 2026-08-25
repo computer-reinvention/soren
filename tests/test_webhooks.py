@@ -71,6 +71,20 @@ def test_commit_diff_real_commit(client):
     assert isinstance(body["files"], list)
 
 
+def test_blob_at_binary_file_does_not_crash():
+    # Regression test: _run_git used subprocess text=True, which decodes
+    # stdout as UTF-8 unconditionally and raised UnicodeDecodeError on the
+    # first non-UTF-8 byte — crashing before _blob_at's own binary-sniffing
+    # check ever ran. Caught when the diff endpoint was exercised against a
+    # commit that added real binary assets (PWA icons) for the first time.
+    # icon-192.png is a real committed binary asset, stable at HEAD.
+    from src.server.routes.webhooks import _blob_at
+
+    content, is_binary = _blob_at("HEAD", "src/frontend/public/icon-192.png")
+    assert is_binary is True
+    assert content == ""
+
+
 def test_commit_diff_rejects_unsafe_ref(client):
     response = client.get("/api/webhooks/commit-diff?sha=--upload-pack=x")
     assert response.status_code == 422

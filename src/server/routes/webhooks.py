@@ -214,6 +214,18 @@ def _run_git(args: list[str], timeout: float = 5) -> subprocess.CompletedProcess
     )
 
 
+def _run_git_bytes(args: list[str], timeout: float = 5) -> subprocess.CompletedProcess:
+    """Like _run_git but without text=True — for `git show <ref>:<path>`,
+    where the blob can be arbitrary binary content (e.g. a PNG). subprocess
+    with text=True decodes stdout as UTF-8 unconditionally and raises
+    UnicodeDecodeError on the first non-UTF-8 byte, which crashes the whole
+    request before _blob_at's own binary-detection check ever runs — this
+    was a real bug caught when the diff endpoint was exercised against a
+    commit that added actual binary assets (PWA icons) for the first time.
+    """
+    return subprocess.run(["git", *args], capture_output=True, timeout=timeout)
+
+
 @router.get("/git-status")
 async def git_status():
     """Working-tree status for the git status panel (P3.3).
@@ -313,12 +325,12 @@ def _safe_ref(ref: str) -> bool:
 
 def _blob_at(ref: str, path: str) -> tuple[str, bool]:
     """Read a file's content at a git ref. Returns (content, is_binary)."""
-    r = _run_git(["show", f"{ref}:{path}"])
+    r = _run_git_bytes(["show", f"{ref}:{path}"])
     if r.returncode != 0:
         return "", False  # file didn't exist at this ref (added/deleted)
-    if "\x00" in r.stdout:
+    if b"\x00" in r.stdout[:8192]:
         return "", True
-    return r.stdout[:_MAX_DIFF_FILE_BYTES], False
+    return r.stdout[:_MAX_DIFF_FILE_BYTES].decode("utf-8", errors="replace"), False
 
 
 @router.get("/commit-diff")
