@@ -15,6 +15,12 @@ build/
 *.o
 *.pyc
 
+# Testing (P6.1)
+coverage/
+src/frontend/test-results/
+src/frontend/playwright-report/
+src/frontend/e2e/.auth/
+
 # IDE
 .idea/
 .vscode/
