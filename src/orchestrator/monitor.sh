@@ -536,12 +536,14 @@ HEARTBEAT_WARN_THRESHOLD=${SOREN_HEARTBEAT_WARN:-900}     # seconds idle before 
 HEARTBEAT_NUDGE_INTERVAL=${SOREN_HEARTBEAT_NUDGE:-180}    # cooldown seconds between nudges
 HEARTBEAT_MAX_NUDGES=${SOREN_HEARTBEAT_MAX_NUDGES:-3}     # failed nudges before considering sentry
 HEARTBEAT_OBSERVE_TIMEOUT=${SOREN_HEARTBEAT_OBSERVE_TIMEOUT:-1200}  # seconds of FROZEN output before escalating
+HEARTBEAT_UNKNOWN_GRACE=${SOREN_HEARTBEAT_UNKNOWN_GRACE:-90}  # seconds tmux_pane_state may report UNKNOWN before it's treated as dead, not "still starting"
 NUDGE_COUNT=0               # how many consecutive nudges sent without heartbeat response
 NUDGE_SENT_AT=0             # timestamp when last nudge was sent (0 = not sent)
 TASK_INJECTED=0             # whether a task has been force-injected after nudges failed (0=no, 1=yes)
 OBSERVE_STARTED_AT=0        # timestamp when observation mode began (0 = not observing)
 OBSERVE_PANE_HASH=""         # md5 hash of last captured pane output during observation
 OBSERVE_FROZEN_SINCE=0       # timestamp when pane output last changed (frozen timer starts here)
+UNKNOWN_SINCE=0              # timestamp when tmux_pane_state first reported UNKNOWN (0 = not currently unknown)
 LAST_HB_CHECK_TS=0           # wall-clock of previous heartbeat check (suspend detection)
 SOREN_SENTRY_ENABLED="${SOREN_SENTRY:-true}"   # set SOREN_SENTRY=false to disable sentry escalation
 SOREN_SUSPEND_GAP="${SOREN_SUSPEND_GAP:-120}"  # loop-gap seconds implying machine suspend
@@ -570,6 +572,7 @@ reset_heartbeat_state() {
     OBSERVE_STARTED_AT=0
     OBSERVE_PANE_HASH=""
     OBSERVE_FROZEN_SINCE=0
+    UNKNOWN_SINCE=0
 }
 
 # Capture a hash of a pane's last 20 lines for change detection
@@ -715,7 +718,54 @@ check_supervisor_heartbeat() {
     # ── Past warn threshold — supervisor has been quiet a while ──
     # Branch on whether supervisor is at prompt (idle) or mid-task (busy).
 
-    if ! is_supervisor_at_prompt; then
+    local supervisor_state
+    supervisor_state=$(tmux_pane_state "$SOREN_SESSION" "supervisor")
+
+    if [[ "$supervisor_state" == "UNKNOWN" ]]; then
+        # ── UNKNOWN-STATE FAST PATH ──
+        # tmux_pane_state returns UNKNOWN when it genuinely cannot tell
+        # whether the supervisor is alive: no tmux pane at all, an empty
+        # pane, or (most commonly) a registered opencode port whose
+        # /global/health endpoint isn't responding. That last case is
+        # ambiguous on its own — a freshly (re)spawned opencode process
+        # hasn't opened its health port yet either — so this state gets a
+        # short grace period of its own, separate from and much shorter
+        # than HEARTBEAT_OBSERVE_TIMEOUT (which assumes a *confirmed*
+        # alive-and-working process and can legitimately run long).
+        # Before this fast path existed, UNKNOWN fell into the same
+        # "not at prompt" bucket as a confirmed-busy supervisor below,
+        # so a genuinely dead opencode process (crashed, health port
+        # gone) was indistinguishable from one legitimately mid-task —
+        # both got the full multi-minute observation window before
+        # anyone checked whether the process was actually still there.
+        if ((UNKNOWN_SINCE == 0)); then
+            UNKNOWN_SINCE=$now
+            log_status "HEARTBEAT" "Supervisor state UNKNOWN (stale ${staleness}s) — starting ${HEARTBEAT_UNKNOWN_GRACE}s grace period before treating as dead"
+        fi
+
+        local unknown_elapsed=$((now - UNKNOWN_SINCE))
+        if ((unknown_elapsed < HEARTBEAT_UNKNOWN_GRACE)); then
+            printf "  Heartbeat:  ${YELLOW}●${NC} state unknown (${staleness}s) - grace period (${unknown_elapsed}s/${HEARTBEAT_UNKNOWN_GRACE}s)\n"
+            return
+        fi
+
+        log_warn "Supervisor state UNKNOWN for ${unknown_elapsed}s (past ${HEARTBEAT_UNKNOWN_GRACE}s grace) — treating as dead, spawning sentry"
+        printf "  Heartbeat:  ${RED}●${NC} supervisor unresponsive (${staleness}s, unknown ${unknown_elapsed}s) - spawning sentry\n"
+        reset_heartbeat_state
+        if [[ "$SOREN_SENTRY_ENABLED" == "true" ]]; then
+            spawn_sentry
+        else
+            log_status "HEARTBEAT" "Sentry disabled (SOREN_SENTRY=false) — supervisor needs manual attention"
+        fi
+        return
+    fi
+
+    # State is no longer UNKNOWN (PROMPT, BUSY, CONFIRMATION, or
+    # SELECTION) — clear any in-progress grace timer so a later UNKNOWN
+    # spell starts its own grace period instead of inheriting this one.
+    UNKNOWN_SINCE=0
+
+    if [[ "$supervisor_state" != "PROMPT" ]]; then
         # ── MID-TASK PATH ──
         # Supervisor is actively working (not at prompt). Do NOT nudge or
         # interrupt. Enter observation mode and watch for recovery.
@@ -1066,6 +1116,12 @@ is_supervisor_process_alive() {
 
 # Check if the supervisor pane is showing an idle prompt.
 # Delegates to unified tmux_pane_state(). Returns 0 if at prompt, 1 if busy.
+#
+# Not called from the main heartbeat loop anymore (it now reads
+# tmux_pane_state directly so it can branch on UNKNOWN separately from
+# BUSY — see the dead-vs-busy fix in check_supervisor_heartbeat) — kept
+# as a small public boolean helper for any other caller that only cares
+# about the PROMPT/not-PROMPT distinction.
 is_supervisor_at_prompt() {
     local state
     state=$(tmux_pane_state "$SOREN_SESSION" "supervisor")
