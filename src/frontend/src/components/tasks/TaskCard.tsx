@@ -149,7 +149,7 @@ export function TaskCard({ task, depth = 0 }: { task: Task; depth?: number }) {
                     href={url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-[10px] text-blue-500 hover:underline inline-flex items-center gap-0.5"
+                    className="text-[10px] text-blue-600 dark:text-blue-400 hover:underline inline-flex items-center gap-0.5"
                     onClick={(e) => e.stopPropagation()}
                   >
                     <ExternalLink className="h-2.5 w-2.5" />

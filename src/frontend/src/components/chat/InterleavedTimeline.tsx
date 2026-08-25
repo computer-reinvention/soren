@@ -126,7 +126,7 @@ export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimeline
           'text-muted-foreground dark:text-muted-foreground/85 hover:text-muted-foreground hover:bg-muted/50 transition-colors',
         )}
       >
-        <Zap className="h-3 w-3 text-yellow-500/70" />
+        <Zap className="h-3 w-3 text-yellow-700 dark:text-yellow-500" />
         <span>
           {totalSteps} step{totalSteps !== 1 ? 's' : ''}
         </span>
@@ -169,7 +169,7 @@ function TimelineStepItem({ step }: { step: TimelineStep }) {
     <div className="py-0.5">
       {/* Thought reasoning (if present) */}
       {step.thought && (
-        <p className="text-[11px] text-purple-400/60 italic truncate flex items-center gap-1">
+        <p className="text-[11px] text-purple-700 dark:text-purple-400 italic truncate flex items-center gap-1">
           <Brain className="h-2.5 w-2.5 flex-shrink-0" />
           <span className="truncate">
             {truncateThought(step.thought.content || '')}

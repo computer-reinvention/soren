@@ -13,10 +13,10 @@ import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
 
 const FILE_STATUS_COLOR: Record<string, string> = {
-  modified: 'text-amber-500',
+  modified: 'text-amber-700 dark:text-amber-500',
   added: 'text-emerald-700 dark:text-emerald-500',
-  deleted: 'text-red-400',
-  renamed: 'text-blue-400',
+  deleted: 'text-red-700 dark:text-red-400',
+  renamed: 'text-blue-600 dark:text-blue-400',
   untracked: 'text-muted-foreground',
 };
 
@@ -57,14 +57,14 @@ export function GitPanel() {
                 </span>
               )}
               {data.behind > 0 && (
-                <span className="flex items-center text-amber-500">
+                <span className="flex items-center text-amber-700 dark:text-amber-500">
                   <ArrowDown className="h-2.5 w-2.5" />{data.behind}
                 </span>
               )}
             </span>
           )}
           {data && data.uncommitted_count > 0 && (
-            <span className="rounded-sm bg-amber-500/15 px-1 text-[10px] text-amber-500">
+            <span className="rounded-sm bg-amber-500/15 px-1 text-[10px] text-amber-800 dark:text-amber-500">
               {data.uncommitted_count}
             </span>
           )}

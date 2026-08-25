@@ -632,8 +632,8 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             className={cn(
               'mb-2 flex items-center gap-1.5 text-xs animate-in fade-in duration-200',
               commandFeedback.type === 'success'
-                ? 'text-emerald-600 dark:text-emerald-400'
-                : 'text-red-500 dark:text-red-400'
+                ? 'text-emerald-700 dark:text-emerald-400'
+                : 'text-red-700 dark:text-red-400'
             )}
           >
             {commandFeedback.type === 'success' ? (
@@ -663,7 +663,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
 
         {/* Interrupt feedback */}
         {showInterruptFeedback && (
-          <div className="mb-2 flex items-center gap-1.5 text-xs text-orange-500 dark:text-orange-400 animate-in fade-in duration-200">
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-orange-700 dark:text-orange-400 animate-in fade-in duration-200">
             <Square className="h-3 w-3 fill-current" />
             Agent interrupted
           </div>
@@ -673,7 +673,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
         {failedSend && failedSend.nonce === lastRestoredNonce.current && (
           <div
             role="alert"
-            className="mb-2 flex items-center gap-1.5 text-xs text-red-500 dark:text-red-400 animate-in fade-in duration-200"
+            className="mb-2 flex items-center gap-1.5 text-xs text-red-700 dark:text-red-400 animate-in fade-in duration-200"
           >
             <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
             Send failed — message restored below, check your connection and retry

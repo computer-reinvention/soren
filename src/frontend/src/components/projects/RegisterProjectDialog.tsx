@@ -140,7 +140,7 @@ export function RegisterProjectDialog({ open, onOpenChange }: RegisterProjectDia
             </Button>
           </DialogFooter>
           {createMutation.isError && (
-            <p className="text-sm text-red-500 mt-2">
+            <p className="text-sm text-red-700 dark:text-red-400 mt-2">
               {createMutation.error?.message || 'Failed to register project'}
             </p>
           )}

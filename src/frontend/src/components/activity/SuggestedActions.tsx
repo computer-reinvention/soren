@@ -41,7 +41,7 @@ export function SuggestedActions() {
     if (healthData?.status === 'degraded') {
       items.push({
         id: 'health-degraded',
-        icon: <HeartPulse className="h-3.5 w-3.5 text-amber-500" />,
+        icon: <HeartPulse className="h-3.5 w-3.5 text-amber-700 dark:text-amber-500" />,
         message: 'System health degraded. Check server logs.',
         severity: 'warning',
       });
@@ -78,7 +78,7 @@ export function SuggestedActions() {
         const displayName = agent.display_name || agent.name;
         items.push({
           id: `stale-${agent.id}`,
-          icon: <Clock className="h-3.5 w-3.5 text-amber-500" />,
+          icon: <Clock className="h-3.5 w-3.5 text-amber-700 dark:text-amber-500" />,
           message: `${displayName} appears stale (${mins}min idle). Consider checking on it.`,
           severity: 'warning',
         });
@@ -100,7 +100,7 @@ export function SuggestedActions() {
       if (backlogCount > 0 && activeWorkers.length === 0) {
         items.push({
           id: 'backlog-idle',
-          icon: <ListTodo className="h-3.5 w-3.5 text-blue-400" />,
+          icon: <ListTodo className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />,
           message: `Backlog has ${backlogCount} item${backlogCount !== 1 ? 's' : ''}. Consider spawning workers.`,
           severity: 'info',
         });
@@ -117,7 +117,7 @@ export function SuggestedActions() {
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
       <CollapsibleTrigger asChild>
-        <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-amber-600 dark:text-amber-400 hover:bg-muted/50 transition-colors border-b border-border/50">
+        <button className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-amber-700 dark:text-amber-400 hover:bg-muted/50 transition-colors border-b border-border/50">
           <AlertTriangle className="h-3 w-3 shrink-0" />
           <span className="font-medium">
             {suggestions.length} suggested action{suggestions.length !== 1 ? 's' : ''}

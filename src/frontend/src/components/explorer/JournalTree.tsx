@@ -178,7 +178,7 @@ function MonthGroupItem({
           />
           <BookOpen className={cn(
             'h-4 w-4 flex-shrink-0',
-            isCurrentMonth ? 'text-blue-500' : 'text-amber-500'
+            isCurrentMonth ? 'text-blue-600 dark:text-blue-400' : 'text-amber-700 dark:text-amber-500'
           )} />
           <span className="truncate flex-1">{group.label}</span>
           <span className="text-xs text-muted-foreground">{group.dates.length}</span>
@@ -238,7 +238,7 @@ function DateFolderItem({
           className={cn(
             'w-full flex items-center gap-1.5 pl-4 pr-2 py-1 text-sm rounded-md transition-colors text-left',
             'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-            isToday && 'text-green-600 dark:text-green-400 font-medium'
+            isToday && 'text-green-700 dark:text-green-400 font-medium'
           )}
         >
           <ChevronRight
@@ -249,11 +249,11 @@ function DateFolderItem({
           />
           <Calendar className={cn(
             'h-3.5 w-3.5 flex-shrink-0',
-            isToday ? 'text-green-500' : 'text-muted-foreground'
+            isToday ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'
           )} />
           <span className="truncate flex-1">{dateLabel}</span>
           {isToday && (
-            <span className="text-[10px] text-green-500 font-medium">TODAY</span>
+            <span className="text-[10px] text-green-700 dark:text-green-400 font-medium">TODAY</span>
           )}
         </button>
       </CollapsibleTrigger>

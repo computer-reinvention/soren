@@ -17,10 +17,10 @@ const ThoughtItem = memo(function ThoughtItem({ thought }: { thought: Thought })
 
   return (
     <div className="flex gap-2 text-xs py-1.5 px-2 rounded hover:bg-muted/50">
-      <Brain className="h-3 w-3 mt-0.5 shrink-0 text-violet-400" />
+      <Brain className="h-3 w-3 mt-0.5 shrink-0 text-violet-700 dark:text-violet-400" />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5 mb-0.5">
-          <span className="font-medium text-violet-400">{thought.agent_name}</span>
+          <span className="font-medium text-violet-700 dark:text-violet-400">{thought.agent_name}</span>
           {thought.tool_name && (
             <span className="font-mono text-muted-foreground dark:text-muted-foreground/80">before {thought.tool_name}</span>
           )}

@@ -9,6 +9,33 @@ import { languageFromFilename } from '@/lib/syntax';
 import { routes } from '@/lib/navigation';
 import { useIsMobile } from '@/hooks/use-mobile';
 
+// P6.7: react-diff-viewer-continued's built-in syntax-highlight themes
+// (Dracula-derived dark, GitHub-derived light) weren't tuned against the
+// diff viewer's own added/removed line backgrounds — several tokens
+// measured well under 4.5:1 once actually sitting on a green/red-tinted
+// diff row instead of a plain code background. Each override below is
+// the same token color with lightness adjusted just enough to clear
+// 4.5:1 against the viewer's background AND its added/removed tints
+// (computed, not eyeballed — see git history for the contrast-ratio
+// script used). Only listing the tokens that actually failed; everything
+// else keeps the library's default.
+const DIFF_HIGHLIGHT_THEME_LIGHT = {
+  comment: '#656d77',
+  tag: '#1e7934',
+  inserted: '#1e7934',
+  keyword: '#cd2939',
+  atrule: '#cd2939',
+  important: '#b14c07',
+  variable: '#b14c07',
+};
+const DIFF_HIGHLIGHT_THEME_DARK = {
+  comment: '#aeb6d0',
+  prolog: '#aeb6d0',
+  doctype: '#aeb6d0',
+  cdata: '#aeb6d0',
+  deleted: '#ff9999',
+};
+
 const STATUS_ICON: Record<string, typeof FileEdit> = {
   added: FilePlus,
   deleted: FileMinus,
@@ -18,9 +45,9 @@ const STATUS_ICON: Record<string, typeof FileEdit> = {
 
 const STATUS_COLOR: Record<string, string> = {
   added: 'text-emerald-700 dark:text-emerald-500',
-  deleted: 'text-red-400',
-  modified: 'text-amber-500',
-  renamed: 'text-blue-400',
+  deleted: 'text-red-700 dark:text-red-400',
+  modified: 'text-amber-700 dark:text-amber-500',
+  renamed: 'text-blue-600 dark:text-blue-400',
 };
 
 /**
@@ -61,7 +88,7 @@ export function DiffPage() {
   if (error || !data) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
-        <AlertTriangle className="h-5 w-5 text-red-400" aria-hidden />
+        <AlertTriangle className="h-5 w-5 text-red-700 dark:text-red-400" aria-hidden />
         <p className="font-mono">{(error as Error)?.message ?? 'failed to load diff'}</p>
       </div>
     );
@@ -87,7 +114,7 @@ export function DiffPage() {
             <span className="truncate">{data.title}</span>
           </div>
           {data.truncated && (
-            <p className="mt-1 font-mono text-[10px] text-amber-500">showing first {data.files.length} files</p>
+            <p className="mt-1 font-mono text-[10px] text-amber-700 dark:text-amber-500">showing first {data.files.length} files</p>
           )}
         </div>
         <ul>
@@ -126,6 +153,7 @@ export function DiffPage() {
               newValue={activeFile.new_content}
               splitView={!isMobile}
               useDarkTheme={isDark}
+              highlightTheme={isDark ? DIFF_HIGHLIGHT_THEME_DARK : DIFF_HIGHLIGHT_THEME_LIGHT}
               highlightLanguage={languageFromFilename(activeFile.path) ?? undefined}
               leftTitle={activeFile.status === 'added' ? '(new file)' : activeFile.path}
               rightTitle={activeFile.status === 'deleted' ? '(deleted)' : activeFile.path}

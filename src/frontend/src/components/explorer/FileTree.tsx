@@ -96,7 +96,7 @@ function FileTreeNode({ item, onFileSelect, selectedPath, level }: FileTreeNodeP
                 )}
               />
             )}
-            <Folder className="h-4 w-4 text-amber-500 flex-shrink-0" />
+            <Folder className="h-4 w-4 text-amber-700 dark:text-amber-500 flex-shrink-0" />
             <span className="truncate">{item.name}</span>
           </button>
         </CollapsibleTrigger>

@@ -40,16 +40,16 @@ function formatRate(v: number): string {
 }
 
 function successRateColor(rate: number): string {
-  if (rate >= 0.8) return 'text-green-500';
-  if (rate >= 0.5) return 'text-yellow-500';
-  return 'text-red-500';
+  if (rate >= 0.8) return 'text-green-700 dark:text-green-400';
+  if (rate >= 0.5) return 'text-yellow-700 dark:text-yellow-400';
+  return 'text-red-700 dark:text-red-400';
 }
 
 function firstPassColor(rate: number | null): string {
   if (rate == null) return 'text-muted-foreground';
-  if (rate >= 0.8) return 'text-green-500';
-  if (rate >= 0.5) return 'text-yellow-500';
-  return 'text-red-500';
+  if (rate >= 0.8) return 'text-green-700 dark:text-green-400';
+  if (rate >= 0.5) return 'text-yellow-700 dark:text-yellow-400';
+  return 'text-red-700 dark:text-red-400';
 }
 
 function formatDuration(seconds: number): string {
@@ -122,7 +122,7 @@ function BudgetOverview() {
       </div>
 
       {status?.throttled && (
-        <div className="flex items-center gap-2 rounded-md bg-red-500/10 border border-red-500/20 px-3 py-2 text-xs text-red-500">
+        <div className="flex items-center gap-2 rounded-md bg-red-500/10 border border-red-500/20 px-3 py-2 text-xs text-red-700 dark:text-red-400">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
           Budget throttled — low-priority tasks deferred
         </div>
@@ -132,7 +132,7 @@ function BudgetOverview() {
       <div className="space-y-1">
         <div className="flex justify-between text-xs text-muted-foreground">
           <span>{formatCost(status?.daily_spend_usd)} / {formatCost(status?.budget_limit_usd)}</span>
-          <span className={pct >= 0.8 ? 'text-red-500 font-medium' : pct >= 0.6 ? 'text-yellow-500' : ''}>
+          <span className={pct >= 0.8 ? 'text-red-700 dark:text-red-400 font-medium' : pct >= 0.6 ? 'text-yellow-700 dark:text-yellow-400' : ''}>
             {(pct * 100).toFixed(1)}%
           </span>
         </div>
@@ -249,7 +249,7 @@ function QualityTable() {
               >
                 <td className="px-2 py-1.5 font-mono truncate max-w-[100px]" title={agent.agent_id}>
                   {agent.agent_id === best && (
-                    <span className="mr-1 text-green-500">★</span>
+                    <span className="mr-1 text-green-700 dark:text-green-400">★</span>
                   )}
                   {agent.agent_id}
                 </td>

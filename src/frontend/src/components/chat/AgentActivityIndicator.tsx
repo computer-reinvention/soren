@@ -84,7 +84,7 @@ export function AgentActivityIndicator({
         {hasActivity ? (
           <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary flex-shrink-0" />
         ) : (
-          <Check className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
+          <Check className="h-3.5 w-3.5 text-green-700 dark:text-green-400 flex-shrink-0" />
         )}
         <span className="font-medium text-foreground/80 truncate text-xs">
           {getToolSummary(latestEvent.tool_name!, latestEvent.tool_input)}
@@ -109,7 +109,7 @@ export function AgentActivityIndicator({
               key={event.id}
               className="flex items-center gap-2 text-[11px] text-muted-foreground py-0.5"
             >
-              <Check className="h-3 w-3 text-green-500/50 flex-shrink-0" />
+              <Check className="h-3 w-3 text-green-700 dark:text-green-500 flex-shrink-0" />
               <span className="truncate">
                 {getToolSummary(event.tool_name!, event.tool_input)}
               </span>

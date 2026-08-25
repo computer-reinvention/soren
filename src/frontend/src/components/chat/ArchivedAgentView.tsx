@@ -45,11 +45,11 @@ export function ArchivedAgentView({ archiveId }: ArchivedAgentViewProps) {
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center gap-3">
-        <Archive className="h-5 w-5 text-gray-400" />
+        <Archive className="h-5 w-5 text-gray-600 dark:text-gray-400" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="font-medium">{archive.agent_name}</span>
-            <Badge variant="outline" className="text-xs border-gray-400/50 text-gray-500">
+            <Badge variant="outline" className="text-xs border-gray-400/50 text-gray-600 dark:text-gray-400">
               ARCHIVED
             </Badge>
           </div>

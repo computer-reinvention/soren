@@ -65,12 +65,12 @@ export function BudgetStatusline() {
       <TooltipTrigger asChild>
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono cursor-default">
           <span className="relative inline-flex items-center">
-            <Coins className={`h-3 w-3 ${throttled ? 'text-red-500' : ''}`} />
+            <Coins className={`h-3 w-3 ${throttled ? 'text-red-700 dark:text-red-400' : ''}`} />
             {throttled && (
               <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none" />
             )}
           </span>
-          <span className={throttled ? 'text-red-500 font-medium' : ''}>{formatCost(totalCost)}</span>
+          <span className={throttled ? 'text-red-700 dark:text-red-400 font-medium' : ''}>{formatCost(totalCost)}</span>
           <span className="opacity-50">·</span>
           <span>{formatTokenCount(totalTokens)} tok</span>
         </div>
@@ -78,7 +78,7 @@ export function BudgetStatusline() {
       <TooltipContent side="bottom" className="text-xs font-mono">
         <div className="space-y-0.5">
           {throttled && (
-            <div className="text-red-500 font-medium pb-1 border-b border-border mb-1">
+            <div className="text-red-700 dark:text-red-400 font-medium pb-1 border-b border-border mb-1">
               ⚠ Budget throttled
             </div>
           )}

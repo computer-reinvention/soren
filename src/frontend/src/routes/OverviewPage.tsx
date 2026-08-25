@@ -128,7 +128,7 @@ export function OverviewPage() {
             <span
               className={cn(
                 'flex items-center gap-1.5',
-                healthy ? 'text-emerald-700 dark:text-emerald-500' : 'text-red-400'
+                healthy ? 'text-emerald-700 dark:text-emerald-500' : 'text-red-700 dark:text-red-400'
               )}
             >
               <span
@@ -269,7 +269,7 @@ export function OverviewPage() {
                   )}
                   <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground">
                     {g.activeCount > 0 && <span className="text-emerald-700 dark:text-emerald-500">{g.activeCount} active · </span>}
-                    {g.attentionCount > 0 && <span className="text-red-400">{g.attentionCount} blocked · </span>}
+                    {g.attentionCount > 0 && <span className="text-red-700 dark:text-red-400">{g.attentionCount} blocked · </span>}
                     {g.agents.length + (g.supervisor ? 1 : 0)} total
                   </span>
                 </div>
@@ -368,7 +368,7 @@ function StatTile({
       <p
         className={cn(
           'mt-1 font-mono text-lg font-semibold tabular-nums leading-none',
-          tone === 'alert' && 'text-red-400',
+          tone === 'alert' && 'text-red-700 dark:text-red-400',
           tone === 'ok' && 'text-emerald-700 dark:text-emerald-500'
         )}
       >
@@ -400,8 +400,8 @@ function AgentChip({
       className={cn(
         'flex items-center gap-1 rounded-sm border px-1.5 py-0.5 font-mono text-[10px] transition-colors',
         'border-border/60 text-muted-foreground hover:bg-accent hover:text-foreground',
-        supervisor && 'border-amber-500/40 text-amber-500',
-        attention && 'border-red-500/50 text-red-400',
+        supervisor && 'border-amber-500/40 text-amber-700 dark:text-amber-500',
+        attention && 'border-red-500/50 text-red-700 dark:text-red-400',
         sleeping && 'opacity-50'
       )}
     >

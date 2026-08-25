@@ -383,7 +383,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               'rounded px-2 py-0.5 transition-colors',
               terminalMode === 'shell'
                 ? 'bg-zinc-700 text-zinc-100'
-                : 'text-zinc-500 hover:text-zinc-300'
+                : 'text-zinc-400 hover:text-zinc-300'
             )}
           >
             Shell
@@ -395,7 +395,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               'rounded px-2 py-0.5 transition-colors',
               terminalMode === 'soren'
                 ? 'bg-zinc-700 text-zinc-100'
-                : 'text-zinc-500 hover:text-zinc-300'
+                : 'text-zinc-400 hover:text-zinc-300'
             )}
           >
             Soren session
@@ -409,7 +409,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               type="button"
               onClick={decreaseFontSize}
               title="Decrease font size"
-              className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
             >
               <Minus className="h-3 w-3" />
             </button>
@@ -418,7 +418,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               type="button"
               onClick={increaseFontSize}
               title="Increase font size"
-              className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+              className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
             >
               <Plus className="h-3 w-3" />
             </button>
@@ -433,7 +433,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             aria-pressed={searchOpen}
             className={cn(
               'rounded-md border border-zinc-800 bg-zinc-900 p-1',
-              searchOpen ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'
+              searchOpen ? 'text-emerald-400' : 'text-zinc-400 hover:text-zinc-300'
             )}
           >
             <Search className="h-3 w-3" />
@@ -466,7 +466,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             className="h-6 w-40 bg-transparent font-mono text-xs text-zinc-100 placeholder:text-zinc-400 focus:outline-none"
           />
           {matchInfo && (
-            <span className="font-mono text-[10px] text-zinc-500">
+            <span className="font-mono text-[10px] text-zinc-400">
               {matchInfo.count === 0 ? '0/0' : `${matchInfo.index + 1}/${matchInfo.count}`}
             </span>
           )}
@@ -474,7 +474,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             type="button"
             onClick={() => runSearch('previous')}
             title="Previous match (Shift+Enter)"
-            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
           >
             <ChevronUp className="h-3 w-3" />
           </button>
@@ -482,7 +482,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             type="button"
             onClick={() => runSearch('next')}
             title="Next match (Enter)"
-            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
           >
             <ChevronDown className="h-3 w-3" />
           </button>
@@ -490,7 +490,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             type="button"
             onClick={closeSearch}
             title="Close (Esc)"
-            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
           >
             <X className="h-3 w-3" />
           </button>

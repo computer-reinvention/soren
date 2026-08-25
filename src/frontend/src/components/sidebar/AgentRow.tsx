@@ -59,7 +59,7 @@ export function AgentRow({ agent, isSupervisor = false, tokens }: AgentRowProps)
         className={cn(
           'flex-1 truncate font-mono text-xs',
           isSupervisor ? 'font-semibold text-foreground' : 'text-foreground/90',
-          needsAttention && 'text-red-400'
+          needsAttention && 'text-red-700 dark:text-red-400'
         )}
       >
         {displayName}

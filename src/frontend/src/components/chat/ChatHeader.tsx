@@ -49,7 +49,7 @@ function getStatusDisplay(status: string | undefined, isActive: boolean) {
   if (isActive) {
     return {
       label: 'WORKING',
-      className: 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 border-yellow-500/30',
+      className: 'bg-yellow-500/20 text-yellow-800 dark:text-yellow-400 border-yellow-500/30',
     };
   }
 
@@ -57,32 +57,32 @@ function getStatusDisplay(status: string | undefined, isActive: boolean) {
     case 'IDLE':
       return {
         label: 'IDLE',
-        className: 'bg-green-500/20 text-green-600 dark:text-green-400 border-green-500/30',
+        className: 'bg-green-500/20 text-green-800 dark:text-green-400 border-green-500/30',
       };
     case 'IN_PROGRESS':
       return {
         label: 'WORKING',
-        className: 'bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 border-yellow-500/30',
+        className: 'bg-yellow-500/20 text-yellow-800 dark:text-yellow-400 border-yellow-500/30',
       };
     case 'PENDING':
       return {
         label: 'PENDING',
-        className: 'bg-blue-500/20 text-blue-600 dark:text-blue-400 border-blue-500/30',
+        className: 'bg-blue-500/20 text-blue-700 dark:text-blue-400 border-blue-500/30',
       };
     case 'BLOCKED':
       return {
         label: 'BLOCKED',
-        className: 'bg-orange-500/20 text-orange-600 dark:text-orange-400 border-orange-500/30',
+        className: 'bg-orange-500/20 text-orange-800 dark:text-orange-400 border-orange-500/30',
       };
     case 'FAILED':
       return {
         label: 'FAILED',
-        className: 'bg-red-500/20 text-red-600 dark:text-red-400 border-red-500/30',
+        className: 'bg-red-500/20 text-red-700 dark:text-red-400 border-red-500/30',
       };
     case 'COMPLETE':
       return {
         label: 'COMPLETE',
-        className: 'bg-green-500/20 text-green-600 dark:text-green-400 border-green-500/30',
+        className: 'bg-green-500/20 text-green-800 dark:text-green-400 border-green-500/30',
       };
     default:
       return {
@@ -167,7 +167,7 @@ export function ChatHeader({
               {workingCount > 0 && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] h-5 px-1.5 bg-yellow-500/20 text-yellow-600 dark:text-yellow-400 border-yellow-500/30"
+                  className="text-[10px] h-5 px-1.5 bg-yellow-500/20 text-yellow-800 dark:text-yellow-400 border-yellow-500/30"
                 >
                   {workingCount} working
                 </Badge>
@@ -175,14 +175,14 @@ export function ChatHeader({
               {blockedCount > 0 && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] h-5 px-1.5 bg-orange-500/20 text-orange-600 dark:text-orange-400 border-orange-500/30"
+                  className="text-[10px] h-5 px-1.5 bg-orange-500/20 text-orange-800 dark:text-orange-400 border-orange-500/30"
                 >
                   {blockedCount} blocked
                 </Badge>
               )}
               <Badge
                 variant="outline"
-                className="text-[10px] h-5 px-1.5 bg-green-500/20 text-green-600 dark:text-green-400 border-green-500/30"
+                className="text-[10px] h-5 px-1.5 bg-green-500/20 text-green-800 dark:text-green-400 border-green-500/30"
               >
                 {idleCount} idle
               </Badge>
@@ -198,7 +198,7 @@ export function ChatHeader({
               {isPermanent && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] h-5 px-1.5 bg-teal-500/20 text-teal-600 dark:text-teal-400 border-teal-500/30"
+                  className="text-[10px] h-5 px-1.5 bg-teal-500/20 text-teal-800 dark:text-teal-400 border-teal-500/30"
                 >
                   Permanent
                 </Badge>
@@ -206,7 +206,7 @@ export function ChatHeader({
               {agent?.worktree_branch && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] h-5 px-1.5 font-mono bg-violet-500/10 text-violet-500 border-violet-500/30"
+                  className="text-[10px] h-5 px-1.5 font-mono bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/30"
                 >
                   <GitBranch className="h-3 w-3 mr-0.5" />
                   {agent.worktree_branch}
@@ -304,7 +304,7 @@ export function ChatHeader({
         {isHealthDegraded && (
           <Tooltip>
             <TooltipTrigger asChild>
-              <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs bg-amber-500/10 text-amber-600 dark:text-amber-400">
+              <div className="flex items-center gap-1 px-2 py-1 rounded-md text-xs bg-amber-500/10 text-amber-800 dark:text-amber-400">
                 <AlertTriangle className="h-3 w-3" />
                 <span className="hidden sm:inline">Degraded</span>
               </div>
@@ -322,10 +322,10 @@ export function ChatHeader({
               className={cn(
                 'flex items-center gap-1.5 px-2 py-1 rounded-md text-xs',
                 isConnected
-                  ? 'bg-green-500/10 text-green-600 dark:text-green-400'
+                  ? 'bg-green-500/10 text-green-800 dark:text-green-400'
                   : isReconnecting
-                    ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'
-                    : 'bg-red-500/10 text-red-600 dark:text-red-400'
+                    ? 'bg-yellow-500/10 text-yellow-800 dark:text-yellow-400'
+                    : 'bg-red-500/10 text-red-700 dark:text-red-400'
               )}
               role="status"
             >

@@ -67,18 +67,33 @@ which itself falls back to dark). Standard shadcn token names:
 Reference them via Tailwind classes (`bg-background`, `text-muted-foreground`,
 `border-border`), never raw `hsl(var(--x))` in component code.
 
-**Known limitation (flagged during the P5.8 accessibility pass, not yet
-fixed):** light mode's `--muted-foreground` is only ~4.6:1 contrast at full
-opacity — any Tailwind opacity modifier (`/70`, `/80`, ...) pushes it below
-the 4.5:1 WCAG AA threshold. Status/badge colors have the same problem in
-reverse: e.g. `amber-600` passes on the dark background but fails on light,
-while `amber-700` is the reverse. Every color-contrast fix that shipped in
-P5.8/P6.3 uses an explicit `dark:` variant pair for exactly this reason —
-**don't add a bare `text-{color}-{shade}` for anything status/text-bearing
-without checking both themes**, since a value that looks fine in the (more
-commonly tested) dark theme can silently fail contrast in light mode. A
-full light-mode contrast pass (choosing correct per-color shade pairs
-project-wide) is a known follow-up, not yet done.
+**Light-mode contrast (P6.7):** `--muted-foreground`, `--primary`,
+`--destructive`, and the six `--status-*` tokens were all darkened in
+`:root` — the shadcn-default `--muted-foreground` (46% lightness) only
+cleared 4.5:1 at full opacity, `--primary`/`--destructive` had never
+actually been checked as *text* colors (only as button fills) and
+measured as low as ~3:1, and the `--status-*` six were byte-identical
+between `:root` and `.dark`, so any of them used as text was ~1.7:1 in
+light mode. Every hand-authored `text-{color}-{shade}` pairing across the
+codebase was individually verified against **every real background it
+can render on** — not just the plain page background, but `bg-accent`
+(the "current item" highlight), `--secondary` (default `Badge` fill), and
+each color's own translucent `bg-{color}-500/NN` pill tint blended over
+the page background — since the same text color can pass against one and
+fail against another (e.g. a badge's own `/20` tint is measurably darker
+than the plain page background, and needed `800` where a same-color
+non-badge usage only needed `700`). If you add a new colored badge/pill,
+compute its actual contrast against its own tinted background, not the
+page background — eyeballing or assuming a shade that "worked elsewhere"
+is exactly how the badges above regressed in the first place. Two
+third-party library defaults needed the same treatment: `CodeViewer.tsx`
+and `DiffPage.tsx`'s `react-diff-viewer-continued` line-number gutter
+both hardcoded ~50% opacity gray that measured ~2-3:1 in both themes (see
+their `index.css`/`DiffPage.tsx` comments), and the diff viewer's
+Dracula/GitHub-derived syntax-highlight themes had several token colors
+(`comment`, `keyword`, `tag`, ...) that were never tuned against its own
+green/red diff-row tints — both fixed with computed per-theme overrides
+rather than guessed ones.
 
 ### Custom Tailwind variants (`tailwind.config.js`)
 

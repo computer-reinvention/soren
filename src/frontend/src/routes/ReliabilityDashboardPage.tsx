@@ -20,8 +20,8 @@ const QUERY_OPTS = {
 
 function successRateColor(rate: number): string {
   if (rate >= 0.9) return 'text-emerald-700 dark:text-emerald-500';
-  if (rate >= 0.6) return 'text-amber-500';
-  return 'text-red-400';
+  if (rate >= 0.6) return 'text-amber-700 dark:text-amber-500';
+  return 'text-red-700 dark:text-red-400';
 }
 
 function successRateBarColor(rate: number): string {
@@ -264,7 +264,7 @@ function FailureRow({ failure }: { failure: FailureLogEntry }) {
             <span
               className={cn(
                 'rounded px-1 py-0.5 font-mono text-[9px] uppercase tracking-wide',
-                failure.resolved ? 'bg-muted text-muted-foreground' : 'bg-red-500/15 text-red-400'
+                failure.resolved ? 'bg-muted text-muted-foreground' : 'bg-red-500/15 text-red-700 dark:text-red-400'
               )}
             >
               {failure.failure_type}

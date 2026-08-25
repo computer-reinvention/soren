@@ -149,7 +149,7 @@ export function HeartbeatIndicator() {
         <Button variant="ghost" size="icon" className="h-8 w-8 relative" title="System heartbeat">
           <HeartIcon
             className={cn(
-              'h-4 w-4 text-red-500 fill-red-500 transition-colors motion-reduce:animate-none',
+              'h-4 w-4 text-red-700 dark:text-red-500 fill-red-700 dark:fill-red-500 transition-colors motion-reduce:animate-none',
               status === 'alert' ? 'animate-pulse' : 'animate-heartbeat',
             )}
           />
@@ -169,7 +169,7 @@ export function HeartbeatIndicator() {
         <DropdownMenuLabel className="flex flex-col gap-0.5">
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-1.5">
-              <HeartIcon className="h-3.5 w-3.5 text-red-500 fill-red-500" />
+              <HeartIcon className="h-3.5 w-3.5 text-red-700 dark:text-red-500 fill-red-700 dark:fill-red-500" />
               {latest?.supervisor_state ? (
                 <span>
                   Supervisor: {latest.supervisor_state}
@@ -196,9 +196,9 @@ export function HeartbeatIndicator() {
         )}
 
         {latest?.all_clear && sectionEntries.length === 0 && (
-          <div className="px-3 py-4 flex items-center justify-center gap-2 text-xs text-emerald-700 dark:text-emerald-500 dark:text-emerald-400">
-            <Heart className="h-4 w-4 fill-red-500 text-red-500 animate-heartbeat" />
-            <span className="text-emerald-700 dark:text-emerald-500 dark:text-emerald-400">All clear — system healthy</span>
+          <div className="px-3 py-4 flex items-center justify-center gap-2 text-xs text-emerald-700 dark:text-emerald-400">
+            <Heart className="h-4 w-4 fill-red-700 dark:fill-red-500 text-red-700 dark:text-red-500 animate-heartbeat" />
+            <span className="text-emerald-700 dark:text-emerald-400">All clear — system healthy</span>
           </div>
         )}
 
@@ -228,7 +228,7 @@ export function HeartbeatIndicator() {
           <>
             <DropdownMenuSeparator />
             <div className="px-3 py-2 text-xs">
-              <span className="font-semibold text-orange-600 dark:text-orange-400">Next action: </span>
+              <span className="font-semibold text-orange-700 dark:text-orange-400">Next action: </span>
               <span className="text-muted-foreground">{latest.highest_priority}</span>
             </div>
           </>
@@ -273,7 +273,7 @@ export function HeartbeatIndicator() {
                       />
                       <span className="text-muted-foreground">{unit}</span>
                       <button
-                        className="p-0.5 hover:text-emerald-700 dark:text-emerald-500 transition-colors"
+                        className="p-0.5 hover:text-emerald-700 dark:hover:text-emerald-400 transition-colors"
                         onClick={(e) => { e.preventDefault(); savePref(key); }}
                       >
                         <Check className="h-3 w-3" />
@@ -281,7 +281,7 @@ export function HeartbeatIndicator() {
                     </span>
                   ) : (
                     <button
-                      className="font-mono text-foreground hover:text-blue-500 transition-colors cursor-pointer"
+                      className="font-mono text-foreground hover:text-blue-700 dark:hover:text-blue-400 transition-colors cursor-pointer"
                       onClick={(e) => { e.preventDefault(); setEditKey(key); setEditValue(String(prefs[key])); }}
                     >
                       {prefs[key]}{unit}

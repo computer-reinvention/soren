@@ -3,9 +3,9 @@ import { Badge } from '../ui/badge';
 import { ShieldCheck } from 'lucide-react';
 
 function complianceColor(rate: number): string {
-  if (rate >= 90) return 'text-green-500';
-  if (rate >= 70) return 'text-yellow-500';
-  return 'text-red-500';
+  if (rate >= 90) return 'text-green-700 dark:text-green-400';
+  if (rate >= 70) return 'text-yellow-700 dark:text-yellow-400';
+  return 'text-red-700 dark:text-red-400';
 }
 
 export function CorrectionCompliancePanel() {

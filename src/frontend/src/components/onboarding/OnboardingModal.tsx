@@ -63,7 +63,7 @@ const steps: OnboardingStep[] = [
       <div className="space-y-3">
         <div className="flex items-start gap-3">
           <div className="rounded border border-border/60 bg-muted/30 p-1.5 mt-0.5">
-            <Bot className="h-3.5 w-3.5 text-emerald-500" />
+            <Bot className="h-3.5 w-3.5 text-emerald-700 dark:text-emerald-500" />
           </div>
           <div>
             <p className="font-medium text-foreground font-mono text-xs uppercase tracking-wide">supervisor agent</p>
@@ -89,15 +89,15 @@ const steps: OnboardingStep[] = [
     description: (
       <div className="space-y-3">
         <div className="flex items-center gap-2 text-sm font-mono">
-          <GitBranch className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+          <GitBranch className="h-3.5 w-3.5 text-emerald-700 dark:text-emerald-500 shrink-0" />
           <span>changes are automatically committed to git</span>
         </div>
         <div className="flex items-center gap-2 text-sm font-mono">
-          <Zap className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+          <Zap className="h-3.5 w-3.5 text-amber-700 dark:text-amber-500 shrink-0" />
           <span>health daemon monitors the system every 10 seconds</span>
         </div>
         <div className="flex items-center gap-2 text-sm font-mono">
-          <Shield className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+          <Shield className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
           <span>automatic rollback if something breaks</span>
         </div>
         <p className="text-sm pt-2 border-t border-border/60">
@@ -185,11 +185,11 @@ function GettingStartedStep({ onDone }: { onDone: () => void }) {
           {checkingHealth ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-muted-foreground" aria-hidden />
           ) : isHealthy ? (
-            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-700 dark:text-emerald-500" aria-hidden />
           ) : (
-            <XCircle className="h-3.5 w-3.5 text-red-400" aria-hidden />
+            <XCircle className="h-3.5 w-3.5 text-red-700 dark:text-red-400" aria-hidden />
           )}
-          <span className={cn(!checkingHealth && (isHealthy ? 'text-emerald-500' : 'text-red-400'))}>
+          <span className={cn(!checkingHealth && (isHealthy ? 'text-emerald-700 dark:text-emerald-500' : 'text-red-700 dark:text-red-400'))}>
             {checkingHealth ? 'checking server connection…' : isHealthy ? 'server connection verified' : 'server unreachable'}
           </span>
         </div>
@@ -200,7 +200,7 @@ function GettingStartedStep({ onDone }: { onDone: () => void }) {
 
       {/* Send a real first message to the supervisor. */}
       {sent ? (
-        <div className="flex items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 font-mono text-xs text-emerald-500">
+        <div className="flex items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 font-mono text-xs text-emerald-800 dark:text-emerald-500">
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
           sent — the supervisor will respond in the chat panel once you're through here.
         </div>
@@ -234,7 +234,7 @@ function GettingStartedStep({ onDone }: { onDone: () => void }) {
             </Button>
           </div>
           {sendMutation.isError && (
-            <p className="text-xs text-red-400 font-mono">failed to send — you can also just use the chat panel directly</p>
+            <p className="text-xs text-red-700 dark:text-red-400 font-mono">failed to send — you can also just use the chat panel directly</p>
           )}
           <button
             type="button"
@@ -300,7 +300,7 @@ export function OnboardingModal() {
             convention used across Overview/Reliability/Settings headers. */}
         <div className="px-6 pt-6 pb-5 border-b border-border/60">
           <div className="flex items-center gap-3">
-            <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2 text-emerald-500">
+            <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2 text-emerald-800 dark:text-emerald-500">
               {isInteractiveStep ? <Send className="h-6 w-6" /> : step!.icon}
             </div>
             <DialogHeader className="text-left space-y-0.5">

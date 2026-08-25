@@ -52,7 +52,7 @@ export function ProjectGroup({ group, tokensByAgent, forceOpen = false }: Projec
         )}
         <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[9px] tabular-nums text-muted-foreground dark:text-muted-foreground/85">
           {group.attentionCount > 0 && (
-            <span className="text-red-400">{group.attentionCount}!</span>
+            <span className="text-red-700 dark:text-red-400">{group.attentionCount}!</span>
           )}
           {group.activeCount > 0 && (
             <span className="text-emerald-700 dark:text-emerald-500">{group.activeCount}●</span>

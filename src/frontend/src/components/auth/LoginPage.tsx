@@ -84,7 +84,7 @@ export function LoginPage() {
             />
           </div>
           {error && (
-            <div role="alert" className="flex items-center gap-1.5 text-xs text-red-500 font-mono">
+            <div role="alert" className="flex items-center gap-1.5 text-xs text-red-700 dark:text-red-400 font-mono">
               <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden />
               {error}
             </div>

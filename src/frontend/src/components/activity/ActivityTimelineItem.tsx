@@ -28,55 +28,62 @@ interface ActivityTimelineItemProps {
   showProjectBadge?: boolean;
 }
 
+// P6.7: `color` is used both for an icon on its own bg-{color}/10 tinted
+// circle AND for a Badge whose actual background is --secondary (a plain
+// ~92%-lightness gray in light mode) — the two contexts need different
+// minimum shades to clear 4.5:1, and the darker requirement of the two
+// wins here. Computed per-color rather than assumed: blue/purple/pink/red
+// clear both at 700; green/yellow/orange/cyan needed 800 (700 fails
+// against both backgrounds by a few tenths).
 const typeConfig: Record<
   ActivityType,
   { icon: typeof Terminal; color: string; bgColor: string; label: string }
 > = {
   tool_call: {
     icon: Terminal,
-    color: 'text-blue-600 dark:text-blue-400',
+    color: 'text-blue-700 dark:text-blue-400',
     bgColor: 'bg-blue-500/10',
     label: 'Tool Call',
   },
   message_sent: {
     icon: ArrowRight,
-    color: 'text-green-600 dark:text-green-400',
+    color: 'text-green-800 dark:text-green-400',
     bgColor: 'bg-green-500/10',
     label: 'Sent',
   },
   message_received: {
     icon: MessageSquare,
-    color: 'text-purple-600 dark:text-purple-400',
+    color: 'text-purple-700 dark:text-purple-400',
     bgColor: 'bg-purple-500/10',
     label: 'Received',
   },
   status_change: {
     icon: AlertCircle,
-    color: 'text-yellow-600 dark:text-yellow-400',
+    color: 'text-yellow-800 dark:text-yellow-400',
     bgColor: 'bg-yellow-500/10',
     label: 'Status',
   },
   webhook_received: {
     icon: Webhook,
-    color: 'text-orange-600 dark:text-orange-400',
+    color: 'text-orange-800 dark:text-orange-400',
     bgColor: 'bg-orange-500/10',
     label: 'Webhook',
   },
   user_message: {
     icon: User,
-    color: 'text-pink-600 dark:text-pink-400',
+    color: 'text-pink-800 dark:text-pink-400',
     bgColor: 'bg-pink-500/10',
     label: 'User',
   },
   mailbox_message: {
     icon: Mail,
-    color: 'text-cyan-600 dark:text-cyan-400',
+    color: 'text-cyan-800 dark:text-cyan-400',
     bgColor: 'bg-cyan-500/10',
     label: 'Mailbox',
   },
   heartbeat: {
     icon: Heart,
-    color: 'text-red-600 dark:text-red-400',
+    color: 'text-red-700 dark:text-red-400',
     bgColor: 'bg-red-500/10',
     label: 'Heartbeat',
   },
@@ -144,7 +151,7 @@ export const ActivityTimelineItem = memo(function ActivityTimelineItem({ activit
                   {showProjectBadge && (activity.data?.session as string) && (
                     <Badge
                       variant="outline"
-                      className="text-[10px] h-4 px-1 border-indigo-500/50 text-indigo-500"
+                      className="text-[10px] h-4 px-1 border-indigo-500/50 text-indigo-700 dark:text-indigo-400"
                     >
                       {(activity.data.session as string).replace('soren-', '')}
                     </Badge>

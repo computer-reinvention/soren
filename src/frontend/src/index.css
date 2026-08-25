@@ -14,43 +14,67 @@
     --popover: 0 0% 100%;
     --popover-foreground: 220 20% 10%;
 
-    --primary: 186 70% 40%;
+    /* L lowered from 40% to 30% (P6.7): `text-primary` is used directly
+       as text/icon color in ~20 places (links, active nav state, badges,
+       sparkline strokes) in addition to as a button background — at 40%
+       it only hit ~3:1 against any light surface, failing AA (4.5:1) for
+       every one of those text usages. 30% passes against background/
+       card/muted/sidebar-background, and as a button fill (white
+       foreground) contrast only improves (5.2:1 vs 3.2:1). */
+    --primary: 186 70% 30%;
     --primary-foreground: 0 0% 100%;
 
     --secondary: 220 14% 92%;
     --secondary-foreground: 220 20% 10%;
 
     --muted: 220 14% 94%;
-    --muted-foreground: 220 8% 46%;
+    /* L lowered from the shadcn-default 46% to 32% (P6.7 light-mode
+       contrast pass): 46% only cleared WCAG AA (4.5:1) at full opacity —
+       any Tailwind opacity modifier (/70, /80, ...) commonly used
+       elsewhere for de-emphasized text pushed it below 4.5:1. 32% clears
+       AA even at /80 (~4.65:1) and comfortably at full opacity (~7.8:1);
+       /70 and below still fail (~3.7:1) and should not be used for real
+       text in light mode without also checking contrast by hand. */
+    --muted-foreground: 220 8% 32%;
 
     --accent: 220 14% 92%;
     --accent-foreground: 220 20% 10%;
 
-    --destructive: 0 72% 56%;
+    /* L lowered from 56% to 48% (P6.7): `text-destructive` is used
+       directly for real error text (SecretsPanel, ChatPanel,
+       ErrorBoundary), where 56% only reached ~4.1:1 against light
+       surfaces. 48% clears 4.5:1 and still passes as a button fill with
+       white foreground text. */
+    --destructive: 0 72% 48%;
     --destructive-foreground: 0 0% 100%;
 
     --border: 220 12% 88%;
     --input: 220 12% 88%;
-    --ring: 186 70% 40%;
+    --ring: 186 70% 30%;
 
     --radius: 0.375rem;
 
     --sidebar-background: 220 14% 96%;
     --sidebar-foreground: 220 8% 30%;
-    --sidebar-primary: 186 70% 40%;
+    --sidebar-primary: 186 70% 30%;
     --sidebar-primary-foreground: 0 0% 100%;
     --sidebar-accent: 220 12% 92%;
     --sidebar-accent-foreground: 220 8% 30%;
     --sidebar-border: 220 12% 88%;
-    --sidebar-ring: 186 70% 40%;
+    --sidebar-ring: 186 70% 30%;
 
-    /* Operational status colors */
-    --status-green: 142 72% 52%;
-    --status-amber: 38 92% 56%;
-    --status-red: 0 72% 56%;
-    --status-blue: 212 80% 56%;
-    --status-purple: 270 60% 60%;
-    --status-cyan: 186 70% 50%;
+    /* Operational status colors. Same hue/saturation as the .dark values
+       below, lightness lowered for AA text contrast against the light
+       background (P6.7) — before this fix these six were byte-identical
+       between :root and .dark, so any of them used as text (not just as
+       a decorative dot/background) was unreadable in light mode (as low
+       as 1.7:1). */
+    --status-green: 142 72% 29%;
+    --status-amber: 38 92% 32%;
+    --status-red: 0 72% 50%;
+    --status-blue: 212 80% 46%;
+    --status-purple: 270 60% 55%;
+    --status-cyan: 186 70% 31%;
   }
 
   /* Terminal Console dark theme */
@@ -189,8 +213,17 @@
   width: 2.75rem;
   text-align: right;
   padding-right: 0.75rem;
-  color: hsl(220 6% 44% / 0.6);
+  /* P6.7: the previous hsl(220 6% 44% / 0.6) measured ~2.1-2.3:1 in both
+     themes (failed badly, not just borderline) — a single color/opacity
+     pair can't hit 4.5:1 against both a near-white and a near-black
+     background, so this needs an explicit per-theme value like the rest
+     of the design system's tokens. */
+  color: hsl(220 8% 32% / 0.85);
   user-select: none;
+}
+
+.dark .code-viewer-lines .line::before {
+  color: hsl(220 8% 64% / 0.8);
 }
 
 .code-viewer-lines .code-line-flash {
@@ -207,4 +240,16 @@
     animation: none;
     background-color: hsl(38 92% 56% / 0.35);
   }
+}
+
+/* P6.7: react-diff-viewer-continued (DiffPage.tsx) hardcodes its gutter
+   line-number color at 50% opacity in its own bundled stylesheet — not
+   exposed through the library's `styles` prop (only the base color is,
+   and that base color is otherwise fine). Measured ~2.1-3.1:1 in both
+   its light and dark themes. The class name has a build-hashed prefix
+   (e.g. `react-diff-h84nzi-line-number`) but a stable `-line-number`
+   suffix from the library's own emotion `label`, so target that instead
+   of the full hash. */
+[class*="-line-number"] {
+  opacity: 0.75 !important;
 }
