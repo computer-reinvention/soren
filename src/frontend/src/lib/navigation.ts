@@ -17,6 +17,7 @@ export const routes = {
     `/files/${path.split('/').map(encodeURIComponent).join('/')}`,
   terminal: () => '/terminal',
   tasks: () => '/tasks',
+  reliability: () => '/reliability',
 } as const;
 
 /** Decode a /files/* splat back into a filesystem path. */

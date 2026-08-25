@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare } from 'lucide-react';
+import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare, ShieldCheck } from 'lucide-react';
 import {
   CommandDialog,
   CommandEmpty,
@@ -217,6 +217,10 @@ export function CommandPalette() {
             <ListTodo className="h-4 w-4 mr-2" />
             <span>Tasks</span>
             <CommandShortcut>⌘4</CommandShortcut>
+          </CommandItem>
+          <CommandItem value="reliability dashboard agents failures" onSelect={() => runAction(() => navigate(routes.reliability()))}>
+            <ShieldCheck className="h-4 w-4 mr-2" />
+            <span>Reliability Dashboard</span>
           </CommandItem>
         </CommandGroup>
 

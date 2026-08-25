@@ -37,6 +37,9 @@ const ArchivedPage = lazy(() => import('./routes/pages').then((m) => ({ default:
 const FilePage = lazy(() => import('./routes/pages').then((m) => ({ default: m.FilePage })));
 const DiffPage = lazy(() => import('./routes/DiffPage').then((m) => ({ default: m.DiffPage })));
 const TasksPanel = lazy(() => import('./components/tasks/TasksPanel').then((m) => ({ default: m.TasksPanel })));
+const ReliabilityDashboardPage = lazy(() =>
+  import('./routes/ReliabilityDashboardPage').then((m) => ({ default: m.ReliabilityDashboardPage }))
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -141,6 +144,7 @@ export default function App() {
                 <Route path="/files/*" element={<FilePage />} />
                 <Route path="/diff/:sha" element={<DiffPage />} />
                 <Route path="/tasks" element={<TasksPanel />} />
+                <Route path="/reliability" element={<ReliabilityDashboardPage />} />
                 {/* Terminal renders inside CenterPanel (persistent mount); the
                     route itself has no content of its own. */}
                 <Route path="/terminal" element={null} />

@@ -467,17 +467,7 @@ export const api = {
   },
 
   async getQualityMetrics(): Promise<{
-    agents: Array<{
-      agent_id: string;
-      completions: number;
-      failures: number;
-      total_cost_usd: number;
-      completions_per_dollar: number | null;
-      cost_per_completion_usd: number | null;
-      success_rate: number;
-      first_pass_successes: number;
-      first_pass_rate: number | null;
-    }>;
+    agents: QualityAgentMetrics[];
     summary: {
       total_completions: number;
       total_failures: number;
@@ -554,6 +544,12 @@ export const api = {
   async getAgentReliability(): Promise<{ agents: AgentReliability[] }> {
     const res = await apiFetch(`${API_BASE}/api/agents/reliability`);
     if (!res.ok) throw new Error('Failed to fetch agent reliability');
+    return res.json();
+  },
+
+  async getFailureStats(): Promise<FailureStats> {
+    const res = await apiFetch(`${API_BASE}/api/agents/failures`);
+    if (!res.ok) throw new Error('Failed to fetch failure stats');
     return res.json();
   },
 
@@ -646,11 +642,52 @@ export interface ScorecardResponse {
   git_sha: string;
 }
 
+export interface ReliabilityDayBucket {
+  date: string; // "YYYY-MM-DD"
+  verified: number;
+  failed: number;
+  /** null (not 0) when the agent had no activity that day — a quiet day
+   *  is not the same thing as a 0% success rate day. */
+  success_rate: number | null;
+}
+
 export interface AgentReliability {
   agent_id: string;
   verified: number;
   failed: number;
   success_rate: number;
+  /** Last 14 days, oldest first, fixed contiguous window (no gaps). */
+  history: ReliabilityDayBucket[];
+}
+
+export interface FailureLogEntry {
+  id: number;
+  timestamp: string;
+  agent_id: string;
+  failure_type: string;
+  description: string;
+  commit_sha: string | null;
+  resolved: boolean;
+  root_cause: string | null;
+}
+
+export interface FailureStats {
+  total: number;
+  by_type: Record<string, number>;
+  by_agent: Record<string, { total: number; by_type: Record<string, number> }>;
+  recent: FailureLogEntry[];
+}
+
+export interface QualityAgentMetrics {
+  agent_id: string;
+  completions: number;
+  failures: number;
+  total_cost_usd: number;
+  completions_per_dollar: number | null;
+  cost_per_completion_usd: number | null;
+  success_rate: number;
+  first_pass_successes: number;
+  first_pass_rate: number | null;
 }
 
 export interface HeartbeatEntry {

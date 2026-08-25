@@ -182,9 +182,17 @@ export function OverviewPage() {
             aria-label="agent reliability"
             className="rounded border border-border/60 bg-card px-3 py-2"
           >
-            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
-              verification success
-            </h2>
+            <div className="flex items-baseline justify-between">
+              <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+                verification success
+              </h2>
+              <Link
+                to={routes.reliability()}
+                className="font-mono text-[10px] text-muted-foreground/60 hover:text-primary"
+              >
+                full dashboard →
+              </Link>
+            </div>
             {topAgents.length === 0 ? (
               <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">no verifications yet</p>
             ) : (

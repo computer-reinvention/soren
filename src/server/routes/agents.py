@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect, Body
 from pydantic import BaseModel
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List
 import asyncio
 import json
@@ -90,12 +90,17 @@ async def list_agents_by_project(project_id: str):
     return {"project_id": project_id, "agents": agents, "total": len(agents)}
 
 
+RELIABILITY_HISTORY_DAYS = 14
+
+
 @router.get("/reliability")
 async def get_agent_reliability():
     """Get per-agent verification counts from mailbox history.
 
     Counts [VERIFIED] and [VERIFY-FAILED] subjects per agent across the
-    current mailbox and any mailbox archive files.
+    current mailbox and any mailbox archive files. Also buckets the last
+    `RELIABILITY_HISTORY_DAYS` days by date so the frontend can render a
+    real (not synthetic) success-rate trend sparkline per agent.
     """
     soren_dir = settings.soren_dir
     mailbox_files = []
@@ -104,6 +109,10 @@ async def get_agent_reliability():
     mailbox_files.extend(sorted(soren_dir.glob("mailbox.archive-*")))
 
     counts: dict[str, dict[str, int]] = defaultdict(lambda: {"verified": 0, "failed": 0})
+    # agent_id -> date string ("YYYY-MM-DD") -> counts
+    daily: dict[str, dict[str, dict[str, int]]] = defaultdict(
+        lambda: defaultdict(lambda: {"verified": 0, "failed": 0})
+    )
 
     for path in mailbox_files:
         try:
@@ -124,10 +133,30 @@ async def get_agent_reliability():
             agent_id = from_field.split(":", 1)[-1] if ":" in from_field else from_field
             if not agent_id:
                 continue
+            outcome = None
             if "[VERIFIED]" in subject:
-                counts[agent_id]["verified"] += 1
+                outcome = "verified"
             elif "[VERIFY-FAILED]" in subject:
-                counts[agent_id]["failed"] += 1
+                outcome = "failed"
+            if outcome is None:
+                continue
+            counts[agent_id][outcome] += 1
+
+            ts = msg.get("ts")
+            if ts:
+                try:
+                    date_str = datetime.fromisoformat(ts).date().isoformat()
+                    daily[agent_id][date_str][outcome] += 1
+                except (ValueError, TypeError):
+                    pass
+
+    # Fixed, contiguous window of the last N days (including today) so the
+    # frontend can render a sparkline without gaps even for quiet days.
+    today = datetime.now(timezone.utc).date()
+    window_dates = [
+        (today - timedelta(days=offset)).isoformat()
+        for offset in range(RELIABILITY_HISTORY_DAYS - 1, -1, -1)
+    ]
 
     agents = []
     for agent_id, c in sorted(counts.items()):
@@ -135,11 +164,26 @@ async def get_agent_reliability():
         failed = c["failed"]
         total = verified + failed
         success_rate = round(verified / total, 3) if total > 0 else 0.0
+
+        history = []
+        for date_str in window_dates:
+            day_counts = daily[agent_id].get(date_str, {"verified": 0, "failed": 0})
+            day_verified = day_counts["verified"]
+            day_failed = day_counts["failed"]
+            day_total = day_verified + day_failed
+            history.append({
+                "date": date_str,
+                "verified": day_verified,
+                "failed": day_failed,
+                "success_rate": round(day_verified / day_total, 3) if day_total > 0 else None,
+            })
+
         agents.append({
             "agent_id": agent_id,
             "verified": verified,
             "failed": failed,
             "success_rate": success_rate,
+            "history": history,
         })
 
     return {"agents": agents}

@@ -117,7 +117,7 @@ def get_failure_stats() -> dict:
         # Recent failures
         cursor = conn.execute(
             """
-            SELECT id, timestamp, agent_id, failure_type, description, commit_sha, resolved
+            SELECT id, timestamp, agent_id, failure_type, description, commit_sha, resolved, root_cause
             FROM failure_log
             ORDER BY timestamp DESC
             LIMIT 20
