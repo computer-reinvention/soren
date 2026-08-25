@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -84,7 +84,12 @@ const typeConfig: Record<
 
 const LOW_SIGNAL_TYPES: ReadonlySet<ActivityType> = new Set(['heartbeat', 'status_change']);
 
-export function ActivityTimelineItem({ activity, isLast, showProjectBadge }: ActivityTimelineItemProps) {
+// P6.3 (performance audit): memoized — mapped over every visible activity,
+// and activityStore's own updates always prepend-and-slice into a new
+// array without mutating existing items, so unchanged `activity` objects
+// keep the same reference across re-renders (this memo has something to
+// actually bail out on).
+export const ActivityTimelineItem = memo(function ActivityTimelineItem({ activity, isLast, showProjectBadge }: ActivityTimelineItemProps) {
   const [isOpen, setIsOpen] = useState(false);
   const config = typeConfig[activity.type];
   const time = formatDistanceToNow(new Date(activity.timestamp), { addSuffix: true });
@@ -186,7 +191,7 @@ export function ActivityTimelineItem({ activity, isLast, showProjectBadge }: Act
       </Collapsible>
     </div>
   );
-}
+});
 
 /** Structured view for tool call details instead of raw JSON */
 function ToolCallDetails({

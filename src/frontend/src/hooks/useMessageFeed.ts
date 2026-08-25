@@ -14,6 +14,16 @@ import type { Activity } from '@/types/activity';
  * hooks; query keys are unchanged, so caching behavior is identical.
  */
 
+// P6.3 (performance audit): a stable module-level empty Map. Without this,
+// every recompute that finds "nothing relevant" (which is most of them —
+// activityStore/thoughtStore are global, so this hook re-runs for events
+// belonging to agents that aren't even the one currently being viewed)
+// still allocated a brand-new `Map()`, giving every consumer (ChatMessage
+// rows) a changed prop reference and forcing a full re-render for a
+// genuinely no-op update. Returning this shared instance instead lets
+// React.memo on ChatMessage (see ChatMessage.tsx) actually bail out.
+const EMPTY_MAP = new Map<string, never>();
+
 export function useSortedMessages(messages: Message[]): Message[] {
   return useMemo(
     () =>
@@ -30,7 +40,7 @@ export function useSortedMessages(messages: Message[]): Message[] {
  *  2) live activity-store events, correlated to the LAST agent message that
  *     lacks persisted events via (prevMsg.ts, msg.ts] window + agent match
  */
-export function useToolCorrelation(sortedMessages: Message[]): Map<string, Activity[]> {
+export function useToolCorrelation(sortedMessages: Message[]): ReadonlyMap<string, Activity[]> {
   const { activities } = useActivityStore();
 
   const agentMessageIds = useMemo(
@@ -40,6 +50,23 @@ export function useToolCorrelation(sortedMessages: Message[]): Map<string, Activ
         .map((m) => m.id),
     [sortedMessages]
   );
+
+  // Agents actually present in this message list — activityStore is
+  // global (every agent's tool calls flow through it), so most incoming
+  // events don't belong to whichever conversation is currently on screen.
+  // Filtering to just these agents before the correlation loop below skips
+  // the expensive per-message backward scan entirely on those events.
+  // Fuzzy (substring) match, same semantics as the per-message check
+  // further down — an exact Set.has() here would be stricter than the
+  // original matching and could wrongly drop valid correlations.
+  const relevantAgentIds = useMemo(
+    () => [...new Set(sortedMessages.map((m) => m.from_agent).filter((a) => a && a !== 'user'))],
+    [sortedMessages]
+  );
+  const isRelevantAgent = (agentId: string) =>
+    relevantAgentIds.some(
+      (from) => agentId === from || agentId.toLowerCase().includes(from.toLowerCase())
+    );
 
   const { data: persistedEvents } = useQuery({
     queryKey: ['events-by-messages', agentMessageIds],
@@ -76,7 +103,7 @@ export function useToolCorrelation(sortedMessages: Message[]): Map<string, Activ
 
     // 2) Live events for the most recent message not yet linked in SQLite
     const liveToolCalls = activities
-      .filter((a) => a.type === 'tool_call')
+      .filter((a) => a.type === 'tool_call' && isRelevantAgent(a.agent_id))
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     for (let i = sortedMessages.length - 1; i >= 0; i--) {
@@ -111,7 +138,7 @@ export function useToolCorrelation(sortedMessages: Message[]): Map<string, Activ
       break;
     }
 
-    return map;
+    return map.size > 0 ? map : EMPTY_MAP;
   }, [sortedMessages, activities, persistedEvents]);
 }
 
@@ -120,7 +147,7 @@ export function useToolCorrelation(sortedMessages: Message[]): Map<string, Activ
  * deduped by id, then correlated per message via (prevMsg.ts, msg.ts]
  * window + agent-name match. Runs over ALL agent messages.
  */
-export function useThoughtCorrelation(sortedMessages: Message[]): Map<string, Thought[]> {
+export function useThoughtCorrelation(sortedMessages: Message[]): ReadonlyMap<string, Thought[]> {
   const { thoughts } = useThoughtStore();
 
   const { data: persistedThoughtsData } = useQuery({
@@ -130,16 +157,32 @@ export function useThoughtCorrelation(sortedMessages: Message[]): Map<string, Th
     refetchOnWindowFocus: false,
   });
 
+  // Same reasoning as useToolCorrelation above: thoughtStore is global
+  // across every agent, so pre-filtering to agents actually present in
+  // this message list avoids the O(messages * thoughts) scan below firing
+  // at full cost for every thought from an agent that isn't even visible.
+  const relevantAgentNames = useMemo(
+    () => [...new Set(sortedMessages.map((m) => m.from_agent).filter((a) => a && a !== 'user'))],
+    [sortedMessages]
+  );
+  const isRelevantAgent = (agentName: string) =>
+    relevantAgentNames.some(
+      (from) => agentName === from || agentName.toLowerCase().includes(from.toLowerCase())
+    );
+
   const allThoughts = useMemo(() => {
     const persisted = (persistedThoughtsData?.thoughts || []) as Thought[];
     const liveIds = new Set(thoughts.map((t) => t.id));
-    return [...thoughts, ...persisted.filter((t) => !liveIds.has(t.id))];
-  }, [thoughts, persistedThoughtsData]);
+    return [...thoughts, ...persisted.filter((t) => !liveIds.has(t.id))].filter((t) =>
+      isRelevantAgent(t.agent_name)
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [thoughts, persistedThoughtsData, relevantAgentNames]);
 
   return useMemo(() => {
-    const map = new Map<string, Thought[]>();
-    if (allThoughts.length === 0) return map;
+    if (allThoughts.length === 0) return EMPTY_MAP;
 
+    const map = new Map<string, Thought[]>();
     const sortedThoughts = [...allThoughts].sort(
       (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
     );
@@ -170,7 +213,7 @@ export function useThoughtCorrelation(sortedMessages: Message[]): Map<string, Th
       }
     }
 
-    return map;
+    return map.size > 0 ? map : EMPTY_MAP;
   }, [sortedMessages, allThoughts]);
 }
 

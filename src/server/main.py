@@ -245,15 +245,38 @@ if frontend_dir.exists():
         /agents/supervisor must serve index.html and let the router resolve;
         without this, hard refreshes on any route 404. Starlette raises
         HTTPException(404) for missing files, so we catch — not inspect — it.
+
+        P6.3 (performance audit): also sets Cache-Control. Starlette's
+        StaticFiles only sends Last-Modified/ETag by default — every asset
+        was getting revalidated (or worse, refetched with no validators at
+        all) on every load, a real finding from a Lighthouse trace. Vite
+        content-hashes everything under assets/ (a new build always gets a
+        new filename), so those are safe to cache for a year as immutable.
+        Everything else (index.html, manifest.webmanifest, icons, sw.js)
+        keeps a fixed filename and MUST be revalidated every time — an
+        aggressively cached index.html would keep serving stale references
+        to assets/ files from a previous deploy that may no longer exist.
         """
 
         async def get_response(self, path: str, scope):  # type: ignore[override]
+            is_fallback = False
             try:
-                return await super().get_response(path, scope)
+                response = await super().get_response(path, scope)
             except StarletteHTTPException as exc:
                 if exc.status_code == 404 and not path.startswith("api"):
-                    return await super().get_response("index.html", scope)
-                raise
+                    response = await super().get_response("index.html", scope)
+                    is_fallback = True
+                else:
+                    raise
+            # A missing assets/*.js path (e.g. a stale reference from an old
+            # deploy) falls back to index.html above — it must NOT inherit
+            # the immutable cache-control below just because the original
+            # requested path started with "assets/".
+            if not is_fallback and path.startswith("assets/"):
+                response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+            else:
+                response.headers["Cache-Control"] = "no-cache"
+            return response
 
     app.mount("/", SPAStaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, memo } from 'react';
 import { cn, getAgentBadgeLabel, getAgentBadgeColor, parseMessagePrefix } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -350,7 +350,13 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   );
 }
 
-export function ChatMessage({ message, toolCalls, thoughts, collapseCount }: ChatMessageProps) {
+// P6.3 (performance audit): memoized — this is mapped over every message in
+// the feed, and useMessageFeed's tool/thought correlation hooks now return
+// referentially-stable results when nothing relevant changed (a shared
+// empty Map instead of a fresh one each time), so this memo boundary
+// actually has a chance to skip re-rendering unrelated rows when one new
+// message/activity/thought arrives.
+export const ChatMessage = memo(function ChatMessage({ message, toolCalls, thoughts, collapseCount }: ChatMessageProps) {
   const agents = useAgentStore((s) => s.agents);
   const { username } = useAuthStore();
 
@@ -398,4 +404,4 @@ export function ChatMessage({ message, toolCalls, thoughts, collapseCount }: Cha
       isPhoto={isPhoto}
     />
   );
-}
+});

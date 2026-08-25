@@ -1,11 +1,14 @@
-import { useMemo } from 'react';
+import { useMemo, memo } from 'react';
 import { useThoughtStore, type Thought } from '@/stores/thoughtStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useRouteAgentId } from '@/lib/navigation';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Brain } from 'lucide-react';
 
-function ThoughtItem({ thought }: { thought: Thought }) {
+// P6.3 (performance audit): memoized — mapped over the full visible
+// thought list, which otherwise fully re-renders (including the
+// toLocaleTimeString call above) every time a single new thought arrives.
+const ThoughtItem = memo(function ThoughtItem({ thought }: { thought: Thought }) {
   const time = new Date(thought.timestamp).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
@@ -29,7 +32,7 @@ function ThoughtItem({ thought }: { thought: Thought }) {
       </div>
     </div>
   );
-}
+});
 
 export function ThoughtStream() {
   const thoughts = useThoughtStore((s) => s.thoughts);

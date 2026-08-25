@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { cn } from '@/lib/utils';
 import { getToolSummary } from '@/lib/toolSummary';
 import {
@@ -107,7 +107,11 @@ function getStepCountSummary(toolCalls: Activity[]): string {
 export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimelineProps) {
   const [isExpanded, setIsExpanded] = useState(false);
 
-  const steps = buildTimeline(thoughts, toolCalls);
+  // P6.3 (performance audit): was recomputed unconditionally on every
+  // render, including the toggle-only re-render from setIsExpanded above —
+  // buildTimeline does array spreads + Date parsing + a full sort, none of
+  // which depend on isExpanded.
+  const steps = useMemo(() => buildTimeline(thoughts, toolCalls), [thoughts, toolCalls]);
   if (steps.length === 0) return null;
 
   const totalSteps = steps.length;
@@ -141,8 +145,8 @@ export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimeline
 
       {isExpanded && (
         <div className="mt-1 ml-1 pl-2 border-l-2 border-yellow-500/20 space-y-0 animate-in slide-in-from-top-1 duration-150">
-          {steps.slice(0, MAX_SHOWN).map((step, idx) => (
-            <TimelineStepItem key={idx} step={step} />
+          {steps.slice(0, MAX_SHOWN).map((step) => (
+            <TimelineStepItem key={step.thought?.id ?? step.tool?.id ?? step.timestamp} step={step} />
           ))}
           {steps.length > MAX_SHOWN && (
             <p className="text-[10px] text-muted-foreground dark:text-muted-foreground/80 py-0.5">
