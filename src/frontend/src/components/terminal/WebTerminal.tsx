@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
-import { RotateCw } from 'lucide-react';
+import { RotateCw, Search, X, ChevronUp, ChevronDown, Minus, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { TERMINAL_WS_URL, TERMINAL_PING_INTERVAL } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useTerminalStore, type TerminalMode } from '@/stores/terminalStore';
+import { useTerminalSettingsStore } from '@/stores/terminalSettingsStore';
 
 type ConnectionStatus = 'connecting' | 'connected' | 'closed';
 
@@ -56,6 +59,8 @@ export function WebTerminal({ active }: WebTerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const searchRef = useRef<SearchAddon | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const pingRef = useRef<number>();
   const fitRafRef = useRef<number>();
@@ -67,6 +72,44 @@ export function WebTerminal({ active }: WebTerminalProps) {
 
   const [status, setStatus] = useState<ConnectionStatus>('connecting');
   const [closeCode, setCloseCode] = useState<number | null>(null);
+
+  // P5.7: in-terminal search (Ctrl/Cmd+F while the terminal has focus).
+  const [searchOpen, setSearchOpen] = useState(false);
+  const searchOpenRef = useRef(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [matchInfo, setMatchInfo] = useState<{ index: number; count: number } | null>(null);
+  const { fontSize, increaseFontSize, decreaseFontSize } = useTerminalSettingsStore();
+
+  // attachCustomKeyEventHandler is registered once at mount (see below) — it
+  // needs a ref, not the searchOpen state value directly, or its closure
+  // would only ever see searchOpen's value from that first render.
+  useEffect(() => {
+    searchOpenRef.current = searchOpen;
+  }, [searchOpen]);
+
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    searchRef.current?.clearDecorations();
+    setMatchInfo(null);
+    termRef.current?.focus();
+  }, []);
+
+  const runSearch = useCallback((direction: 'next' | 'previous') => {
+    const search = searchRef.current;
+    if (!search || !searchQuery) return;
+    const opts = {
+      decorations: {
+        matchBackground: '#3f3f46',
+        matchBorder: '#71717a',
+        matchOverviewRuler: '#71717a',
+        activeMatchBackground: '#f0a030',
+        activeMatchBorder: '#f0a030',
+        activeMatchColorOverviewRuler: '#f0a030',
+      },
+    };
+    if (direction === 'next') search.findNext(searchQuery, opts);
+    else search.findPrevious(searchQuery, opts);
+  }, [searchQuery]);
 
   // Fit the terminal to its container and report the new size to the PTY.
   const fitAndReport = useCallback(() => {
@@ -178,24 +221,51 @@ export function WebTerminal({ active }: WebTerminalProps) {
     const container = containerRef.current;
     if (!container) return;
 
+    const initial = useTerminalSettingsStore.getState();
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: MONO_FONT_STACK,
-      fontSize: 13,
-      scrollback: 5000,
+      fontSize: initial.fontSize,
+      scrollback: initial.scrollback,
       theme: TERM_THEME,
+      // SearchAddon's match-highlight decorations (P5.7) are a "proposed"
+      // (not yet stabilized) xterm API — omitting this crashes the whole
+      // terminal with "You must set the allowProposedApi option to true"
+      // the moment a search actually runs a decorated find.
+      allowProposedApi: true,
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
     term.loadAddon(fit);
+    term.loadAddon(search);
+    term.loadAddon(new WebLinksAddon());
     termRef.current = term;
     fitRef.current = fit;
+    searchRef.current = search;
+
+    const searchResultsDisposable = search.onDidChangeResults(({ resultIndex, resultCount }) => {
+      setMatchInfo({ index: resultIndex, count: resultCount });
+    });
 
     term.open(container);
 
     // Ctrl+` is the app-level terminal toggle (registered in the Header) —
-    // don't let xterm swallow it or type a backtick into the PTY.
+    // don't let xterm swallow it or type a backtick into the PTY. Ctrl/Cmd+F
+    // opens the in-terminal search bar instead of the browser's native find
+    // (only intercepted while xterm itself has focus, so page-level find
+    // still works everywhere else).
     term.attachCustomKeyEventHandler((event) => {
       if (event.ctrlKey && !event.metaKey && !event.altKey && event.code === 'Backquote') {
+        return false;
+      }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && event.type === 'keydown') {
+        event.preventDefault();
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInputRef.current?.focus());
+        return false;
+      }
+      if (event.key === 'Escape' && event.type === 'keydown' && searchOpenRef.current) {
+        closeSearch();
         return false;
       }
       return true;
@@ -221,11 +291,38 @@ export function WebTerminal({ active }: WebTerminalProps) {
         fitRafRef.current = undefined;
       }
       dataDisposable.dispose();
+      searchResultsDisposable.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      searchRef.current = null;
     };
   }, [scheduleFit]);
+
+  // Find-as-you-type: re-run the search on every keystroke (incremental
+  // mode expands/contracts the current match instead of always jumping to
+  // the next occurrence, matching typical editor find-bar behavior).
+  useEffect(() => {
+    if (!searchOpen) return;
+    const search = searchRef.current;
+    if (!search) return;
+    if (!searchQuery) {
+      search.clearDecorations();
+      setMatchInfo(null);
+      return;
+    }
+    search.findNext(searchQuery, {
+      incremental: true,
+      decorations: {
+        matchBackground: '#3f3f46',
+        matchBorder: '#71717a',
+        matchOverviewRuler: '#71717a',
+        activeMatchBackground: '#f0a030',
+        activeMatchBorder: '#f0a030',
+        activeMatchColorOverviewRuler: '#f0a030',
+      },
+    });
+  }, [searchQuery, searchOpen]);
 
   // Connect on mount and reconnect whenever the mode changes.
   useEffect(() => {
@@ -247,6 +344,18 @@ export function WebTerminal({ active }: WebTerminalProps) {
       termRef.current?.focus();
     }
   }, [active, scheduleFit]);
+
+  // Live font-size updates (P5.7) — xterm supports changing options on an
+  // existing instance, so this avoids tearing down and recreating the
+  // terminal (which would lose scrollback/PTY continuity) just to resize
+  // text. Re-fit afterward since a new font size changes how many
+  // cols/rows fit the same pixel box, and the PTY needs to know.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontSize = fontSize;
+    scheduleFit();
+  }, [fontSize, scheduleFit]);
 
   return (
     <div className="relative flex h-full flex-col bg-zinc-950">
@@ -292,10 +401,101 @@ export function WebTerminal({ active }: WebTerminalProps) {
             Soren session
           </button>
         </div>
+
+        {/* Font size + search (P5.7) */}
+        <div className="flex items-center gap-1">
+          <div className="flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+            <button
+              type="button"
+              onClick={decreaseFontSize}
+              title="Decrease font size"
+              className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <Minus className="h-3 w-3" />
+            </button>
+            <span className="w-6 text-center font-mono text-[10px] text-zinc-400">{fontSize}</span>
+            <button
+              type="button"
+              onClick={increaseFontSize}
+              title="Increase font size"
+              className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+            >
+              <Plus className="h-3 w-3" />
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setSearchOpen(true);
+              requestAnimationFrame(() => searchInputRef.current?.focus());
+            }}
+            title="Search terminal (Ctrl+F)"
+            aria-pressed={searchOpen}
+            className={cn(
+              'rounded-md border border-zinc-800 bg-zinc-900 p-1',
+              searchOpen ? 'text-emerald-400' : 'text-zinc-500 hover:text-zinc-300'
+            )}
+          >
+            <Search className="h-3 w-3" />
+          </button>
+        </div>
       </div>
 
       {/* xterm mounts here; FitAddon sizes off this box, so keep it padding-free */}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" />
+
+      {/* In-terminal search bar (P5.7) — replaces the browser's native find
+          while the terminal has focus (see attachCustomKeyEventHandler). */}
+      {searchOpen && (
+        <div className="absolute right-3 top-11 z-20 flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-1 shadow-lg">
+          <input
+            ref={searchInputRef}
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                runSearch(e.shiftKey ? 'previous' : 'next');
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                closeSearch();
+              }
+            }}
+            placeholder="find in terminal"
+            className="h-6 w-40 bg-transparent font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+          />
+          {matchInfo && (
+            <span className="font-mono text-[10px] text-zinc-500">
+              {matchInfo.count === 0 ? '0/0' : `${matchInfo.index + 1}/${matchInfo.count}`}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => runSearch('previous')}
+            title="Previous match (Shift+Enter)"
+            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <ChevronUp className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={() => runSearch('next')}
+            title="Next match (Enter)"
+            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <ChevronDown className="h-3 w-3" />
+          </button>
+          <button
+            type="button"
+            onClick={closeSearch}
+            title="Close (Esc)"
+            className="rounded p-0.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
 
       {/* Disconnect overlay — manual reconnect only, never automatic */}
       {status === 'closed' && (
