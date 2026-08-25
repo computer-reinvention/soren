@@ -9,6 +9,7 @@ Welcome to the SOREN documentation. Choose where to start based on your goal.
 | **[Quick Start](./QUICKSTART.md)** | Install and run SOREN in 5 minutes | 5 min  |
 | **[User Guide](./USER_GUIDE.md)**  | Complete guide to using SOREN      | 20 min |
 | **[Concepts](./CONCEPTS.md)**      | Deep dive into how SOREN works     | 15 min |
+| **[Frontend](./FRONTEND.md)**      | Dashboard design system, component patterns, testing, dev workflow | 15 min |
 
 ## For Agents
 
