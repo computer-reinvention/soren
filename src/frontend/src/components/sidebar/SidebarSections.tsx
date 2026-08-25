@@ -43,7 +43,7 @@ function SectionHeader({
         {label}
       </span>
       {count !== undefined && count > 0 && (
-        <span className="ml-auto font-mono text-[9px] tabular-nums text-muted-foreground/70">
+        <span className="ml-auto font-mono text-[9px] tabular-nums text-muted-foreground dark:text-muted-foreground/85">
           {count}
         </span>
       )}
@@ -154,7 +154,7 @@ export function ArchivedSection() {
                 <span className="flex-1 truncate font-mono text-xs text-muted-foreground">
                   {agent.agent_name}
                 </span>
-                <span className="shrink-0 rounded-sm border border-border px-1 font-mono text-[9px] uppercase leading-4 text-muted-foreground/70">
+                <span className="shrink-0 rounded-sm border border-border px-1 font-mono text-[9px] uppercase leading-4 text-muted-foreground dark:text-muted-foreground/85">
                   arc
                 </span>
               </button>

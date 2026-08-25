@@ -143,13 +143,14 @@ export function HeartbeatIndicator() {
         <Button variant="ghost" size="icon" className="h-8 w-8 relative" title="System heartbeat">
           <HeartIcon
             className={cn(
-              'h-4 w-4 text-red-500 fill-red-500 transition-colors',
+              'h-4 w-4 text-red-500 fill-red-500 transition-colors motion-reduce:animate-none',
               status === 'alert' ? 'animate-pulse' : 'animate-heartbeat',
             )}
           />
           {status === 'active' && (
             <span className="absolute top-0.5 right-0.5 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-amber-400 border border-background" />
           )}
+          <span className="sr-only">System heartbeat: {status}</span>
           {status === 'alert' && (
             <span className="absolute top-0 right-0 flex h-3 w-3 items-center justify-center rounded-full bg-red-600 border border-background">
               <AlertTriangle className="h-2 w-2 text-white" strokeWidth={3} />
@@ -189,9 +190,9 @@ export function HeartbeatIndicator() {
         )}
 
         {latest?.all_clear && sectionEntries.length === 0 && (
-          <div className="px-3 py-4 flex items-center justify-center gap-2 text-xs text-emerald-500 dark:text-emerald-400">
+          <div className="px-3 py-4 flex items-center justify-center gap-2 text-xs text-emerald-700 dark:text-emerald-500 dark:text-emerald-400">
             <Heart className="h-4 w-4 fill-red-500 text-red-500 animate-heartbeat" />
-            <span className="text-emerald-500 dark:text-emerald-400">All clear — system healthy</span>
+            <span className="text-emerald-700 dark:text-emerald-500 dark:text-emerald-400">All clear — system healthy</span>
           </div>
         )}
 
@@ -266,7 +267,7 @@ export function HeartbeatIndicator() {
                       />
                       <span className="text-muted-foreground">{unit}</span>
                       <button
-                        className="p-0.5 hover:text-emerald-500 transition-colors"
+                        className="p-0.5 hover:text-emerald-700 dark:text-emerald-500 transition-colors"
                         onClick={(e) => { e.preventDefault(); savePref(key); }}
                       >
                         <Check className="h-3 w-3" />

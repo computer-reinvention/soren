@@ -366,12 +366,12 @@ export function WebTerminal({ active }: WebTerminalProps) {
             className={cn(
               'h-2 w-2 rounded-full',
               status === 'connected' && 'bg-green-500',
-              status === 'connecting' && 'animate-pulse bg-yellow-500',
+              status === 'connecting' && 'animate-pulse motion-reduce:animate-none bg-yellow-500',
               status === 'closed' && 'bg-red-500'
             )}
           />
           <span>terminal</span>
-          <span className="text-zinc-600">
+          <span className="text-zinc-400">
             {terminalMode === 'shell' ? 'tmux: webterm' : 'live agent session'}
           </span>
         </div>
@@ -463,7 +463,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               }
             }}
             placeholder="find in terminal"
-            className="h-6 w-40 bg-transparent font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+            className="h-6 w-40 bg-transparent font-mono text-xs text-zinc-100 placeholder:text-zinc-400 focus:outline-none"
           />
           {matchInfo && (
             <span className="font-mono text-[10px] text-zinc-500">

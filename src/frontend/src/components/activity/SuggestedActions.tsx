@@ -151,7 +151,7 @@ export function SuggestedActions() {
                 onClick={() =>
                   setDismissed((prev) => new Set([...prev, suggestion.id]))
                 }
-                className="mt-0.5 shrink-0 text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                className="mt-0.5 shrink-0 text-muted-foreground dark:text-muted-foreground/80 hover:text-muted-foreground transition-colors"
                 title="Dismiss"
               >
                 <X className="h-3 w-3" />

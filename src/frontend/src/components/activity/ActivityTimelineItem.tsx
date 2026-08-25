@@ -209,7 +209,7 @@ function ToolCallDetails({
         <div className="p-2 space-y-1">
           {inputDetails.map((detail, i) => (
             <div key={i} className="flex gap-2">
-              <span className="text-muted-foreground/70 flex-shrink-0 w-16 text-right">
+              <span className="text-muted-foreground dark:text-muted-foreground/85 flex-shrink-0 w-16 text-right">
                 {detail.label}:
               </span>
               <span className="text-foreground/80 font-mono break-all">
@@ -225,7 +225,7 @@ function ToolCallDetails({
         <div>
           <button
             onClick={() => setShowOutput(!showOutput)}
-            className="w-full px-2 py-1 text-left text-muted-foreground/70 hover:text-muted-foreground hover:bg-muted/30 transition-colors flex items-center gap-1"
+            className="w-full px-2 py-1 text-left text-muted-foreground dark:text-muted-foreground/85 hover:text-muted-foreground hover:bg-muted/30 transition-colors flex items-center gap-1"
           >
             <ChevronRight className={cn('h-3 w-3 transition-transform', showOutput && 'rotate-90')} />
             Output

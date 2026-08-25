@@ -119,7 +119,7 @@ export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimeline
         onClick={() => setIsExpanded(!isExpanded)}
         className={cn(
           'flex items-center gap-1.5 text-[11px] rounded-md px-2 py-0.5',
-          'text-muted-foreground/70 hover:text-muted-foreground hover:bg-muted/50 transition-colors',
+          'text-muted-foreground dark:text-muted-foreground/85 hover:text-muted-foreground hover:bg-muted/50 transition-colors',
         )}
       >
         <Zap className="h-3 w-3 text-yellow-500/70" />
@@ -127,7 +127,7 @@ export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimeline
           {totalSteps} step{totalSteps !== 1 ? 's' : ''}
         </span>
         {toolSummary && (
-          <span className="text-muted-foreground/40 truncate max-w-[200px]">
+          <span className="text-muted-foreground dark:text-muted-foreground/80 truncate max-w-[200px]">
             {toolSummary}
           </span>
         )}
@@ -145,7 +145,7 @@ export function InterleavedTimeline({ thoughts, toolCalls }: InterleavedTimeline
             <TimelineStepItem key={idx} step={step} />
           ))}
           {steps.length > MAX_SHOWN && (
-            <p className="text-[10px] text-muted-foreground/40 py-0.5">
+            <p className="text-[10px] text-muted-foreground dark:text-muted-foreground/80 py-0.5">
               +{steps.length - MAX_SHOWN} more
             </p>
           )}
@@ -174,7 +174,7 @@ function TimelineStepItem({ step }: { step: TimelineStep }) {
       )}
       {/* Tool call (if present) */}
       {step.tool && Icon && toolName && (
-        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground dark:text-muted-foreground/80">
           <Icon className="h-3 w-3 flex-shrink-0" />
           <span className="truncate">
             {getToolSummary(toolName, step.tool.data?.tool_input)}

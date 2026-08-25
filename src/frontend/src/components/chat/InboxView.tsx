@@ -65,7 +65,7 @@ export function InboxView({ messages, agentId, onLoadMore, hasMore, isLoadingMor
         <div className="border-b bg-muted/30 px-4 py-3 flex-shrink-0">
           <div className="flex items-center gap-2 mb-1.5">
             <ClipboardList className="h-3.5 w-3.5 text-indigo-500 flex-shrink-0" />
-            <span className="text-[11px] font-semibold text-indigo-600 uppercase tracking-wide">Task</span>
+            <span className="text-[11px] font-semibold text-indigo-400 uppercase tracking-wide">Task</span>
             <span className="text-[10px] text-muted-foreground">
               from {pinnedTask.message.from_agent}
             </span>

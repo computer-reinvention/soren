@@ -120,7 +120,7 @@ export function OverviewPage() {
                 <span className="flex items-center gap-1" title={scorecard.git_sha}>
                   <GitBranch className="h-3 w-3" aria-hidden />
                   {scorecard.git_branch}
-                  <span className="text-muted-foreground/60">@{scorecard.git_sha.slice(0, 7)}</span>
+                  <span className="text-muted-foreground dark:text-muted-foreground/80">@{scorecard.git_sha.slice(0, 7)}</span>
                 </span>
                 <span title="server uptime">up {formatUptime(scorecard.uptime_seconds)}</span>
               </>
@@ -128,7 +128,7 @@ export function OverviewPage() {
             <span
               className={cn(
                 'flex items-center gap-1.5',
-                healthy ? 'text-emerald-500' : 'text-red-400'
+                healthy ? 'text-emerald-700 dark:text-emerald-500' : 'text-red-400'
               )}
             >
               <span
@@ -183,25 +183,25 @@ export function OverviewPage() {
             className="rounded border border-border/60 bg-card px-3 py-2"
           >
             <div className="flex items-baseline justify-between">
-              <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+              <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
                 verification success
               </h2>
               <Link
                 to={routes.reliability()}
-                className="font-mono text-[10px] text-muted-foreground/60 hover:text-primary"
+                className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80 hover:text-primary"
               >
                 full dashboard →
               </Link>
             </div>
             {topAgents.length === 0 ? (
-              <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">no verifications yet</p>
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">no verifications yet</p>
             ) : (
               <ul className="mt-1.5 space-y-1">
                 {topAgents.map((a) => (
-                  <li key={a.agent_id} className="flex items-center gap-2">
+                  <li key={a.agent_id} className="flex items-center gap-2 py-1">
                     <Link
                       to={routes.agent(a.agent_id)}
-                      className="w-32 truncate font-mono text-[11px] text-foreground/90 hover:text-primary"
+                      className="w-32 truncate py-1 font-mono text-[11px] text-foreground/90 hover:text-primary"
                     >
                       {a.agent_id}
                     </Link>
@@ -238,11 +238,11 @@ export function OverviewPage() {
             aria-label="supervisor idle history"
             className="rounded border border-border/60 bg-card px-3 py-2"
           >
-            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+            <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
               supervisor idle (last {idleSeries.length || 0} beats)
             </h2>
             {idleSeries.length < 2 ? (
-              <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">not enough data</p>
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">not enough data</p>
             ) : (
               <Sparkline data={idleSeries} className="mt-2 h-10 w-full text-primary" />
             )}
@@ -251,7 +251,7 @@ export function OverviewPage() {
 
         {/* Fleet by project */}
         <section aria-label="fleet by project" className="space-y-2">
-          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
             fleet
           </h2>
           <div className="space-y-1.5">
@@ -268,7 +268,7 @@ export function OverviewPage() {
                     </span>
                   )}
                   <span className="ml-auto font-mono text-[10px] tabular-nums text-muted-foreground">
-                    {g.activeCount > 0 && <span className="text-emerald-500">{g.activeCount} active · </span>}
+                    {g.activeCount > 0 && <span className="text-emerald-700 dark:text-emerald-500">{g.activeCount} active · </span>}
                     {g.attentionCount > 0 && <span className="text-red-400">{g.attentionCount} blocked · </span>}
                     {g.agents.length + (g.supervisor ? 1 : 0)} total
                   </span>
@@ -369,12 +369,12 @@ function StatTile({
         className={cn(
           'mt-1 font-mono text-lg font-semibold tabular-nums leading-none',
           tone === 'alert' && 'text-red-400',
-          tone === 'ok' && 'text-emerald-500'
+          tone === 'ok' && 'text-emerald-700 dark:text-emerald-500'
         )}
       >
         {value}
       </p>
-      <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70">{sub}</p>
+      <p className="mt-0.5 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/85">{sub}</p>
     </Link>
   );
 }

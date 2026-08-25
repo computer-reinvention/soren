@@ -117,18 +117,23 @@ function SystemNotification({ message, info, collapseCount }: { message: Message
         <div className="flex-1 h-px bg-border/30" />
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 text-2xs text-muted-foreground/60 hover:text-muted-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/30 shrink-0 font-mono"
+          className="flex items-center gap-1.5 text-2xs text-muted-foreground dark:text-muted-foreground/80 hover:text-muted-foreground transition-colors px-2 py-0.5 rounded hover:bg-muted/30 shrink-0 font-mono"
         >
-          <span className="opacity-50">{preciseTime}</span>
+          {/* P5.8: these used to additionally multiply opacity-50/40 on top
+              of the parent's already-reduced text-muted-foreground dark:text-muted-foreground/80,
+              compounding to ~0.3-0.4 effective opacity and failing contrast
+              (2.12:1, needs 4.5:1). The parent's dimming is enough on its
+              own for the intended visual hierarchy. */}
+          <span>{preciseTime}</span>
           <SystemIconComponent icon={info.icon} />
           <span className="font-medium">{info.label}</span>
           {collapseCount && collapseCount > 1 && (
-            <span className="text-muted-foreground/50 text-2xs">
+            <span className="text-muted-foreground dark:text-muted-foreground/80 text-2xs">
               x{collapseCount}
             </span>
           )}
           {!expanded && (
-            <span className="max-w-[200px] truncate opacity-40">
+            <span className="max-w-[200px] truncate">
               {info.summary}
             </span>
           )}
@@ -192,7 +197,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
       {/* Timestamp column - fixed width */}
       <Tooltip>
         <TooltipTrigger asChild>
-          <span className="text-2xs font-mono text-muted-foreground/50 w-[58px] flex-shrink-0 pt-0.5 select-none cursor-default">
+          <span className="text-2xs font-mono text-muted-foreground dark:text-muted-foreground/80 w-[58px] flex-shrink-0 pt-0.5 select-none cursor-default">
             {preciseTime}
           </span>
         </TooltipTrigger>
@@ -219,7 +224,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
             </Link>
           )}
           {showToIndicator && (
-            <span className="text-2xs text-muted-foreground/40 font-mono shrink-0">
+            <span className="text-2xs text-muted-foreground dark:text-muted-foreground/80 font-mono shrink-0">
               {'>'}{message.to_agent}
             </span>
           )}
@@ -251,7 +256,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
               </Badge>
             )}
             {collapseCount && collapseCount > 1 && (
-              <span className="text-2xs font-mono text-muted-foreground/50">
+              <span className="text-2xs font-mono text-muted-foreground dark:text-muted-foreground/80">
                 x{collapseCount}
               </span>
             )}

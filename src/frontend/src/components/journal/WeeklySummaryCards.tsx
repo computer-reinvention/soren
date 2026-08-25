@@ -44,6 +44,7 @@ export function WeeklySummaryCards() {
             onClick={() => setWeeksAgo((w) => w + 1)}
           >
             <ChevronLeft className="h-3 w-3" />
+            <span className="sr-only">Previous week</span>
           </Button>
           <span className="text-[10px] text-muted-foreground min-w-[100px] text-center">
             {formatWeekLabel(data.week_start, data.week_end)}
@@ -56,6 +57,7 @@ export function WeeklySummaryCards() {
             disabled={weeksAgo === 0}
           >
             <ChevronRight className="h-3 w-3" />
+            <span className="sr-only">Next week</span>
           </Button>
         </div>
       </div>

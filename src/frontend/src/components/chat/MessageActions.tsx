@@ -79,6 +79,7 @@ export function MessageActions({
             ) : (
               <Copy className="h-3 w-3" />
             )}
+            <span className="sr-only">{copiedText ? 'Copied!' : 'Copy message'}</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent side="top" className="text-xs">
@@ -105,6 +106,7 @@ export function MessageActions({
               ) : (
                 <Code className="h-3 w-3" />
               )}
+              <span className="sr-only">{copiedCode ? 'Copied!' : 'Copy code'}</span>
             </Button>
           </TooltipTrigger>
           <TooltipContent side="top" className="text-xs">
@@ -136,6 +138,7 @@ export function MessageActions({
             }}
           >
             <FileText className="h-3 w-3" />
+            <span className="sr-only">View raw</span>
           </Button>
         </TooltipTrigger>
         <TooltipContent side="top" className="text-xs">

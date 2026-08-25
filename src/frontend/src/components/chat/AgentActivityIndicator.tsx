@@ -82,7 +82,7 @@ export function AgentActivityIndicator({
         )}
       >
         {hasActivity ? (
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary flex-shrink-0" />
+          <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-primary flex-shrink-0" />
         ) : (
           <Check className="h-3.5 w-3.5 text-green-500 flex-shrink-0" />
         )}

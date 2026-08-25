@@ -14,7 +14,7 @@ import { api } from '@/lib/api';
 
 const FILE_STATUS_COLOR: Record<string, string> = {
   modified: 'text-amber-500',
-  added: 'text-emerald-500',
+  added: 'text-emerald-700 dark:text-emerald-500',
   deleted: 'text-red-400',
   renamed: 'text-blue-400',
   untracked: 'text-muted-foreground',
@@ -52,7 +52,7 @@ export function GitPanel() {
           {data && (data.ahead > 0 || data.behind > 0) && (
             <span className="flex items-center gap-0.5 text-[10px] tabular-nums">
               {data.ahead > 0 && (
-                <span className="flex items-center text-emerald-500">
+                <span className="flex items-center text-emerald-700 dark:text-emerald-500">
                   <ArrowUp className="h-2.5 w-2.5" />{data.ahead}
                 </span>
               )}
@@ -86,7 +86,7 @@ export function GitPanel() {
           <>
             <div className="px-2 py-1.5">
               <div className="mb-1 flex items-center justify-between">
-                <h4 className="font-mono text-[10px] font-semibold uppercase text-muted-foreground/80">
+                <h4 className="font-mono text-[10px] font-semibold uppercase text-muted-foreground dark:text-muted-foreground/80">
                   changes ({data.uncommitted_count})
                 </h4>
                 {data.uncommitted_count > 0 && (
@@ -101,7 +101,7 @@ export function GitPanel() {
                 )}
               </div>
               {data.changed_files.length === 0 ? (
-                <p className="font-mono text-[11px] text-muted-foreground/60">clean</p>
+                <p className="font-mono text-[11px] text-muted-foreground dark:text-muted-foreground/80">clean</p>
               ) : (
                 <ul className="space-y-0.5 max-h-40 overflow-y-auto">
                   {data.changed_files.map((f) => (
@@ -119,7 +119,7 @@ export function GitPanel() {
             <DropdownMenuSeparator />
 
             <div className="px-2 py-1.5">
-              <h4 className="mb-1 font-mono text-[10px] font-semibold uppercase text-muted-foreground/80">
+              <h4 className="mb-1 font-mono text-[10px] font-semibold uppercase text-muted-foreground dark:text-muted-foreground/80">
                 recent commits
               </h4>
               <ul className="space-y-0.5">

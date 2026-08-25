@@ -17,7 +17,7 @@ export function AuthGuard({ children }: AuthGuardProps) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-muted-foreground font-mono text-sm">
-          <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+          <div className="h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin motion-reduce:animate-none" />
           <span>connecting...</span>
         </div>
       </div>

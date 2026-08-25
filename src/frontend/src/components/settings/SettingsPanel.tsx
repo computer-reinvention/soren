@@ -1,4 +1,4 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Separator } from '@/components/ui/separator';
 import { Minus, Plus, Monitor, Moon, Sun, Bell, BellOff, LayoutGrid, Rows3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -14,7 +14,7 @@ const SCROLLBACK_OPTIONS = [5_000, 10_000, 25_000, 50_000] as const;
 function SettingsSection({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-2">
-      <h3 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+      <h3 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
         {title}
       </h3>
       {children}
@@ -96,6 +96,9 @@ export function SettingsPanel({
       <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="font-mono text-sm uppercase tracking-wider">settings</DialogTitle>
+          <DialogDescription className="sr-only">
+            Appearance, notifications, terminal, and keyboard shortcut preferences
+          </DialogDescription>
         </DialogHeader>
 
         <div className="space-y-5">
@@ -136,7 +139,7 @@ export function SettingsPanel({
                 </SegmentButton>
               </div>
             </div>
-            <p className="font-mono text-[10px] text-muted-foreground/60">
+            <p className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               compact tightens the sidebar agent list, activity feed, and task cards. synced across browsers.
             </p>
           </SettingsSection>
@@ -155,7 +158,7 @@ export function SettingsPanel({
                 {notificationsEnabled ? 'on' : 'off'}
               </SegmentButton>
             </div>
-            <p className="font-mono text-[10px] text-muted-foreground/60">
+            <p className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               fires for [DONE] / [BLOCKED] / [VERIFY-FAILED] / alerts, only while this tab is hidden.
             </p>
           </SettingsSection>
@@ -196,7 +199,7 @@ export function SettingsPanel({
                 ))}
               </div>
             </div>
-            <p className="font-mono text-[10px] text-muted-foreground/60">
+            <p className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               scrollback is read once when a terminal opens — changes apply the next time you open one, not to an
               already-running session.
             </p>

@@ -2,19 +2,29 @@ import type { Task, TaskStatus, TaskPriority } from '@/types/task';
 
 /** Task display constants + pure tree helpers (extracted from TasksPanel, P2.8). */
 
+// P5.8: a Lighthouse contrast audit found several of these text colors
+// (emerald-600, violet-500, blue-500) fell short of 4.5:1 against their own
+// tinted /15 badge background IN DARK MODE — `dark:text-{color}-400` fixes
+// that. The unprefixed (light-mode) shade is left as the original design;
+// checking it against light mode's background showed most of this whole
+// palette needs individually-tuned darker shades (700, sometimes 800 — no
+// single shade works uniformly across colors) to pass in light mode too.
+// That's a real per-color design pass, not a mechanical fix, and out of
+// scope here — flagged as follow-up. This at least fixes dark mode (the
+// default theme) without making light mode any worse than it already was.
 export const STATUS_CONFIGS: Record<string, { label: string; color: string; dot: string }> = {
-  backlog: { label: 'Backlog', color: 'bg-violet-500/15 text-violet-500 border-violet-500/30', dot: 'bg-violet-400' },
-  pending: { label: 'Pending', color: 'bg-zinc-500/15 text-zinc-500 border-zinc-500/30', dot: 'bg-zinc-400' },
-  assigned: { label: 'Assigned', color: 'bg-blue-500/15 text-blue-500 border-blue-500/30', dot: 'bg-blue-400' },
-  'in-progress': { label: 'In Progress', color: 'bg-amber-500/15 text-amber-600 border-amber-500/30', dot: 'bg-amber-400' },
-  done: { label: 'Done', color: 'bg-emerald-500/15 text-emerald-600 border-emerald-500/30', dot: 'bg-emerald-400' },
-  blocked: { label: 'Blocked', color: 'bg-red-500/15 text-red-500 border-red-500/30', dot: 'bg-red-400' },
+  backlog: { label: 'Backlog', color: 'bg-violet-500/15 text-violet-500 dark:text-violet-400 border-violet-500/30', dot: 'bg-violet-400' },
+  pending: { label: 'Pending', color: 'bg-zinc-500/15 text-zinc-500 dark:text-zinc-400 border-zinc-500/30', dot: 'bg-zinc-400' },
+  assigned: { label: 'Assigned', color: 'bg-blue-500/15 text-blue-500 dark:text-blue-400 border-blue-500/30', dot: 'bg-blue-400' },
+  'in-progress': { label: 'In Progress', color: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30', dot: 'bg-amber-400' },
+  done: { label: 'Done', color: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30', dot: 'bg-emerald-400' },
+  blocked: { label: 'Blocked', color: 'bg-red-500/15 text-red-500 dark:text-red-400 border-red-500/30', dot: 'bg-red-400' },
 };
 
 export const PRIORITY_CONFIGS: Record<string, { label: string; color: string }> = {
-  critical: { label: 'Critical', color: 'bg-red-500/20 text-red-500 border-red-500/30' },
-  high: { label: 'High', color: 'bg-orange-500/20 text-orange-500 border-orange-500/30' },
-  medium: { label: 'Medium', color: 'bg-blue-500/15 text-blue-500 border-blue-500/30' },
+  critical: { label: 'Critical', color: 'bg-red-500/20 text-red-500 dark:text-red-400 border-red-500/30' },
+  high: { label: 'High', color: 'bg-orange-500/20 text-orange-500 dark:text-orange-400 border-orange-500/30' },
+  medium: { label: 'Medium', color: 'bg-blue-500/15 text-blue-500 dark:text-blue-400 border-blue-500/30' },
   low: { label: 'Low', color: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20' },
 };
 

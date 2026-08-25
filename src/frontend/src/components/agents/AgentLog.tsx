@@ -66,12 +66,12 @@ function LogEntry({ activity }: { activity: Activity }) {
       {(input || output) && (
         <div className="mt-0.5 space-y-1 pl-[4.75rem]">
           {input && (
-            <pre className="whitespace-pre-wrap break-all text-emerald-500/90">
+            <pre className="whitespace-pre-wrap break-all text-emerald-700 dark:text-emerald-500">
               {shown ? input : input.slice(0, MAX_INLINE_CHARS) + '…'}
             </pre>
           )}
           {output && (
-            <pre className="whitespace-pre-wrap break-all text-muted-foreground/80">
+            <pre className="whitespace-pre-wrap break-all text-muted-foreground dark:text-muted-foreground/80">
               {shown ? output : output.slice(0, MAX_INLINE_CHARS) + '…'}
             </pre>
           )}

@@ -706,10 +706,11 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
               title="Interrupt agent"
             >
               {isInterrupting ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
               ) : (
                 <Square className="h-4 w-4 fill-current" />
               )}
+              <span className="sr-only">{isInterrupting ? 'Interrupting…' : 'Interrupt agent'}</span>
             </Button>
           ) : (
             <Button
@@ -719,10 +720,11 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
               className="h-11 w-11 flex-shrink-0"
             >
               {isPending ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
               ) : (
                 <Send className="h-4 w-4" />
               )}
+              <span className="sr-only">{isPending ? 'Sending…' : 'Send message'}</span>
             </Button>
           )}
         </div>

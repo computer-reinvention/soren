@@ -90,7 +90,11 @@ export function SecretsPanel() {
         <div className="flex gap-1.5">
           <div className="relative flex-1">
             <Input
+              id="secrets-passphrase-unlock"
+              name="passphrase"
+              autoComplete="current-password"
               type={showPassphrase ? 'text' : 'password'}
+              aria-label="Passphrase to unlock secrets"
               placeholder="Passphrase to unlock"
               value={passphraseInput}
               onChange={(e) => {
@@ -99,7 +103,6 @@ export function SecretsPanel() {
               }}
               onKeyDown={(e) => e.key === 'Enter' && handleUnlock()}
               className="h-7 text-xs pr-7"
-              autoComplete="off"
             />
             <button
               type="button"
@@ -166,6 +169,7 @@ export function SecretsPanel() {
                 onClick={() => deleteMutation.mutate(name)}
                 disabled={deleteMutation.isPending}
                 title={`Delete ${name}`}
+                aria-label={`Delete ${name}`}
               >
                 <Trash2 className="h-3 w-3" />
               </Button>
@@ -177,7 +181,10 @@ export function SecretsPanel() {
       {/* Add new secret — value input is password type, never echoed */}
       <div className="space-y-1 pt-1 border-t border-border/50">
         <Input
+          id="secrets-new-name"
+          name="secretName"
           type="text"
+          aria-label="New secret name"
           placeholder="SECRET_NAME"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
@@ -189,7 +196,11 @@ export function SecretsPanel() {
         />
         <div className="flex gap-1.5">
           <Input
+            id="secrets-new-value"
+            name="secretValue"
             type="password"
+            autoComplete="new-password"
+            aria-label="New secret value"
             placeholder="value (never shown again)"
             value={newValue}
             onChange={(e) => setNewValue(e.target.value)}
@@ -199,7 +210,6 @@ export function SecretsPanel() {
               }
             }}
             className="h-7 text-xs flex-1"
-            autoComplete="new-password"
           />
           <Button
             size="sm"

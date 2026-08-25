@@ -180,7 +180,7 @@ function Column({ status, tasks }: { status: string; tasks: Task[] }) {
             <DraggableCard key={t.id} task={t} />
           ))}
           {tasks.length === 0 && (
-            <p className="px-2 py-4 text-center font-mono text-[10px] text-muted-foreground/50">
+            <p className="px-2 py-4 text-center font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               empty
             </p>
           )}
@@ -227,7 +227,7 @@ function TaskCardMini({ task, dragging }: { task: Task; dragging?: boolean }) {
           </span>
         )}
         {childCount > 0 && (
-          <span className="ml-auto font-mono text-[9px] text-muted-foreground/60">
+          <span className="ml-auto font-mono text-[9px] text-muted-foreground dark:text-muted-foreground/80">
             {flattenTasks(task.children!).length} sub
           </span>
         )}

@@ -27,8 +27,8 @@ export function LoginPage() {
       <div className="w-full max-w-sm space-y-6 p-8 rounded-lg border border-border/50 bg-card">
         <div className="flex flex-col items-center gap-2">
           <div className="relative">
-            <Terminal className="h-8 w-8 text-emerald-500" strokeWidth={2.5} />
-            <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 bg-emerald-500 rounded-full animate-pulse" />
+            <Terminal className="h-8 w-8 text-emerald-700 dark:text-emerald-500" strokeWidth={2.5} />
+            <div className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 bg-emerald-500 rounded-full animate-pulse motion-reduce:animate-none" />
           </div>
           <span className="font-mono font-bold text-xl tracking-tight">soren</span>
           <span className="text-xs text-muted-foreground font-mono">multi-agent orchestrator</span>

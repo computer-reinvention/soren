@@ -159,7 +159,7 @@ export function ChatHeader({
           <h2 className="text-lg font-semibold truncate">
             {title}
             {agentId && agent?.display_name && agent.display_name !== agent.name && (
-              <span className="ml-2 text-xs font-normal text-muted-foreground/40">{agent.name}</span>
+              <span className="ml-2 text-xs font-normal text-muted-foreground dark:text-muted-foreground/80">{agent.name}</span>
             )}
           </h2>
           {isCommandCenter ? (
@@ -219,7 +219,7 @@ export function ChatHeader({
           <span>{subtitle}</span>
           {isPermanent && (agent?.reset_count || agent?.tasks_since_reset) ? (
             <>
-              <span className="text-muted-foreground/50">|</span>
+              <span className="text-muted-foreground dark:text-muted-foreground/80">|</span>
               <span>
                 {agent.reset_count ? `${agent.reset_count} resets` : ''}
                 {agent.reset_count && agent.tasks_since_reset ? ', ' : ''}
@@ -229,7 +229,7 @@ export function ChatHeader({
           ) : null}
           {lastActivityDate && (
             <>
-              <span className="text-muted-foreground/50">|</span>
+              <span className="text-muted-foreground dark:text-muted-foreground/80">|</span>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span className="cursor-default">
@@ -259,6 +259,9 @@ export function ChatHeader({
                 aria-pressed={view === 'log'}
               >
                 <ListTree className="h-4 w-4" />
+                <span className="sr-only">
+                  {view === 'log' ? 'Showing tool-call log, click for conversation' : 'Show live tool-call log'}
+                </span>
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
@@ -279,12 +282,16 @@ export function ChatHeader({
                   showAllMessages && 'bg-accent'
                 )}
                 onClick={onToggleFilter}
+                aria-pressed={showAllMessages}
               >
                 {showAllMessages ? (
                   <MessagesSquare className="h-4 w-4" />
                 ) : (
                   <MessageSquare className="h-4 w-4" />
                 )}
+                <span className="sr-only">
+                  {showAllMessages ? 'Showing all messages' : 'Showing user messages only'}
+                </span>
               </Button>
             </TooltipTrigger>
             <TooltipContent side="bottom" className="text-xs">
@@ -320,20 +327,24 @@ export function ChatHeader({
                     ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'
                     : 'bg-red-500/10 text-red-600 dark:text-red-400'
               )}
+              role="status"
             >
               {isConnected ? (
-                <Wifi className="h-3 w-3" />
+                <Wifi className="h-3 w-3" aria-hidden />
               ) : isReconnecting ? (
-                <RefreshCw className="h-3 w-3 animate-spin" />
+                <RefreshCw className="h-3 w-3 animate-spin motion-reduce:animate-none" aria-hidden />
               ) : (
-                <WifiOff className="h-3 w-3" />
+                <WifiOff className="h-3 w-3" aria-hidden />
               )}
-              <span className="hidden sm:inline">
+              <span className="hidden sm:inline" aria-hidden>
                 {isConnected
                   ? 'Connected'
                   : isReconnecting
                     ? 'Reconnecting'
                     : 'Disconnected'}
+              </span>
+              <span className="sr-only">
+                WebSocket {isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
               </span>
             </div>
           </TooltipTrigger>
@@ -347,6 +358,7 @@ export function ChatHeader({
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="icon" className="h-8 w-8">
               <MoreVertical className="h-4 w-4" />
+              <span className="sr-only">More actions</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">

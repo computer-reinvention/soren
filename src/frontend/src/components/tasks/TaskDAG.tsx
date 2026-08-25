@@ -46,7 +46,7 @@ function TaskNode({ data }: NodeProps) {
           {statusConfig.label}
         </span>
         {priorityConfig && (
-          <span className="ml-auto font-mono text-[9px] text-muted-foreground/70 truncate">
+          <span className="ml-auto font-mono text-[9px] text-muted-foreground dark:text-muted-foreground/85 truncate">
             {priorityConfig.label}
           </span>
         )}
@@ -55,7 +55,7 @@ function TaskNode({ data }: NodeProps) {
         {task.title}
       </p>
       {task.assigned_to && (
-        <p className="mt-1 truncate font-mono text-[9px] text-muted-foreground/70">
+        <p className="mt-1 truncate font-mono text-[9px] text-muted-foreground dark:text-muted-foreground/85">
           @{task.assigned_to}
         </p>
       )}

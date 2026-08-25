@@ -19,10 +19,16 @@ export function StatusBar() {
             className={cn(
               'w-2 h-2 rounded-full',
               isConnected ? 'bg-green-500' : 'bg-red-500',
-              isReconnecting && 'animate-pulse bg-yellow-500'
+              isReconnecting && 'animate-pulse motion-reduce:animate-none bg-yellow-500'
             )}
+            aria-hidden
           />
-          <span>
+          {/* P5.8: connection state is otherwise a purely visual dot +
+              color change — a screen reader user has no way to notice a
+              disconnect unless it's announced. Scoped to just this span
+              (not the whole bar) so per-second agent-count updates
+              elsewhere in the bar don't also get announced. */}
+          <span role="status" aria-live="polite">
             {isReconnecting
               ? 'Reconnecting...'
               : isConnected

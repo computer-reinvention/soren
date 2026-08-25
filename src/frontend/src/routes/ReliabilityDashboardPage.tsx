@@ -19,7 +19,7 @@ const QUERY_OPTS = {
 } as const;
 
 function successRateColor(rate: number): string {
-  if (rate >= 0.9) return 'text-emerald-500';
+  if (rate >= 0.9) return 'text-emerald-700 dark:text-emerald-500';
   if (rate >= 0.6) return 'text-amber-500';
   return 'text-red-400';
 }
@@ -71,7 +71,7 @@ function Sparkline({ history }: { history: AgentReliability['history'] }) {
 
   const hasActivity = chartData.some((d) => d.successPct != null);
   if (!hasActivity) {
-    return <div className="h-8 w-28 shrink-0 font-mono text-[10px] text-muted-foreground/50">no activity</div>;
+    return <div className="h-8 w-28 shrink-0 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">no activity</div>;
   }
 
   return (
@@ -135,11 +135,11 @@ function Leaderboard() {
   }, [reliability]);
 
   if (isLoading) {
-    return <p className="font-mono text-xs text-muted-foreground/60">loading…</p>;
+    return <p className="font-mono text-xs text-muted-foreground dark:text-muted-foreground/80">loading…</p>;
   }
 
   if (sorted.length === 0) {
-    return <p className="font-mono text-xs text-muted-foreground/60">no verification history yet</p>;
+    return <p className="font-mono text-xs text-muted-foreground dark:text-muted-foreground/80">no verification history yet</p>;
   }
 
   return (
@@ -173,7 +173,7 @@ function Leaderboard() {
                 <td className="px-2 py-1.5 text-right font-mono tabular-nums text-muted-foreground">{a.failed}</td>
                 <td className="px-2 py-1.5 text-right">
                   {total === 0 ? (
-                    <span className="font-mono text-muted-foreground/50">—</span>
+                    <span className="font-mono text-muted-foreground dark:text-muted-foreground/80">—</span>
                   ) : (
                     <div className="flex items-center justify-end gap-1.5">
                       <div className="h-1.5 w-12 overflow-hidden rounded-full bg-muted">
@@ -188,7 +188,7 @@ function Leaderboard() {
                     </div>
                   )}
                 </td>
-                <td className={cn('px-2 py-1.5 text-right font-mono tabular-nums font-medium', firstPass == null ? 'text-muted-foreground/50' : successRateColor(firstPass))}>
+                <td className={cn('px-2 py-1.5 text-right font-mono tabular-nums font-medium', firstPass == null ? 'text-muted-foreground dark:text-muted-foreground/80' : successRateColor(firstPass))}>
                   {formatRate(firstPass)}
                 </td>
               </tr>
@@ -209,7 +209,7 @@ function FailureBreakdown({ byType, total }: { byType: Record<string, number>; t
 
   if (total === 0) {
     return (
-      <div className="flex items-center gap-1.5 font-mono text-xs text-emerald-500">
+      <div className="flex items-center gap-1.5 font-mono text-xs text-emerald-700 dark:text-emerald-500">
         <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
         no logged failures
       </div>
@@ -276,11 +276,11 @@ function FailureRow({ failure }: { failure: FailureLogEntry }) {
             >
               {failure.agent_id}
             </Link>
-            <span className="font-mono text-[10px] text-muted-foreground/70">
+            <span className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/85">
               {formatDistanceToNow(new Date(failure.timestamp), { addSuffix: true })}
             </span>
             {failure.resolved && (
-              <span className="font-mono text-[9px] text-emerald-500">resolved</span>
+              <span className="font-mono text-[9px] text-emerald-700 dark:text-emerald-500">resolved</span>
             )}
           </div>
           <p className="mt-0.5 truncate font-mono text-[11px] text-foreground/90" title={failure.description}>
@@ -343,14 +343,14 @@ export function ReliabilityDashboardPage() {
         </div>
 
         <section aria-label="reliability leaderboard" className="space-y-2">
-          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
             verification leaderboard
           </h2>
           <Leaderboard />
         </section>
 
         <section aria-label="failure breakdown" className="rounded border border-border/60 bg-card px-3 py-2.5 space-y-2">
-          <div className="flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+          <div className="flex items-center gap-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
             <AlertOctagon className="h-3 w-3" aria-hidden />
             failures by type{failures ? ` (${failures.total})` : ''}
           </div>
@@ -358,11 +358,11 @@ export function ReliabilityDashboardPage() {
         </section>
 
         <section aria-label="recent failures" className="rounded border border-border/60 bg-card px-3 py-2.5">
-          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+          <h2 className="font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground dark:text-muted-foreground/80">
             recent failures
           </h2>
           {!failures || failures.recent.length === 0 ? (
-            <p className="mt-2 font-mono text-[10px] text-muted-foreground/60">none logged</p>
+            <p className="mt-2 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">none logged</p>
           ) : (
             <ul className="mt-1">
               {failures.recent.map((f) => (

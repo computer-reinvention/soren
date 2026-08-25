@@ -41,6 +41,7 @@ export function ActivityFilters({ activeFilters, onFiltersChange }: ActivityFilt
           {hasFilters && (
             <span className="absolute -top-0.5 -right-0.5 h-2 w-2 bg-primary rounded-full" />
           )}
+          <span className="sr-only">Filter activity feed{hasFilters ? ' (active)' : ''}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">

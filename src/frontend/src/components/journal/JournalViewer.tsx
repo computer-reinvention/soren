@@ -87,6 +87,7 @@ export function JournalViewer() {
                 value={journalProjectFilter ?? ''}
                 onChange={(e) => setJournalProjectFilter(e.target.value || null)}
                 className="h-7 text-xs rounded-md border bg-background px-2"
+                aria-label="Filter journal by project"
               >
                 <option value="">All Projects</option>
                 {projectsData.projects.map((p) => (

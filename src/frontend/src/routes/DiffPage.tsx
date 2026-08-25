@@ -17,7 +17,7 @@ const STATUS_ICON: Record<string, typeof FileEdit> = {
 };
 
 const STATUS_COLOR: Record<string, string> = {
-  added: 'text-emerald-500',
+  added: 'text-emerald-700 dark:text-emerald-500',
   deleted: 'text-red-400',
   modified: 'text-amber-500',
   renamed: 'text-blue-400',

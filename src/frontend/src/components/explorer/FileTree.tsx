@@ -87,7 +87,7 @@ function FileTreeNode({ item, onFileSelect, selectedPath, level }: FileTreeNodeP
             )}
           >
             {loading ? (
-              <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin flex-shrink-0" />
+              <Loader2 className="h-3.5 w-3.5 text-muted-foreground animate-spin motion-reduce:animate-none flex-shrink-0" />
             ) : (
               <ChevronRight
                 className={cn(

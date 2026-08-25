@@ -28,7 +28,12 @@ export function ProjectGroup({ group, tokensByAgent, forceOpen = false }: Projec
           'flex w-full items-center gap-1.5 rounded px-1.5 py-1',
           'hover:bg-accent/40 transition-colors'
         )}
-        aria-label={`${group.name} project, ${total} agents`}
+        // See AgentRow.tsx's aria-label comment — same accepted tradeoff
+        // with axe's zero-weight label-content-name-mismatch rule.
+        aria-label={
+          `${group.name} project, ${total} agents` +
+          (group.attentionCount > 0 ? `, ${group.attentionCount} need attention` : '')
+        }
       >
         <ChevronRight
           className={cn(
@@ -45,12 +50,12 @@ export function ProjectGroup({ group, tokensByAgent, forceOpen = false }: Projec
             sys
           </span>
         )}
-        <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[9px] tabular-nums text-muted-foreground/70">
+        <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[9px] tabular-nums text-muted-foreground dark:text-muted-foreground/85">
           {group.attentionCount > 0 && (
             <span className="text-red-400">{group.attentionCount}!</span>
           )}
           {group.activeCount > 0 && (
-            <span className="text-emerald-500">{group.activeCount}●</span>
+            <span className="text-emerald-700 dark:text-emerald-500">{group.activeCount}●</span>
           )}
           <span>{total}</span>
         </span>
@@ -69,7 +74,7 @@ export function ProjectGroup({ group, tokensByAgent, forceOpen = false }: Projec
             <AgentRow key={agent.id} agent={agent} tokens={tokensByAgent.get(agent.id)} />
           ))}
           {total === 0 && (
-            <p className="px-2 py-1 font-mono text-[10px] text-muted-foreground/60">
+            <p className="px-2 py-1 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               no agents
             </p>
           )}

@@ -1,4 +1,4 @@
-import { lazy, useEffect } from 'react';
+import { lazy, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Layout } from './components/layout/Layout';
@@ -77,6 +77,23 @@ function Shell() {
     setSidebarOpen(false);
     setActivityOpen(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
+
+  // P5.8: move focus to the main content region on route change, so
+  // keyboard/screen-reader users aren't silently left focused on whatever
+  // link/button they just activated in the old view (this is a persistent
+  // three-panel shell, not a full page navigation, so the browser's own
+  // "new page loaded" focus reset never happens on its own). Skipped on
+  // the very first render — moving focus away from the page on initial
+  // load fights the browser's own load announcement, and there's nothing
+  // to move focus "back" to yet.
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    document.getElementById('main-content')?.focus();
   }, [location.pathname]);
 
   // Below md (768px): the 3-panel resizable layout has no viable

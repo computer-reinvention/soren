@@ -1,4 +1,4 @@
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 
 // Exported so the Settings panel (P5.2) can embed the same reference list
 // instead of maintaining a second copy — shortcuts aren't remappable (see
@@ -76,6 +76,9 @@ export function ShortcutHelp({
           <DialogTitle className="font-mono text-sm uppercase tracking-wider">
             keyboard shortcuts
           </DialogTitle>
+          <DialogDescription className="sr-only">
+            Reference list of available keyboard shortcuts
+          </DialogDescription>
         </DialogHeader>
         <ShortcutGroupsGrid />
       </DialogContent>

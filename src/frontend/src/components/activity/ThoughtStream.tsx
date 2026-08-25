@@ -19,9 +19,9 @@ function ThoughtItem({ thought }: { thought: Thought }) {
         <div className="flex items-center gap-1.5 mb-0.5">
           <span className="font-medium text-violet-400">{thought.agent_name}</span>
           {thought.tool_name && (
-            <span className="font-mono text-muted-foreground/60">before {thought.tool_name}</span>
+            <span className="font-mono text-muted-foreground dark:text-muted-foreground/80">before {thought.tool_name}</span>
           )}
-          <span className="text-muted-foreground/50 ml-auto">{time}</span>
+          <span className="text-muted-foreground dark:text-muted-foreground/80 ml-auto">{time}</span>
         </div>
         <p className="text-muted-foreground break-words whitespace-pre-wrap leading-relaxed">
           {thought.content}
@@ -61,7 +61,7 @@ export function ThoughtStream() {
           <p className="text-xs text-muted-foreground">
             Agent reasoning will stream here when the model exposes it.
           </p>
-          <p className="text-[10px] text-muted-foreground/70 mt-1">
+          <p className="text-[10px] text-muted-foreground dark:text-muted-foreground/85 mt-1">
             Some models return encrypted reasoning — see the Events tab for tool activity.
           </p>
         </div>

@@ -54,7 +54,7 @@ export function Sidebar() {
       {/* Search */}
       <div className="relative p-2 pb-1">
         <Search
-          className="pointer-events-none absolute left-4 top-1/2 mt-0.5 h-3 w-3 -translate-y-1/2 text-muted-foreground/60"
+          className="pointer-events-none absolute left-4 top-1/2 mt-0.5 h-3 w-3 -translate-y-1/2 text-muted-foreground dark:text-muted-foreground/80"
           aria-hidden
         />
         <input
@@ -67,7 +67,7 @@ export function Sidebar() {
           aria-keyshortcuts="/"
           className={cn(
             'h-6 w-full rounded border border-border/60 bg-background pl-7 pr-6',
-            'font-mono text-[11px] text-foreground placeholder:text-muted-foreground/50',
+            'font-mono text-[11px] text-foreground placeholder:text-muted-foreground dark:text-muted-foreground/80',
             'focus:outline-none focus:ring-1 focus:ring-ring'
           )}
         />
@@ -75,7 +75,7 @@ export function Sidebar() {
           <button
             onClick={() => setQuery('')}
             aria-label="clear filter"
-            className="absolute right-4 top-1/2 mt-0.5 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
+            className="absolute right-4 top-1/2 mt-0.5 -translate-y-1/2 text-muted-foreground dark:text-muted-foreground/80 hover:text-foreground"
           >
             <X className="h-3 w-3" aria-hidden />
           </button>
@@ -107,7 +107,7 @@ export function Sidebar() {
               ))}
             </div>
           ) : groups.length === 0 ? (
-            <p className="px-2 py-2 font-mono text-[10px] text-muted-foreground/60">
+            <p className="px-2 py-2 font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               {searching ? 'no matches' : 'no agents running'}
             </p>
           ) : (

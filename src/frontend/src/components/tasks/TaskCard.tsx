@@ -49,6 +49,7 @@ function StatusDropdown({ task }: { task: Task }) {
           onClick={(e) => e.stopPropagation()}
         >
           <MoreHorizontal className="h-3 w-3" />
+          <span className="sr-only">Change status</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-36">
@@ -114,19 +115,19 @@ export function TaskCard({ task, depth = 0 }: { task: Task; depth?: number }) {
             </span>
           )}
           {task.project && (
-            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/70">
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground dark:text-muted-foreground/85">
               <FolderOpen className="h-2.5 w-2.5" />
               {task.project}
             </span>
           )}
           {task.created_at && (
-            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground/50">
+            <span className="inline-flex items-center gap-0.5 text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               <Clock className="h-2.5 w-2.5" />
               {relativeTime(task.created_at)}
             </span>
           )}
           {childCount > 0 && (
-            <span className="text-[10px] text-muted-foreground/50">
+            <span className="text-[10px] text-muted-foreground dark:text-muted-foreground/80">
               {childCount} subtask{childCount !== 1 ? 's' : ''}
             </span>
           )}
@@ -158,7 +159,7 @@ export function TaskCard({ task, depth = 0 }: { task: Task; depth?: number }) {
               </div>
             )}
             {task.source && (
-              <span className="text-[10px] text-muted-foreground/50">Source: {task.source}</span>
+              <span className="text-[10px] text-muted-foreground dark:text-muted-foreground/80">Source: {task.source}</span>
             )}
           </div>
         )}

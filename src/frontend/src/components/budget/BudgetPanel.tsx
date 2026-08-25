@@ -67,7 +67,7 @@ export function BudgetStatusline() {
           <span className="relative inline-flex items-center">
             <Coins className={`h-3 w-3 ${throttled ? 'text-red-500' : ''}`} />
             {throttled && (
-              <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+              <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse motion-reduce:animate-none" />
             )}
           </span>
           <span className={throttled ? 'text-red-500 font-medium' : ''}>{formatCost(totalCost)}</span>

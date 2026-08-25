@@ -37,6 +37,13 @@ export function AgentRow({ agent, isSupervisor = false, tokens }: AgentRowProps)
           isSleeping && 'opacity-55'
         )
       }
+      // Deliberately richer than the visible text (name + tiny badge + age):
+      // includes the full status word so screen reader users get the same
+      // information sighted users get from the colored status dot alone.
+      // axe's label-content-name-mismatch rule (zero-weight, doesn't affect
+      // the Lighthouse score) flags any aria-label that isn't near-verbatim
+      // visible text — accepted tradeoff, since trimming this down to
+      // satisfy it would mean silently dropping the status for AT users.
       aria-label={`${displayName} — ${agent.status.toLowerCase().replace('_', ' ')}`}
       title={tokens ? `${displayName} · ${formatTokenCount(tokens)} tok` : displayName}
     >
@@ -68,7 +75,7 @@ export function AgentRow({ agent, isSupervisor = false, tokens }: AgentRowProps)
         </span>
       )}
       {age && (
-        <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted-foreground/60 w-6 text-right">
+        <span className="shrink-0 font-mono text-[9px] tabular-nums text-muted-foreground dark:text-muted-foreground/80 w-6 text-right">
           {age}
         </span>
       )}
