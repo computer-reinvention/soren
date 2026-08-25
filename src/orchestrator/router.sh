@@ -138,6 +138,30 @@ parse_line() {
 # Message Storage & Broadcast
 #-------------------------------------------------------------------------------
 
+# Retry a curl call a few times with short backoff before giving up.
+# Used for calls into our own FastAPI server, which can be transiently
+# unavailable for a couple of seconds during a restart/deploy — without
+# this, a single missed beat permanently lost whatever [DONE]/status/
+# mailbox message the router was trying to relay to the dashboard at
+# that exact moment (the mailbox line itself isn't replayed; the
+# position marker has already moved past it by the time this runs).
+_curl_retry() {
+    local max_attempts=3
+    local attempt=1
+    local delay=1
+    while true; do
+        if curl "$@"; then
+            return 0
+        fi
+        if [[ "$attempt" -ge "$max_attempts" ]]; then
+            return 1
+        fi
+        sleep "$delay"
+        delay=$((delay * 2))
+        attempt=$((attempt + 1))
+    done
+}
+
 store_message_via_api() {
     local from="$1"
     local to="$2"
@@ -170,10 +194,10 @@ store_message_via_api() {
     fi
 
     # Call internal API to store message and broadcast to WebSocket
-    curl -sf -X POST "http://localhost:${SOREN_PORT}/api/messages/internal" \
+    _curl_retry -sf -X POST "http://localhost:${SOREN_PORT}/api/messages/internal" \
         -H "Content-Type: application/json" \
         -d "$payload" >/dev/null 2>&1 || {
-            log_route "WARN" "$from" "$to" "failed to store in DB (API unavailable)"
+            log_route "WARN" "$from" "$to" "failed to store in DB after retries (API unavailable)"
         }
 }
 
@@ -182,11 +206,11 @@ update_status_via_api() {
     local msg_id="$1"
     local new_status="$2"
 
-    curl -sf -X PATCH "http://localhost:${SOREN_PORT}/api/messages/${msg_id}/status" \
+    _curl_retry -sf -X PATCH "http://localhost:${SOREN_PORT}/api/messages/${msg_id}/status" \
         -H "Content-Type: application/json" \
         -d "{\"status\": \"$new_status\"}" \
         >/dev/null 2>&1 || {
-            log_route "WARN" "router" "api" "failed to update status for $msg_id"
+            log_route "WARN" "router" "api" "failed to update status for $msg_id after retries"
         }
 }
 
@@ -307,6 +331,13 @@ route_message() {
 
     if [[ "$delivered" == "false" ]]; then
         log_route "FAILED" "$from" "$to" "window not found"
+        # Surface the failure to the dashboard. Previously this was only
+        # ever visible in router.log — from the sender's (and any human
+        # watching the dashboard's) point of view, the message just
+        # silently vanished with no indication delivery ever failed.
+        store_message_via_api "router" "user" \
+            "[DELIVERY FAILED] Message from $from to $to could not be delivered — target agent window not found (not spawned, asleep, or crashed). Original subject: $subject" \
+            "system"
         return 1
     fi
 
@@ -337,13 +368,17 @@ process_mailbox() {
     if ((current_line < last_line)); then
         log_route "WARN" "router" "self" "mailbox shrunk (${last_line} -> ${current_line}), resetting position"
         last_line=0
+        save_line 0
     fi
 
     if ((current_line <= last_line)); then
         return 0
     fi
 
-    # Lock mailbox during read + line marker update to prevent reading partial writes
+    # Lock mailbox only long enough to take a consistent snapshot of the
+    # new lines — NOT for the whole processing loop below (routing can
+    # be slow: tmux retries, HTTP calls, etc., and holding the mailbox
+    # lock that long would block every other writer for no reason).
     mailbox_lock
 
     # Re-check line count under lock (may have changed)
@@ -357,36 +392,52 @@ process_mailbox() {
     local line_num=$((last_line + 1))
     local new_lines
     new_lines=$(tail -n +"$line_num" "$SOREN_MAILBOX")
-    local lines_processed=0
-    lines_processed=$(echo "$new_lines" | wc -l | xargs)
-
-    # Update line marker while still holding lock
-    save_line $((last_line + lines_processed))
     mailbox_unlock
 
-    # Process lines outside the lock (routing can take time)
+    # Process lines outside the lock, advancing the on-disk position
+    # marker one line at a time as each is actually finished (not in one
+    # bulk jump to the end of the batch before any of them are
+    # processed). Previously the marker was advanced past the *entire*
+    # batch before the loop below even started, so a router crash (or,
+    # worse, an ordinary "target agent not currently live" delivery
+    # failure blowing up the script under `set -e` — see the unguarded
+    # route_message call fixed below) partway through a batch of, say,
+    # 5 messages meant messages #2-5 were permanently lost even if
+    # their targets were perfectly reachable. Advancing per-line bounds
+    # that loss to at most the single message that was in flight at the
+    # moment of a crash, which will simply be re-delivered (at most
+    # once extra) on restart instead of vanishing.
     while IFS= read -r line || [[ -n "$line" ]]; do
-        # Skip empty lines
-        [[ -z "$line" ]] && continue
-
-        # Parse JSONL line
-        local parsed
-        if parsed=$(parse_line "$line"); then
-            # Check if this is a status_update record
-            if [[ "$parsed" == _status_update* ]]; then
-                local update_id update_status
-                IFS='|' read -r _ update_id update_status <<< "$parsed"
-                log_info "Status update: $update_id -> $update_status"
-                update_status_via_api "$update_id" "$update_status"
+        if [[ -n "$line" ]]; then
+            local parsed
+            if parsed=$(parse_line "$line"); then
+                if [[ "$parsed" == _status_update* ]]; then
+                    local update_id update_status
+                    IFS='|' read -r _ update_id update_status <<< "$parsed"
+                    log_info "Status update: $update_id -> $update_status"
+                    update_status_via_api "$update_id" "$update_status"
+                else
+                    local msg_id timestamp from to subject body_path status
+                    IFS='|' read -r msg_id timestamp from to subject body_path status <<< "$parsed"
+                    log_info "Routing: $from -> $to: $subject"
+                    # Never let a single delivery failure (e.g. target
+                    # agent not currently live — a routine, expected
+                    # condition, not an exceptional one) take down the
+                    # whole router under `set -e`. route_message already
+                    # logs its own FAILED/DELIVERED/QUEUED lines and
+                    # notifies the dashboard on failure; this guard only
+                    # exists to keep the daemon itself alive so it can
+                    # keep processing every other message.
+                    route_message "$msg_id" "$from" "$to" "$subject" "$body_path" "$status" \
+                        || log_route "WARN" "router" "self" "route_message failed for ${from}->${to} (rc=$?), continuing"
+                fi
             else
-                local msg_id timestamp from to subject body_path status
-                IFS='|' read -r msg_id timestamp from to subject body_path status <<< "$parsed"
-                log_info "Routing: $from -> $to: $subject"
-                route_message "$msg_id" "$from" "$to" "$subject" "$body_path" "$status"
+                log_route "SKIP" "unknown" "unknown" "invalid line: ${line:0:50}..."
             fi
-        else
-            log_route "SKIP" "unknown" "unknown" "invalid line: ${line:0:50}..."
         fi
+
+        save_line "$line_num"
+        line_num=$((line_num + 1))
     done <<< "$new_lines"
 }
 

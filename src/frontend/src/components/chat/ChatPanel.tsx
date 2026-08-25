@@ -126,12 +126,19 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
   // content back to ChatInput to restore rather than losing it. `nonce`
   // (not just content) so two consecutive failed sends of the same text
   // both trigger the restore effect.
-  const [failedSend, setFailedSend] = useState<{ content: string; nonce: number } | null>(null);
+  const [failedSend, setFailedSend] = useState<{ content: string; nonce: number; reason?: string } | null>(null);
   const sendMutation = useMutation({
     mutationFn: ({ to, content }: { to: string; content: string }) =>
       api.sendMessageToAgent(to, content),
-    onError: (_err, variables) => {
-      setFailedSend({ content: variables.content, nonce: Date.now() });
+    onError: (err, variables) => {
+      // api.sendMessageToAgent throws the backend's specific detail on a
+      // 503 (tmux delivery genuinely failed — agent asleep/crashed) rather
+      // than a generic message, so surface that instead of a canned string.
+      setFailedSend({
+        content: variables.content,
+        nonce: Date.now(),
+        reason: err instanceof Error ? err.message : undefined,
+      });
     },
   });
 

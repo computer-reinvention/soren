@@ -9,9 +9,42 @@ from ..config import settings
 LONG_MESSAGE_THRESHOLD = 4096
 
 
+class TmuxDeliveryError(Exception):
+    """A message could not actually be delivered to a tmux window.
+
+    Raised when the target window doesn't exist (agent never spawned,
+    asleep, or crashed) or when an underlying tmux command itself failed
+    (nonzero exit). Previously send_input() never checked either of these
+    — a message to a dead/sleeping agent silently "succeeded" from the
+    caller's point of view (HTTP 200, stored in chat history) while never
+    actually reaching anything. This exception lets callers distinguish
+    "the tmux delivery genuinely failed" from "it worked" so they can
+    surface that to the user instead of lying about success.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
 class TmuxService:
     def __init__(self):
         self.default_session = settings.tmux_session
+        # Per-target-window locks. Without this, two concurrent sends to
+        # the same window (double-click Send, multiple browser tabs, a
+        # direct message racing an @mention-routed one) each independently
+        # run send-keys(text) -> sleep -> send-keys(Enter) as unsynchronized
+        # asyncio tasks, which can interleave at the tmux level and garble
+        # both messages together. Serializing per-window (not globally)
+        # keeps unrelated agents' sends fully concurrent.
+        self._send_locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, target: str) -> asyncio.Lock:
+        lock = self._send_locks.get(target)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._send_locks[target] = lock
+        return lock
 
     async def _run_command(self, cmd: List[str]) -> tuple[str, str, int]:
         """Run tmux command and return stdout, stderr, return code."""
@@ -72,38 +105,52 @@ class TmuxService:
         windows = await self.list_windows(session)
         return window in windows
 
-    async def send_input(self, window: str, text: str, session: Optional[str] = None):
+    async def send_input(self, window: str, text: str, session: Optional[str] = None) -> None:
         """Send text input to a tmux window.
 
         For short messages: Uses send-keys -l (literal) then Enter separately.
         For long messages (>4KB): Uses load-buffer/paste-buffer via temp file
         to bypass ARG_MAX command-line limits.
+
+        Raises TmuxDeliveryError if the target window doesn't exist, or if
+        any underlying tmux command actually fails. Concurrent sends to the
+        same window are serialized (see _send_locks) so they can't interleave.
         """
         session = session or self.default_session
         target = f"{session}:{window}"
 
-        if len(text) > LONG_MESSAGE_THRESHOLD:
-            # Long message: use load-buffer/paste-buffer via temp file
-            await self._send_via_buffer(target, text)
-        else:
-            # Short message: use send-keys -l
-            await self._run_command([
-                "tmux", "send-keys", "-t", target, "-l", text
+        async with self._lock_for(target):
+            if not await self.window_exists(window, session):
+                raise TmuxDeliveryError(
+                    f"window '{target}' does not exist (agent not spawned, asleep, or crashed)"
+                )
+
+            if len(text) > LONG_MESSAGE_THRESHOLD:
+                # Long message: use load-buffer/paste-buffer via temp file
+                await self._send_via_buffer(target, text)
+            else:
+                # Short message: use send-keys -l
+                _, stderr, rc = await self._run_command([
+                    "tmux", "send-keys", "-t", target, "-l", text
+                ])
+                if rc != 0:
+                    raise TmuxDeliveryError(f"tmux send-keys failed (rc={rc}): {stderr.strip()}")
+
+            # Delay for multiline paste to be processed
+            # The TUI shows a pasted-text placeholder and needs time to register
+            if "\n" in text:
+                await asyncio.sleep(0.15)  # 150ms delay for multiline
+            else:
+                await asyncio.sleep(0.05)  # 50ms for single line
+
+            # Send Enter SEPARATELY to submit
+            _, stderr, rc = await self._run_command([
+                "tmux", "send-keys", "-t", target, "Enter"
             ])
+            if rc != 0:
+                raise TmuxDeliveryError(f"tmux send-keys Enter failed (rc={rc}): {stderr.strip()}")
 
-        # Delay for multiline paste to be processed
-        # The TUI shows a pasted-text placeholder and needs time to register
-        if "\n" in text:
-            await asyncio.sleep(0.15)  # 150ms delay for multiline
-        else:
-            await asyncio.sleep(0.05)  # 50ms for single line
-
-        # Send Enter SEPARATELY to submit
-        await self._run_command([
-            "tmux", "send-keys", "-t", target, "Enter"
-        ])
-
-    async def _send_via_buffer(self, target: str, text: str):
+    async def _send_via_buffer(self, target: str, text: str) -> None:
         """Send long text via tmux load-buffer/paste-buffer to bypass ARG_MAX."""
         # Create temp file with the message content
         fd, tmp_path = tempfile.mkstemp(prefix="soren_msg_", suffix=".txt")
@@ -112,14 +159,18 @@ class TmuxService:
             os.close(fd)
 
             # Load into tmux buffer
-            await self._run_command([
+            _, stderr, rc = await self._run_command([
                 "tmux", "load-buffer", tmp_path
             ])
+            if rc != 0:
+                raise TmuxDeliveryError(f"tmux load-buffer failed (rc={rc}): {stderr.strip()}")
 
             # Paste buffer into target pane
-            await self._run_command([
+            _, stderr, rc = await self._run_command([
                 "tmux", "paste-buffer", "-t", target
             ])
+            if rc != 0:
+                raise TmuxDeliveryError(f"tmux paste-buffer failed (rc={rc}): {stderr.strip()}")
         finally:
             # Clean up temp file
             try:

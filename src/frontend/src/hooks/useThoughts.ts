@@ -23,11 +23,16 @@ export function useThoughts() {
     return projectAgentsData.agents.map(a => a.key);
   }, [selectedProjectId, projectAgentsData]);
 
-  // Global thoughts query (always runs to seed the store on app start)
+  // Global thoughts query (always runs to seed the store on app start).
+  // refetchInterval is a background consistency fallback, same rationale
+  // as useMessages' 45s poll: this feed was previously WS-only with no
+  // recovery path for a missed broadcast. thoughtStore dedupes by id, so
+  // re-delivering the same thoughts here is a safe no-op.
   const { data, isLoading, error } = useQuery({
     queryKey: ['thoughts'],
     queryFn: () => api.getThoughts(200),
     staleTime: 60000,
+    refetchInterval: 45000,
   });
 
   // Per-agent queries when a project is selected — ensures project agent
@@ -37,6 +42,7 @@ export function useThoughts() {
       queryKey: ['thoughts', 'agent', name],
       queryFn: () => api.getThoughts(200, name),
       staleTime: 60000,
+      refetchInterval: 45000,
     })),
   });
 

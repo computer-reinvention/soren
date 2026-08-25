@@ -15,6 +15,13 @@ export function useAgentEvents() {
     queryKey: ['agent-events'],
     queryFn: () => api.getAgentEvents(undefined, 100),
     staleTime: 60000,
+    // Background consistency fallback, same rationale as useMessages'
+    // 45s poll: this feed was previously WS-only with zero recovery path
+    // for a missed broadcast (no server-side replay buffer either — see
+    // websocket/manager.py). activityStore dedupes by id AND by a
+    // type|agent_id|timestamp fingerprint, so re-delivering the same
+    // events here is a safe no-op, not a source of duplicates.
+    refetchInterval: 45000,
   });
 
   // Populate activity store with historical events on load

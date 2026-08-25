@@ -54,8 +54,26 @@ export function useWebSocket() {
     ws.onopen = () => {
       setConnected(true);
       setReconnecting(false);
-      // Reset backoff counter on successful connection
+
+      // If this connection followed at least one failed/dropped attempt,
+      // it's a genuine RECONNECT (not the page's initial connection) —
+      // there's a real gap during which the server broadcast events this
+      // client never received. The server has no replay/backlog buffer
+      // (see websocket/manager.py), and unlike chat messages (`useMessages`
+      // has a 45s polling fallback independent of WS health), the activity
+      // feed and thought stream were WS-only with zero recovery: a missed
+      // agent_event/agent_thought during a disconnect window was gone from
+      // the live UI until a full page reload. Invalidating these queries
+      // on reconnect forces a refetch that closes that gap.
+      const wasReconnecting = reconnectAttemptRef.current > 0;
       reconnectAttemptRef.current = 0;
+      if (wasReconnecting) {
+        console.log('WebSocket reconnected after a drop — refetching to catch up on anything missed');
+        queryClient.invalidateQueries({ queryKey: ['agent-events'] });
+        queryClient.invalidateQueries({ queryKey: ['thoughts'] });
+        queryClient.invalidateQueries({ queryKey: ['messages'] });
+      }
+
       console.log('WebSocket connected');
     };
 

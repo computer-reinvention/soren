@@ -15,7 +15,7 @@ from ..services.auth import decode_token
 from ..services.ws_auth import authenticate_ws
 from ..models.message import Message, MessageType
 from ..services.agent_manager import agent_manager
-from ..services.tmux_service import tmux_service
+from ..services.tmux_service import tmux_service, TmuxDeliveryError
 from ..services.mailbox import mailbox_service
 from ..services.agent_registry import agent_registry
 from ..services.conversation_store import (
@@ -237,14 +237,40 @@ async def get_agent(agent_id: str):
 
 @router.post("/{agent_id}/message")
 async def send_message_to_agent(agent_id: str, message: AgentMessage, request: Request):
-    """Send a message to a specific agent."""
+    """Send a message to a specific agent.
+
+    Delivery is attempted BEFORE anything is stored/broadcast. Previously
+    the message was stored and broadcast unconditionally, and the tmux
+    delivery call's result was completely ignored — sending to a sleeping
+    or crashed agent (agent_manager.get_agent() returns SLEEPING agents
+    too, whose tmux window no longer exists) returned HTTP 200
+    {"success": true} and made the message look delivered in the chat
+    history, while the agent never actually received it. Now a genuine
+    delivery failure raises HTTPException(503) instead, and the frontend's
+    existing failed-send handling (restore text, show an error banner)
+    covers it — no message is ever stored/shown as sent unless it truly
+    reached the target window.
+    """
     agent = await agent_manager.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
     username = _username_from_request(request)
 
-    # Store the user message for chat history
+    # Prefix with [username] so the message starts with an alphabetic character.
+    # This prevents tmux send-keys content (e.g. markdown like "- [ ] task")
+    # from being interpreted as opencode autocomplete suggestions.
+    prefixed_content = f"[{username}] {message.content}"
+    try:
+        await tmux_service.send_input(agent.tmux_window, prefixed_content, session=agent.session)
+    except TmuxDeliveryError as e:
+        logger.warning(f"Failed to deliver message to agent '{agent_id}': {e.reason}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Message could not be delivered to '{agent_id}': {e.reason}",
+        )
+
+    # Only now — after confirmed delivery — store for chat history and broadcast.
     msg = Message(
         id=str(uuid.uuid4()),
         timestamp=datetime.now(timezone.utc),
@@ -254,12 +280,6 @@ async def send_message_to_agent(agent_id: str, message: AgentMessage, request: R
         content=message.content
     )
     mailbox_service.store_message(msg)
-
-    # Prefix with [username] so the message starts with an alphabetic character.
-    # This prevents tmux send-keys content (e.g. markdown like "- [ ] task")
-    # from being interpreted as opencode autocomplete suggestions.
-    prefixed_content = f"[{username}] {message.content}"
-    await tmux_service.send_input(agent.tmux_window, prefixed_content)
     await ws_manager.broadcast("message_sent", {
         "agent_id": agent_id,
         "content": message.content[:100]
@@ -267,36 +287,57 @@ async def send_message_to_agent(agent_id: str, message: AgentMessage, request: R
     # Also broadcast the full message for chat UI
     await ws_manager.broadcast("new_message", msg.model_dump(mode="json"))
 
-    # Route @mentions to mentioned agents (works from any agent context)
+    # Route @mentions to mentioned agents (works from any agent context).
+    # Each mention is delivered independently — one mention's delivery
+    # failure (or referencing an unknown name) doesn't affect the primary
+    # send above, which has already succeeded by this point, but both
+    # kinds of failure are now reported back in the response instead of
+    # being silently swallowed.
     mentioned_names = MENTION_PATTERN.findall(message.content)
     routed_to: list[str] = []
+    mention_errors: list[dict] = []
     for name in set(mentioned_names):
         if name == agent_id:
             continue  # Already receiving this message as primary target
         mentioned_agent = await agent_manager.get_agent(name)
-        if mentioned_agent:
-            # Send to the mentioned agent's tmux window
-            mention_content = f"[soren:{username}] @you: {message.content}"
+        if not mentioned_agent:
+            mention_errors.append({"name": name, "reason": "not_found"})
+            logger.info(f"@mention '{name}' does not resolve to a known agent — skipped")
+            continue
+
+        mention_content = f"[soren:{username}] @you: {message.content}"
+        try:
             await tmux_service.send_input(
                 mentioned_agent.tmux_window, mention_content,
                 session=mentioned_agent.session,
             )
-            # Store mention-routed message so it appears in chat history
-            mention_msg = Message(
-                id=str(uuid.uuid4()),
-                timestamp=datetime.now(timezone.utc),
-                from_agent=username,
-                to_agent=name,
-                type=MessageType.USER,
-                content=message.content,
-                metadata={"mention_routed": True, "original_target": agent_id},
-            )
-            mailbox_service.store_message(mention_msg)
-            await ws_manager.broadcast("new_message", mention_msg.model_dump(mode="json"))
-            routed_to.append(name)
-            logger.info(f"@mention routed message to {name}")
+        except TmuxDeliveryError as e:
+            mention_errors.append({"name": name, "reason": "delivery_failed", "detail": e.reason})
+            logger.warning(f"@mention delivery to '{name}' failed: {e.reason}")
+            continue
 
-    return {"success": True, "agent_id": agent_id, "message_id": msg.id, "mention_routed_to": routed_to}
+        # Store mention-routed message so it appears in chat history
+        mention_msg = Message(
+            id=str(uuid.uuid4()),
+            timestamp=datetime.now(timezone.utc),
+            from_agent=username,
+            to_agent=name,
+            type=MessageType.USER,
+            content=message.content,
+            metadata={"mention_routed": True, "original_target": agent_id},
+        )
+        mailbox_service.store_message(mention_msg)
+        await ws_manager.broadcast("new_message", mention_msg.model_dump(mode="json"))
+        routed_to.append(name)
+        logger.info(f"@mention routed message to {name}")
+
+    return {
+        "success": True,
+        "agent_id": agent_id,
+        "message_id": msg.id,
+        "mention_routed_to": routed_to,
+        "mention_errors": mention_errors,
+    }
 
 
 @router.post("/{agent_id}/interrupt")

@@ -117,17 +117,44 @@ function truncate(s: unknown, n: number): string {
   return str.length > n ? str.slice(0, n) + "…" : str
 }
 
-async function post(url: string, body: unknown): Promise<void> {
-  try {
-    await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(4000),
-    })
-  } catch {
-    // SOREN server may be down; never break the agent over telemetry.
+/**
+ * POST to the SOREN server. Never throws — a down/unreachable server must
+ * never break the agent over telemetry — but unlike the original version,
+ * failures are no longer completely silent: a non-2xx response or network
+ * error is logged to stderr (visible in the agent's own terminal output /
+ * tmux pane capture / audit trail), and callers can opt into a couple of
+ * retries with short backoff for events where losing the message entirely
+ * would be worse than the extra latency (e.g. the once-per-turn Stop event,
+ * as opposed to the once-per-tool-call PostToolUse event).
+ *
+ * Returns true if the POST was accepted (2xx), false otherwise — most
+ * callers still ignore the return value (fire-and-forget is correct for
+ * telemetry), but the Stop-event path uses it to decide whether to fall
+ * back to a placeholder message.
+ */
+async function post(url: string, body: unknown, opts: { retries?: number } = {}): Promise<boolean> {
+  const maxAttempts = 1 + (opts.retries ?? 0)
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(4000),
+      })
+      if (res.ok) return true
+      console.error(`[soren-bridge] POST ${url} -> HTTP ${res.status} (attempt ${attempt}/${maxAttempts})`)
+    } catch (err) {
+      // SOREN server may be down; never break the agent over telemetry —
+      // but do log it, since this used to vanish with zero trace anywhere.
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[soren-bridge] POST ${url} failed (attempt ${attempt}/${maxAttempts}): ${msg}`)
+    }
+    if (attempt < maxAttempts) {
+      await new Promise((r) => setTimeout(r, 500 * attempt))
+    }
   }
+  return false
 }
 
 async function touchHeartbeat(): Promise<void> {
@@ -481,26 +508,65 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       }
 
       // Race guard: session.idle can fire before the final text part is
-      // visible via the API. If the assistant produced output but we found
-      // no text, wait briefly and refetch once.
-      if (!responseContent && usage.output_tokens > 0) {
-        await new Promise((r) => setTimeout(r, 800))
-        const retry = await fetchMessages(sessionID)
-        for (const msg of retry) {
-          if (msg.info?.role !== "assistant") continue
-          for (const part of msg.parts ?? []) {
-            if (part.type === "text" && part.text) responseContent = part.text
+      // visible via the API. Previously this only retried once, after a
+      // fixed 800ms wait, and ONLY when usage.output_tokens > 0 — a gate
+      // that itself isn't reliable evidence either way (usage reporting
+      // can lag independently of message-text visibility). If the retry
+      // still came up empty, `response_content` was sent as `undefined`,
+      // and the backend (agent_events.py) then creates NO chat message
+      // at all for that turn — the agent's actual response was fully and
+      // silently lost from the dashboard, even though it was produced.
+      // This was the single most direct match for "agent output doesn't
+      // come back": a pure timing race, not a real absence of output.
+      //
+      // Fix: retry more persistently whenever there's any real evidence
+      // this was an actual assistant turn (an assistant message exists,
+      // tool calls happened, or usage was reported) — not gated on the
+      // output_tokens heuristic alone — and if text is still genuinely
+      // unrecoverable after retrying, send an explicit placeholder
+      // instead of `undefined` so the turn is at least visible on the
+      // dashboard with a pointer to where to find the real content,
+      // rather than vanishing without a trace.
+      const turnLikelyHadOutput = !!lastAssistant || usage.output_tokens > 0 || toolCallsSinceUser > 0
+      if (!responseContent && turnLikelyHadOutput) {
+        const backoffsMs = [500, 1000, 1500]
+        for (const delay of backoffsMs) {
+          await new Promise((r) => setTimeout(r, delay))
+          const retry = await fetchMessages(sessionID)
+          for (const msg of retry) {
+            if (msg.info?.role !== "assistant") continue
+            for (const part of msg.parts ?? []) {
+              if (part.type === "text" && part.text) responseContent = part.text
+            }
           }
+          if (responseContent) break
+        }
+        if (!responseContent) {
+          console.error(
+            `[soren-bridge] Stop event for session ${sessionID}: no response text found after ${backoffsMs.length} retries ` +
+              `despite evidence of a real turn (assistant=${!!lastAssistant}, output_tokens=${usage.output_tokens}, tools=${toolCallsSinceUser}) — sending placeholder instead of silently dropping the turn`,
+          )
+          responseContent =
+            "[SYS] (response text unavailable — the agent completed a turn but its text wasn't retrievable via the API in time; check the terminal pane for the actual output)"
         }
       }
 
-      await post(EVENTS_URL, {
-        event_type: "Stop",
-        session_id: sessionID,
-        agent_id: AGENT,
-        response_content: responseContent || undefined,
-        usage,
-      })
+      // Stop is the single event that turns into the dashboard chat
+      // message for this turn — worth a couple of retries on top of
+      // post()'s own logging if the server is transiently unreachable,
+      // since losing this one silently drops the whole visible response
+      // (unlike e.g. a single missed PostToolUse, which is one of many).
+      await post(
+        EVENTS_URL,
+        {
+          event_type: "Stop",
+          session_id: sessionID,
+          agent_id: AGENT,
+          response_content: responseContent || undefined,
+          usage,
+        },
+        { retries: 2 },
+      )
 
       // stop-gate: one nudge per session when substantial work ended without
       // a commit, journal entry, or mailbox report. Supervisor and permanent

@@ -29,7 +29,7 @@ interface ChatInputProps {
    * `nonce` on mutation error to restore `content` back into the textarea
    * instead of losing it.
    */
-  failedSend?: { content: string; nonce: number } | null;
+  failedSend?: { content: string; nonce: number; reason?: string } | null;
 }
 
 interface MentionState {
@@ -676,7 +676,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             className="mb-2 flex items-center gap-1.5 text-xs text-red-700 dark:text-red-400 animate-in fade-in duration-200"
           >
             <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
-            Send failed — message restored below, check your connection and retry
+            {failedSend.reason || 'Send failed — message restored below, check your connection and retry'}
           </div>
         )}
 

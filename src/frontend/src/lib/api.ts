@@ -71,7 +71,14 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
-    if (!res.ok) throw new Error('Failed to send message');
+    if (!res.ok) {
+      // 503 means tmux delivery genuinely failed (agent asleep/crashed/
+      // window gone) — surface the backend's specific reason instead of a
+      // generic "failed to send", since "agent isn't reachable right now"
+      // is actionable in a way "failed to send" isn't.
+      const detail = await res.json().catch(() => null);
+      throw new Error(detail?.detail || 'Failed to send message');
+    }
   },
 
   async interruptAgent(agentId: string): Promise<void> {

@@ -63,8 +63,28 @@ tmux_send_keys() {
             if curl -sf -m 5 -X POST "http://127.0.0.1:${oc_port}/tui/append-prompt" \
                     -H 'Content-Type: application/json' -d "$payload" >/dev/null 2>&1; then
                 sleep 0.2
-                curl -sf -m 5 -X POST "http://127.0.0.1:${oc_port}/tui/submit-prompt" \
-                    -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 && return 0
+                # submit-prompt doesn't re-inject any text (append already
+                # did that), so retrying it on transient failure is safe —
+                # unlike retrying append-prompt itself, it can't duplicate
+                # the message content.
+                local submit_attempt=0
+                while ((submit_attempt < 3)); do
+                    curl -sf -m 5 -X POST "http://127.0.0.1:${oc_port}/tui/submit-prompt" \
+                        -H 'Content-Type: application/json' -d '{}' >/dev/null 2>&1 && return 0
+                    submit_attempt=$((submit_attempt + 1))
+                    sleep 0.5
+                done
+                # append-prompt succeeded but submit-prompt never did, even
+                # after retries. The text is already sitting in the TUI's
+                # prompt buffer via HTTP — falling through to the tmux
+                # fallback below would re-inject that SAME text a second
+                # time via send-keys, duplicating it within one submission.
+                # Instead, just press Enter over tmux to submit whatever
+                # HTTP already placed in the buffer, without re-sending text.
+                echo "[tmux_send_keys] append-prompt succeeded but submit-prompt failed after retries for ${session}:${window} — submitting via tmux Enter instead of re-injecting text" >&2
+                tmux send-keys -t "${session}:${window}" Enter
+                tmux_unstick_paste "$session" "$window" 2>/dev/null || true
+                return 0
             fi
         fi
     fi
@@ -438,32 +458,54 @@ tmux_drain_queue() {
         return 0  # Not ready, try again later
     fi
 
-    # Read and process queued messages
+    # Read all queued lines into an array first (bash 3.2-compatible —
+    # no `mapfile`, since this runs on stock macOS bash too) so that if
+    # delivery fails partway through, we can re-queue BOTH the failed
+    # message AND everything still behind it in the batch. The previous
+    # version only re-queued the single failed message and discarded
+    # every message still unread in $tmpfile when it removed the file —
+    # a queue of, say, 5 messages where #2 failed to deliver silently
+    # dropped #3, #4, and #5 forever.
     local tmpfile
     tmpfile=$(mktemp)
     mv "$queue_file" "$tmpfile"
 
+    local lines=()
+    while IFS= read -r encoded_line || [[ -n "$encoded_line" ]]; do
+        lines+=("$encoded_line")
+    done < "$tmpfile"
+    rm -f "$tmpfile"
+
     local delivered=0
-    while IFS= read -r encoded_line; do
+    local i
+    for ((i = 0; i < ${#lines[@]}; i++)); do
+        local encoded_line="${lines[$i]}"
         [[ -z "$encoded_line" ]] && continue
 
         local decoded
         decoded=$(printf '%s' "$encoded_line" | base64 -d 2>/dev/null) || {
-            echo "[tmux_drain_queue] Failed to decode queued message" >&2
+            echo "[tmux_drain_queue] Failed to decode queued message, dropping just this one entry (rest of queue still processed)" >&2
             continue
         }
 
         # Send without --queue to avoid infinite loop
         if tmux_safe_send "$session" "$window" "$decoded" --retry 1; then
-            ((delivered++))
+            delivered=$((delivered + 1))
         else
-            # Re-queue failed messages
-            _tmux_queue_message "$session" "$window" "$decoded"
-            break  # Stop draining — pane is no longer at prompt
+            # Pane is no longer at prompt (or delivery failed for some
+            # other reason) — re-queue this message AND every remaining
+            # message behind it in the batch, then stop draining. Order
+            # is preserved since _tmux_queue_message appends.
+            local j
+            for ((j = i; j < ${#lines[@]}; j++)); do
+                [[ -z "${lines[$j]}" ]] && continue
+                local requeue_decoded
+                requeue_decoded=$(printf '%s' "${lines[$j]}" | base64 -d 2>/dev/null) || continue
+                _tmux_queue_message "$session" "$window" "$requeue_decoded"
+            done
+            break
         fi
-    done < "$tmpfile"
-
-    rm -f "$tmpfile"
+    done
 
     if ((delivered > 0)); then
         echo "[tmux_drain_queue] Delivered $delivered queued message(s) to ${session}:${window}" >&2
