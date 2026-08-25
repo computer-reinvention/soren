@@ -15,3 +15,15 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>
 );
+
+// P4.4: PWA installability + offline app shell. Production-only — the
+// dev server's own module graph/HMR requests would otherwise get caught
+// by the SW's fetch handler, breaking hot reload.
+if ('serviceWorker' in navigator && import.meta.env.PROD) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // Non-fatal — the app works fully without the SW, just without
+      // installability/offline-shell fallback.
+    });
+  });
+}
