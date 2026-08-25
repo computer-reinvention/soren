@@ -1,4 +1,5 @@
-import { useState, useMemo, useCallback, lazy, Suspense } from 'react';
+import { useState, useMemo, useCallback, useEffect, lazy, Suspense } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useTasks } from '@/hooks/useTasks';
 import { useProjects } from '@/hooks/useProjects';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -50,6 +51,25 @@ export function TasksPanel() {
   const [assigneeFilters, setAssigneeFilters] = useState<Set<string>>(new Set());
   const [sort, setSort] = useState<SortOption>('priority-time');
   const [search, setSearch] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Deep-link support (P5.1): the global command palette navigates here
+  // with ?q=<task title> so landing on /tasks actually shows the task you
+  // searched for, instead of an inert route change. Consumed once (param
+  // stripped from the URL) rather than kept in sync both ways — simple
+  // "arrive here filtered" behavior, not a full URL-as-state pattern.
+  useEffect(() => {
+    const q = searchParams.get('q');
+    if (q) {
+      setSearch(q);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete('q');
+        return next;
+      }, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const { data, isLoading, error, isFetching } = useTasks();
   const { data: projectsData } = useProjects();
