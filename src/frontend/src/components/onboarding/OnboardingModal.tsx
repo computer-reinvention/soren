@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Dialog,
   DialogContent,
@@ -8,20 +9,25 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { cn } from '@/lib/utils';
+import { api } from '@/lib/api';
 import {
   Users,
   Shield,
   Activity,
   BookOpen,
-  MessageSquare,
   ChevronLeft,
   ChevronRight,
-  Sparkles,
+  Terminal,
   Bot,
   GitBranch,
   Zap,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Send,
 } from 'lucide-react';
 
 interface OnboardingStep {
@@ -29,14 +35,13 @@ interface OnboardingStep {
   title: string;
   subtitle: string;
   description: React.ReactNode;
-  gradient: string;
 }
 
 const steps: OnboardingStep[] = [
   {
-    icon: <Sparkles className="h-8 w-8" />,
+    icon: <Terminal className="h-6 w-6" />,
     title: 'Welcome to SOREN',
-    subtitle: 'Multi-Agent AI Orchestration',
+    subtitle: 'multi-agent AI orchestration',
     description: (
       <div className="space-y-3">
         <p>
@@ -49,138 +54,200 @@ const steps: OnboardingStep[] = [
         </p>
       </div>
     ),
-    gradient: 'from-violet-500 to-purple-600',
   },
   {
-    icon: <Users className="h-8 w-8" />,
+    icon: <Users className="h-6 w-6" />,
     title: 'Supervisor + Workers',
-    subtitle: 'Hierarchical Agent Architecture',
+    subtitle: 'hierarchical agent architecture',
     description: (
       <div className="space-y-3">
         <div className="flex items-start gap-3">
-          <div className="rounded-lg bg-primary/10 p-2 mt-0.5">
-            <Bot className="h-4 w-4 text-primary" />
+          <div className="rounded border border-border/60 bg-muted/30 p-1.5 mt-0.5">
+            <Bot className="h-3.5 w-3.5 text-emerald-500" />
           </div>
           <div>
-            <p className="font-medium text-foreground">Supervisor Agent</p>
+            <p className="font-medium text-foreground font-mono text-xs uppercase tracking-wide">supervisor agent</p>
             <p className="text-sm">Coordinates work, delegates tasks, and reviews changes. Always running.</p>
           </div>
         </div>
         <div className="flex items-start gap-3">
-          <div className="rounded-lg bg-accent/50 p-2 mt-0.5">
-            <Users className="h-4 w-4 text-muted-foreground" />
+          <div className="rounded border border-border/60 bg-muted/30 p-1.5 mt-0.5">
+            <Users className="h-3.5 w-3.5 text-muted-foreground" />
           </div>
           <div>
-            <p className="font-medium text-foreground">Worker Agents</p>
+            <p className="font-medium text-foreground font-mono text-xs uppercase tracking-wide">worker agents</p>
             <p className="text-sm">Execute specific tasks in isolated tmux windows. Spawned on demand.</p>
           </div>
         </div>
       </div>
     ),
-    gradient: 'from-blue-500 to-cyan-500',
   },
   {
-    icon: <Shield className="h-8 w-8" />,
+    icon: <Shield className="h-6 w-6" />,
     title: 'Self-Healing Safety',
-    subtitle: 'Automatic Rollback Protection',
+    subtitle: 'automatic rollback protection',
     description: (
       <div className="space-y-3">
-        <div className="flex items-center gap-2 text-sm">
-          <GitBranch className="h-4 w-4 text-green-500" />
-          <span>Changes are automatically committed to git</span>
+        <div className="flex items-center gap-2 text-sm font-mono">
+          <GitBranch className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+          <span>changes are automatically committed to git</span>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Zap className="h-4 w-4 text-amber-500" />
-          <span>Health daemon monitors system every 10 seconds</span>
+        <div className="flex items-center gap-2 text-sm font-mono">
+          <Zap className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+          <span>health daemon monitors the system every 10 seconds</span>
         </div>
-        <div className="flex items-center gap-2 text-sm">
-          <Shield className="h-4 w-4 text-blue-500" />
-          <span>Automatic rollback if something breaks</span>
+        <div className="flex items-center gap-2 text-sm font-mono">
+          <Shield className="h-3.5 w-3.5 text-blue-400 shrink-0" />
+          <span>automatic rollback if something breaks</span>
         </div>
-        <p className="text-sm pt-2 border-t border-border">
-          This means agents can safely experiment - if changes break the system,
+        <p className="text-sm pt-2 border-t border-border/60">
+          This means agents can safely experiment — if changes break the system,
           it automatically recovers to the last working state.
         </p>
       </div>
     ),
-    gradient: 'from-emerald-500 to-teal-500',
   },
   {
-    icon: <Activity className="h-8 w-8" />,
+    icon: <Activity className="h-6 w-6" />,
     title: 'Real-Time Dashboard',
-    subtitle: 'Monitor Everything',
+    subtitle: 'monitor everything',
     description: (
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-3">
-          <div className="rounded-lg border bg-card p-3">
-            <p className="font-medium text-sm">Left Panel</p>
-            <p className="text-xs text-muted-foreground">Agents, files, mailbox</p>
-          </div>
-          <div className="rounded-lg border bg-card p-3">
-            <p className="font-medium text-sm">Center Panel</p>
-            <p className="text-xs text-muted-foreground">Chat with agents</p>
-          </div>
-          <div className="rounded-lg border bg-card p-3">
-            <p className="font-medium text-sm">Right Panel</p>
-            <p className="text-xs text-muted-foreground">Activity timeline</p>
-          </div>
-          <div className="rounded-lg border bg-card p-3">
-            <p className="font-medium text-sm">Status Bar</p>
-            <p className="text-xs text-muted-foreground">Connection health</p>
-          </div>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            ['left panel', 'agents, files, secrets'],
+            ['center panel', 'chat with agents'],
+            ['right panel', 'activity timeline'],
+            ['status bar', 'connection health'],
+          ].map(([label, desc]) => (
+            <div key={label} className="rounded border border-border/60 bg-muted/30 px-3 py-2">
+              <p className="font-mono text-xs uppercase tracking-wide text-foreground/90">{label}</p>
+              <p className="text-xs text-muted-foreground">{desc}</p>
+            </div>
+          ))}
         </div>
-        <p className="text-sm">
-          All panels resize and update in real-time via WebSocket.
-        </p>
+        <p className="text-sm">All panels resize and update in real-time via WebSocket.</p>
       </div>
     ),
-    gradient: 'from-orange-500 to-amber-500',
   },
   {
-    icon: <BookOpen className="h-8 w-8" />,
+    icon: <BookOpen className="h-6 w-6" />,
     title: 'Persistent Memory',
-    subtitle: 'Journal System',
+    subtitle: 'journal system',
     description: (
       <div className="space-y-3">
         <p>
           The journal system maintains context across sessions, so agents remember
           what was tried before and can make informed decisions.
         </p>
-        <div className="rounded-lg border bg-muted/50 p-3 text-sm font-mono">
-          <p className="text-muted-foreground">.soren/journal/YYYY-MM-DD/</p>
-          <p className="pl-4">journal.md - Daily entries</p>
-          <p className="pl-4">attachments/ - Screenshots, logs</p>
-        </div>
+        <pre className="rounded border border-border/60 bg-muted/30 p-3 text-xs font-mono text-muted-foreground overflow-x-auto">
+{`.soren/journal/YYYY-MM-DD/
+  journal.md      daily entries
+  attachments/    screenshots, logs`}
+        </pre>
       </div>
     ),
-    gradient: 'from-pink-500 to-rose-500',
-  },
-  {
-    icon: <MessageSquare className="h-8 w-8" />,
-    title: 'Getting Started',
-    subtitle: 'Send Your First Task',
-    description: (
-      <div className="space-y-3">
-        <p>
-          Use the <span className="font-semibold text-foreground">chat panel</span> in
-          the center to send tasks to the supervisor agent.
-        </p>
-        <div className="rounded-lg border bg-muted/50 p-3">
-          <p className="text-sm font-medium mb-2">Try these commands:</p>
-          <ul className="text-sm space-y-1 text-muted-foreground">
-            <li>"Check the system status"</li>
-            <li>"List all active workers"</li>
-            <li>"Create a new feature for..."</li>
-          </ul>
-        </div>
-        <p className="text-sm">
-          The supervisor will coordinate workers as needed to complete your request.
-        </p>
-      </div>
-    ),
-    gradient: 'from-indigo-500 to-blue-600',
   },
 ];
+
+/**
+ * Final, interactive step (P6.5) — replaces the old static "here are some
+ * commands to try" slide with something that actually does the two things
+ * the plan called for: verify the server connection for real (not just
+ * assert it in prose) and let the user send a genuine first message from
+ * inside onboarding, using the same sendMessageToAgent call ChatInput uses.
+ */
+function GettingStartedStep({ onDone }: { onDone: () => void }) {
+  const [message, setMessage] = useState('');
+  const [sent, setSent] = useState(false);
+  const queryClient = useQueryClient();
+
+  const { data: health, isFetching: checkingHealth, refetch: recheckHealth } = useQuery({
+    queryKey: ['onboarding-health-check'],
+    queryFn: () => api.getHealth(),
+    staleTime: 0,
+  });
+  const isHealthy = health?.status === 'healthy';
+
+  const sendMutation = useMutation({
+    mutationFn: (content: string) => api.sendMessageToAgent('supervisor', content),
+    onSuccess: () => {
+      setSent(true);
+      queryClient.invalidateQueries({ queryKey: ['messages'] });
+    },
+  });
+
+  return (
+    <div className="space-y-4">
+      {/* Live connection check — a real request, not a claim in prose. */}
+      <div className="flex items-center justify-between rounded border border-border/60 bg-muted/30 px-3 py-2">
+        <div className="flex items-center gap-2 font-mono text-xs">
+          {checkingHealth ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-muted-foreground" aria-hidden />
+          ) : isHealthy ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" aria-hidden />
+          ) : (
+            <XCircle className="h-3.5 w-3.5 text-red-400" aria-hidden />
+          )}
+          <span className={cn(!checkingHealth && (isHealthy ? 'text-emerald-500' : 'text-red-400'))}>
+            {checkingHealth ? 'checking server connection…' : isHealthy ? 'server connection verified' : 'server unreachable'}
+          </span>
+        </div>
+        <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={() => recheckHealth()}>
+          recheck
+        </Button>
+      </div>
+
+      {/* Send a real first message to the supervisor. */}
+      {sent ? (
+        <div className="flex items-center gap-2 rounded border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 font-mono text-xs text-emerald-500">
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          sent — the supervisor will respond in the chat panel once you're through here.
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          <label htmlFor="onboarding-first-message" className="font-mono text-xs text-muted-foreground">
+            send your first message to the supervisor
+          </label>
+          <div className="flex gap-1.5">
+            <Textarea
+              id="onboarding-first-message"
+              rows={2}
+              placeholder='e.g. "check the system status"'
+              value={message}
+              onChange={(e) => setMessage(e.target.value)}
+              className="font-mono text-sm resize-none"
+              disabled={sendMutation.isPending}
+            />
+            <Button
+              size="icon"
+              className="h-auto shrink-0"
+              disabled={!message.trim() || sendMutation.isPending}
+              onClick={() => sendMutation.mutate(message.trim())}
+            >
+              {sendMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+              ) : (
+                <Send className="h-4 w-4" />
+              )}
+              <span className="sr-only">Send</span>
+            </Button>
+          </div>
+          {sendMutation.isError && (
+            <p className="text-xs text-red-400 font-mono">failed to send — you can also just use the chat panel directly</p>
+          )}
+          <button
+            type="button"
+            onClick={onDone}
+            className="text-xs text-muted-foreground hover:text-foreground font-mono underline underline-offset-2"
+          >
+            skip, I'll send a message later
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function OnboardingModal() {
   const { hasSeenOnboarding, setHasSeenOnboarding } = useOnboardingStore();
@@ -189,9 +256,11 @@ export function OnboardingModal() {
   const [isClosing, setIsClosing] = useState(false);
 
   const isOpen = !hasSeenOnboarding;
-  const step = steps[currentStep];
+  const totalSteps = steps.length + 1; // +1 for the interactive final step
   const isFirstStep = currentStep === 0;
-  const isLastStep = currentStep === steps.length - 1;
+  const isLastStep = currentStep === totalSteps - 1;
+  const isInteractiveStep = currentStep === steps.length;
+  const step = isInteractiveStep ? null : steps[currentStep];
 
   const handleClose = () => {
     setIsClosing(true);
@@ -226,43 +295,37 @@ export function OnboardingModal() {
   return (
     <Dialog open={isOpen && !isClosing} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[500px] p-0 gap-0 overflow-hidden">
-        {/* Gradient Header */}
-        <div className={cn(
-          'relative px-6 pt-8 pb-6 bg-gradient-to-br text-white',
-          step.gradient
-        )}>
-          <div className="absolute inset-0 bg-black/10" />
-          <div className="relative">
-            <div className="flex items-center gap-4">
-              <div className="rounded-xl bg-white/20 p-3 backdrop-blur-sm">
-                {step.icon}
-              </div>
-              <div>
-                <DialogHeader className="text-left space-y-1">
-                  <DialogTitle className="text-xl font-bold text-white">
-                    {step.title}
-                  </DialogTitle>
-                  <DialogDescription className="text-white/80 text-sm">
-                    {step.subtitle}
-                  </DialogDescription>
-                </DialogHeader>
-              </div>
+        {/* Header — terminal-console style: dark, monospace, no per-step
+            gradients. Icon + title/subtitle match the uppercase-tracking-wide
+            convention used across Overview/Reliability/Settings headers. */}
+        <div className="px-6 pt-6 pb-5 border-b border-border/60">
+          <div className="flex items-center gap-3">
+            <div className="rounded border border-emerald-500/30 bg-emerald-500/10 p-2 text-emerald-500">
+              {isInteractiveStep ? <Send className="h-6 w-6" /> : step!.icon}
             </div>
+            <DialogHeader className="text-left space-y-0.5">
+              <DialogTitle className="font-mono text-sm font-semibold uppercase tracking-wider">
+                {isInteractiveStep ? 'Getting Started' : step!.title}
+              </DialogTitle>
+              <DialogDescription className="font-mono text-xs text-muted-foreground">
+                {isInteractiveStep ? 'verify + send your first message' : step!.subtitle}
+              </DialogDescription>
+            </DialogHeader>
           </div>
 
-          {/* Step Indicator Dots */}
-          <div className="flex justify-center gap-1.5 mt-6">
-            {steps.map((_, index) => (
+          {/* Step indicator — small squares, not white-on-gradient dots. */}
+          <div className="flex gap-1 mt-4" role="tablist" aria-label="onboarding steps">
+            {Array.from({ length: totalSteps }).map((_, index) => (
               <button
                 key={index}
                 onClick={() => setCurrentStep(index)}
-                className={cn(
-                  'h-1.5 rounded-full transition-all duration-300',
-                  index === currentStep
-                    ? 'w-6 bg-white'
-                    : 'w-1.5 bg-white/40 hover:bg-white/60'
-                )}
+                role="tab"
+                aria-selected={index === currentStep}
                 aria-label={`Go to step ${index + 1}`}
+                className={cn(
+                  'h-1 flex-1 rounded-full transition-colors motion-reduce:transition-none',
+                  index === currentStep ? 'bg-emerald-500' : 'bg-border hover:bg-border/80'
+                )}
               />
             ))}
           </div>
@@ -271,43 +334,41 @@ export function OnboardingModal() {
         {/* Content */}
         <div className="px-6 py-5">
           <div className="text-sm text-muted-foreground min-h-[180px]">
-            {step.description}
+            {isInteractiveStep ? <GettingStartedStep onDone={handleNext} /> : step!.description}
           </div>
         </div>
 
         {/* Footer */}
-        <DialogFooter className="px-6 py-4 bg-muted/30 border-t">
+        <DialogFooter className="px-6 py-4 bg-muted/30 border-t border-border/60">
           <div className="flex items-center justify-between w-full">
-            {/* Don't show again checkbox - only on last step */}
             <div className="flex items-center">
               {isLastStep && (
-                <label className="flex items-center gap-2 text-sm text-muted-foreground cursor-pointer select-none">
+                <label className="flex items-center gap-2 text-xs font-mono text-muted-foreground cursor-pointer select-none">
                   <input
                     type="checkbox"
                     checked={dontShowAgain}
                     onChange={(e) => setDontShowAgain(e.target.checked)}
                     className="rounded border-border"
                   />
-                  Don't show again
+                  don't show again
                 </label>
               )}
             </div>
 
-            {/* Navigation Buttons */}
             <div className="flex gap-2">
               {!isFirstStep && (
-                <Button variant="outline" size="sm" onClick={handlePrevious}>
-                  <ChevronLeft className="h-4 w-4 mr-1" />
-                  Back
+                <Button variant="outline" size="sm" onClick={handlePrevious} className="font-mono text-xs">
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  back
                 </Button>
               )}
-              <Button size="sm" onClick={handleNext}>
+              <Button size="sm" onClick={handleNext} className="font-mono text-xs">
                 {isLastStep ? (
-                  'Get Started'
+                  'get started'
                 ) : (
                   <>
-                    Next
-                    <ChevronRight className="h-4 w-4 ml-1" />
+                    next
+                    <ChevronRight className="h-3.5 w-3.5 ml-1" />
                   </>
                 )}
               </Button>

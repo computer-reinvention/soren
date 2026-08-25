@@ -39,3 +39,26 @@ test('the onboarding modal can be stepped through with Next', async ({ page }) =
   // Next actually advances rather than being a no-op.
   await expect(dialog).toContainText('Supervisor + Workers');
 });
+
+test('the final step runs a real connection check and can be skipped without sending a message', async ({ page }) => {
+  await page.goto('/');
+  const dialog = page.getByRole('dialog');
+
+  // 5 informational steps, then the interactive final step.
+  for (let i = 0; i < 5; i++) {
+    await dialog.getByRole('button', { name: 'Next' }).click();
+  }
+  await expect(dialog).toContainText('Getting Started');
+
+  // A real GET /api/webhooks/health call, not a canned string — against
+  // this live instance it should resolve to "verified".
+  await expect(dialog.getByText(/server connection verified/i)).toBeVisible({ timeout: 10_000 });
+
+  // Deliberately does NOT fill in and send the message field here — this
+  // runs against a live instance with a real supervisor, and sending a
+  // message is a genuinely visible side effect (not just a local state
+  // change), unlike everything else these specs touch. The skip path
+  // exercises the rest of this step's logic without that side effect.
+  await dialog.getByRole('button', { name: /skip, i'll send a message later/i }).click();
+  await expect(dialog).not.toBeVisible();
+});
