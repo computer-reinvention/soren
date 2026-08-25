@@ -48,6 +48,15 @@ Thumbs.db
 .soren/*.db-wal
 # Agent registry JSON cache (regenerated from .db)
 .soren/agent_registry.json
+# Other read-only registry views regenerated from .db tables (projects,
+# teams) — never write these directly (see AGENTS.md). Tracking them was
+# a template bug: registering a project on any real instance mutates them
+# in place with that instance's local filesystem paths and live task
+# descriptions, which then leaked into git history (see the revert of
+# "chore: register soren project" in this repo's own history for the
+# incident that prompted this fix).
+.soren/projects.json
+.soren/teams.json
 # Mailbox (ephemeral message queue)
 .soren/mailbox
 # Worker contexts (generated per-spawn, not source code)
