@@ -144,3 +144,29 @@ def test_mention_delivery_failure_reported_separately_from_primary_success(clien
     assert len(body["mention_errors"]) == 1
     assert body["mention_errors"][0]["name"] == "worker-2"
     assert body["mention_errors"][0]["reason"] == "delivery_failed"
+
+
+def test_interrupt_success(client, registered_agent, monkeypatch):
+    async def fake_send_interrupt(window, session=None):
+        return None
+
+    monkeypatch.setattr(tmux_service, "send_interrupt", fake_send_interrupt)
+
+    resp = client.post("/api/agents/worker-1/interrupt")
+    assert resp.status_code == 200
+    assert resp.json() == {"success": True, "agent_id": "worker-1"}
+
+
+def test_interrupt_delivery_failure_returns_503(client, registered_agent, monkeypatch):
+    """Previously interrupt_agent ignored send_interrupt()'s result
+    entirely and always returned {"success": true} — a user clicking
+    "interrupt" on a dead agent had no idea nothing actually happened."""
+
+    async def fake_send_interrupt(window, session=None):
+        raise TmuxDeliveryError("window 'soren:worker-1' does not exist")
+
+    monkeypatch.setattr(tmux_service, "send_interrupt", fake_send_interrupt)
+
+    resp = client.post("/api/agents/worker-1/interrupt")
+    assert resp.status_code == 503
+    assert "does not exist" in resp.json()["detail"]

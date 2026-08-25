@@ -1,7 +1,16 @@
 import { create } from 'zustand';
 import type { AgentEvent } from '../types/agent_event';
 
-const MAX_EVENTS_PER_SESSION = 100;
+// 100 was too easy to exceed mid-session for a real task (a single
+// moderate refactor routinely does 100+ tool calls) — a long-running
+// session's early tool-call history would silently scroll out of the
+// live view while the user was still actively watching it, well before
+// any page reload. Bumped to match the other live-view caps
+// (activityStore's MAX_ACTIVITIES, thoughtStore's MAX_THOUGHTS are both
+// 500) rather than leaving this one an outlier at 5x smaller for no
+// principled reason. Underlying history is persisted in SQLite
+// regardless (GET /api/agent-events) — this only bounds the live/WS view.
+const MAX_EVENTS_PER_SESSION = 500;
 // How long to consider an agent "active" after last event (in ms)
 const ACTIVITY_TIMEOUT = 90000;
 

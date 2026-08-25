@@ -212,7 +212,47 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
   const instance = serverUrl?.toString().replace(/\/$/, "") ?? ""
   const nudgedSessions = new Set<string>()
   const reasoningTimers = new Map<string, ReturnType<typeof setTimeout>>()
-  const reasoningText = new Map<string, string>()
+  // Keyed by `${messageID}:${partID}`. Storing sessionID alongside the
+  // buffered text (not just text -> string) lets flushReasoningForSession
+  // below find and flush exactly the entries belonging to a session
+  // that's about to go idle, without guessing.
+  const reasoningEntries = new Map<string, { sessionID: string; text: string }>()
+
+  /**
+   * Immediately POST and remove one buffered reasoning entry, bypassing
+   * its debounce timer. Used both for the session-idle flush below and
+   * for cache-eviction, so neither path can silently discard content
+   * that was never sent.
+   */
+  function flushReasoningEntry(key: string): void {
+    const entry = reasoningEntries.get(key)
+    clearTimeout(reasoningTimers.get(key))
+    reasoningTimers.delete(key)
+    reasoningEntries.delete(key)
+    if (entry?.text) {
+      void post(THOUGHTS_URL, {
+        agent_name: AGENT,
+        thought_type: "reasoning",
+        content: truncate(entry.text, 2000),
+      })
+    }
+  }
+
+  /**
+   * Flush every buffered-but-not-yet-sent reasoning entry for a session
+   * that's about to go idle (Stop). Without this, a debounce timer up to
+   * REASONING_DEBOUNCE_MS could still be pending when the process is put
+   * to sleep or killed shortly after Stop — which happens routinely (the
+   * whole point of "idle") — silently losing that last bit of reasoning.
+   */
+  function flushReasoningForSession(sessionID: string): void {
+    for (const [key, entry] of reasoningEntries) {
+      if (entry.sessionID === sessionID) flushReasoningEntry(key)
+    }
+  }
+
+  const REASONING_DEBOUNCE_MS = 800
+  const REASONING_MAX_ENTRIES = 300
 
   async function fetchMessages(sessionID: string, limit = 50): Promise<MessageEnvelope[]> {
     if (!instance) return []
@@ -422,33 +462,27 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       // stream-thought: forward completed reasoning parts (debounced 2s)
       if (event.type === "message.part.updated") {
         const part = (event as any).properties?.part
-        if (part?.type === "reasoning" && typeof part.text === "string" && part.text.length > 0) {
+        if (
+          part?.type === "reasoning" &&
+          typeof part.text === "string" &&
+          part.text.length > 0 &&
+          typeof part.sessionID === "string"
+        ) {
           const key = `${part.messageID}:${part.id}`
-          reasoningText.set(key, part.text)
-          // Cap maps at 100 entries: evict the oldest key if a part never completes.
-          if (reasoningText.size > 100) {
-            const oldest = reasoningText.keys().next().value
-            if (oldest !== undefined && oldest !== key) {
-              clearTimeout(reasoningTimers.get(oldest))
-              reasoningTimers.delete(oldest)
-              reasoningText.delete(oldest)
-            }
+          reasoningEntries.set(key, { sessionID: part.sessionID, text: part.text })
+          // Cap at REASONING_MAX_ENTRIES entries: previously the oldest
+          // key was evicted by just deleting it — silently discarding
+          // whatever content had buffered for it. Flush it instead, so
+          // hitting the cap costs an early/out-of-order send, never a
+          // lost one.
+          if (reasoningEntries.size > REASONING_MAX_ENTRIES) {
+            const oldest = reasoningEntries.keys().next().value
+            if (oldest !== undefined && oldest !== key) flushReasoningEntry(oldest)
           }
           clearTimeout(reasoningTimers.get(key))
           reasoningTimers.set(
             key,
-            setTimeout(() => {
-              const content = reasoningText.get(key)
-              reasoningTimers.delete(key)
-              reasoningText.delete(key)
-              if (content) {
-                void post(THOUGHTS_URL, {
-                  agent_name: AGENT,
-                  thought_type: "reasoning",
-                  content: truncate(content, 2000),
-                })
-              }
-            }, 2000),
+            setTimeout(() => flushReasoningEntry(key), REASONING_DEBOUNCE_MS),
           )
         }
         return
@@ -457,6 +491,14 @@ export const SorenBridge: Plugin = async ({ serverUrl, directory }) => {
       if (event.type !== "session.idle") return
       const sessionID: string = (event as any).properties?.sessionID ?? ""
       if (!sessionID) return
+
+      // Flush any reasoning still sitting in its debounce window for
+      // THIS session before anything else. Stop firing is exactly when
+      // the process is likely to be put to sleep or killed shortly after
+      // — if we left this to its own timer, that last bit of reasoning
+      // could easily never get sent at all.
+      flushReasoningForSession(sessionID)
+
       if (!(await isRootSession(sessionID))) return // subagent turns are not Stops
 
       const messages = await fetchMessages(sessionID)

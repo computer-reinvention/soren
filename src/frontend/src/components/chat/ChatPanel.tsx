@@ -143,9 +143,20 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
   });
 
   const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
+  const [interruptError, setInterruptError] = useState<string | null>(null);
   const interruptMutation = useMutation({
     mutationFn: () => api.interruptAgent(selectedAgentId!),
-    onSuccess: () => setInterruptedAt(Date.now()),
+    onSuccess: () => {
+      setInterruptedAt(Date.now());
+      setInterruptError(null);
+    },
+    // Previously had no onError at all — a failed interrupt (target
+    // window gone, tmux command failed) was completely silent; the user
+    // would click "interrupt" and have no idea it didn't actually do
+    // anything.
+    onError: (err) => {
+      setInterruptError(err instanceof Error ? err.message : 'Failed to interrupt agent');
+    },
   });
 
   // Detect if the selected agent is actively working (recent PostToolUse event)
@@ -264,9 +275,13 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
         interruptedAt={interruptedAt}
       />
       <AgentCostLine agentId={targetAgent} />
-      {sendMutation.isError && (
-        <p className="px-4 pb-2 text-sm text-destructive">
-          Failed to send message. Please try again.
+      {/* sendMutation's own failure banner was removed here — ChatInput's
+          `failedSend` prop already shows a more specific reason (the
+          backend's actual error detail on a 503, e.g. "agent asleep") in
+          the same spot; showing both was a redundant duplicate banner. */}
+      {interruptError && (
+        <p className="px-4 pb-2 text-sm text-destructive" role="alert">
+          {interruptError}
         </p>
       )}
 

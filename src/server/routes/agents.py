@@ -347,7 +347,14 @@ async def interrupt_agent(agent_id: str):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    await tmux_service.send_interrupt(agent.tmux_window)
+    try:
+        await tmux_service.send_interrupt(agent.tmux_window, session=agent.session)
+    except TmuxDeliveryError as e:
+        logger.warning(f"Failed to interrupt agent '{agent_id}': {e.reason}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not interrupt '{agent_id}': {e.reason}",
+        )
     return {"success": True, "agent_id": agent_id}
 
 

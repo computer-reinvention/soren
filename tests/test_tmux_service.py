@@ -151,3 +151,46 @@ async def _async_true():
 
 async def _async_false():
     return False
+
+
+@pytest.mark.asyncio
+async def test_send_interrupt_raises_when_window_does_not_exist(monkeypatch):
+    """interrupt_agent's whole point is stopping a runaway agent — if the
+    window is already gone, the caller needs to know nothing happened,
+    not get a false {"success": true}."""
+    svc = TmuxService()
+    monkeypatch.setattr(svc, "window_exists", lambda window, session=None: _async_false())
+
+    with pytest.raises(TmuxDeliveryError, match="does not exist"):
+        await svc.send_interrupt("dead-window")
+
+
+@pytest.mark.asyncio
+async def test_send_interrupt_raises_when_tmux_command_fails(monkeypatch):
+    svc = TmuxService()
+    monkeypatch.setattr(svc, "window_exists", lambda window, session=None: _async_true())
+
+    async def fake_run_command(cmd):
+        return "", "pane gone", 1
+
+    monkeypatch.setattr(svc, "_run_command", fake_run_command)
+
+    with pytest.raises(TmuxDeliveryError, match="C-c failed"):
+        await svc.send_interrupt("window")
+
+
+@pytest.mark.asyncio
+async def test_send_interrupt_succeeds(monkeypatch):
+    svc = TmuxService()
+    monkeypatch.setattr(svc, "window_exists", lambda window, session=None: _async_true())
+
+    calls = []
+
+    async def fake_run_command(cmd):
+        calls.append(cmd)
+        return "", "", 0
+
+    monkeypatch.setattr(svc, "_run_command", fake_run_command)
+
+    await svc.send_interrupt("window", session="soren")
+    assert calls == [["tmux", "send-keys", "-t", "soren:window", "C-c"]]

@@ -178,12 +178,26 @@ class TmuxService:
             except OSError:
                 pass
 
-    async def send_interrupt(self, window: str, session: Optional[str] = None):
-        """Send Ctrl+C to a tmux window."""
+    async def send_interrupt(self, window: str, session: Optional[str] = None) -> None:
+        """Send Ctrl+C to a tmux window.
+
+        Raises TmuxDeliveryError if the window doesn't exist or the
+        underlying tmux command fails — previously this silently no-op'd
+        on a dead/missing window, so the "interrupt" API endpoint returned
+        {"success": true} even when nothing was actually interrupted.
+        """
         session = session or self.default_session
-        await self._run_command([
-            "tmux", "send-keys", "-t", f"{session}:{window}", "C-c"
-        ])
+        target = f"{session}:{window}"
+        async with self._lock_for(target):
+            if not await self.window_exists(window, session):
+                raise TmuxDeliveryError(
+                    f"window '{target}' does not exist (agent not spawned, asleep, or crashed)"
+                )
+            _, stderr, rc = await self._run_command([
+                "tmux", "send-keys", "-t", target, "C-c"
+            ])
+            if rc != 0:
+                raise TmuxDeliveryError(f"tmux send-keys C-c failed (rc={rc}): {stderr.strip()}")
 
     async def capture_pane(self, window: str, lines: int = 100, session: Optional[str] = None) -> str:
         """Capture recent output from a tmux pane."""
