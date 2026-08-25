@@ -600,6 +600,8 @@ class TestPrefsApi:
         "heartbeat_nudge_interval": 180,
         "heartbeat_max_nudges": 3,
         "heartbeat_observe_timeout": 1200,
+        # P5.2 settings panel — the one setting synced through this endpoint.
+        "ui_density": "comfortable",
     }
 
     def test_get_returns_defaults_when_empty(self, client):
@@ -639,7 +641,7 @@ class TestPrefsApi:
         r = client.get("/api/prefs")
         assert r.status_code == 200
         body = r.json()
-        # prefs.json wins the conflict; response stays the four-key shape
+        # prefs.json wins the conflict; response stays the fixed key shape
         assert body["heartbeat_warn_threshold"] == 111
         assert set(body.keys()) == set(self.DEFAULTS.keys())
 

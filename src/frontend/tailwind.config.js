@@ -86,5 +86,15 @@ module.exports = {
     plugin(({ addVariant }) => {
       addVariant('can-hover', '@media (hover: hover)');
     }),
+    // P5.2: settings-panel density toggle. `compact:` classes only apply
+    // when the user has selected compact density (applied as a `density-
+    // compact` class on <html> by applyDensity() in lib/density.ts) — a
+    // handful of high-traffic, repeated list surfaces (sidebar agent rows,
+    // activity timeline items, task cards) get tighter padding; everything
+    // else is deliberately left alone rather than attempting a global
+    // spacing-token rewrite.
+    plugin(({ addVariant }) => {
+      addVariant('compact', ':is(html.density-compact &)');
+    }),
   ],
 };

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Terminal, TerminalSquare, Sun, Moon, FolderPlus, LogOut, Bell, BellOff, Menu } from 'lucide-react';
+import { Terminal, TerminalSquare, Sun, Moon, FolderPlus, LogOut, Bell, BellOff, Menu, Settings as SettingsIcon } from 'lucide-react';
+import { useSettingsPanelStore } from '../../stores/settingsPanelStore';
 import { cn } from '../../lib/utils';
 import { routes } from '../../lib/navigation';
 import { requestNotificationPermission } from '../../lib/notifications';
@@ -156,6 +157,22 @@ export function Header() {
             <HeartbeatIndicator />
             <BudgetStatusline />
           </div>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => useSettingsPanelStore.getState().setOpen(true)}
+                className="h-8 w-8"
+              >
+                <SettingsIcon className="h-4 w-4 text-muted-foreground" />
+                <span className="sr-only">Open settings</span>
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs font-mono">
+              settings
+            </TooltipContent>
+          </Tooltip>
           <Button
             variant="ghost"
             size="icon"

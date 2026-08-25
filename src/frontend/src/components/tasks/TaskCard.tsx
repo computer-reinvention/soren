@@ -87,7 +87,7 @@ export function TaskCard({ task, depth = 0 }: { task: Task; depth?: number }) {
     <div className={cn(depth > 0 && 'ml-4 border-l border-border/50 pl-3')}>
       <div
         className={cn(
-          'group rounded-lg border bg-card p-3 cursor-pointer transition-colors',
+          'group rounded-lg border bg-card p-3 compact:p-1.5 cursor-pointer transition-colors',
           'hover:bg-accent/50 hover:border-border',
           expanded && 'bg-accent/30 border-border',
         )}

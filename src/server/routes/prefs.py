@@ -10,14 +10,15 @@ Both are imported once, lazily and verbatim (prefs.json wins on key
 conflicts), then renamed *.migrated. tools/prefs reads and writes the same
 table.
 
-The GET/PUT response shape is unchanged for the frontend
-(HeartbeatIndicator.tsx): a flat object of the four heartbeat keys, with
-defaults filled in for missing rows.
+The GET/PUT response shape was originally just the four heartbeat keys
+(HeartbeatIndicator.tsx); P5.2 added `ui_density` for the settings panel
+(the flat-object shape and "defaults filled in for missing rows" behavior
+are unchanged, just with a 5th key now).
 
 NOTE (shared schema + import): duplicated in tools/prefs — keep in sync.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 import json
@@ -50,7 +51,19 @@ DEFAULT_PREFS = {
     "heartbeat_nudge_interval": 180,
     "heartbeat_max_nudges": 3,
     "heartbeat_observe_timeout": 1200,
+    # P5.2 settings panel: the only setting that actually needs to round-trip
+    # through the server rather than living in localStorage — density is the
+    # one preference here worth syncing across browsers/devices for the same
+    # account. Theme, notifications-enabled, and terminal font/scrollback
+    # stay in their existing zustand+localStorage stores (see
+    # stores/terminalSettingsStore.ts's docblock) since they're pure
+    # client-display concerns with no reason to hit the network on every
+    # change, and duplicating them here would just create two sources of
+    # truth to keep in sync.
+    "ui_density": "comfortable",
 }
+
+UI_DENSITY_VALUES = {"comfortable", "compact"}
 
 # Import order matters: prefs.json (this route's old store) is imported second
 # so it wins any key conflicts with the drifted preferences.json.
@@ -62,6 +75,7 @@ class PrefsUpdate(BaseModel):
     heartbeat_nudge_interval: Optional[int] = None
     heartbeat_max_nudges: Optional[int] = None
     heartbeat_observe_timeout: Optional[int] = None
+    ui_density: Optional[str] = None
 
 
 def _import_legacy_file(conn: sqlite3.Connection, path: Path) -> None:
@@ -151,6 +165,11 @@ async def get_prefs():
 @router.put("")
 async def update_prefs(update: PrefsUpdate):
     """Update preferences. Only provided fields are changed."""
+    if update.ui_density is not None and update.ui_density not in UI_DENSITY_VALUES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"ui_density must be one of: {', '.join(sorted(UI_DENSITY_VALUES))}",
+        )
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with get_db() as conn:
         _init(conn)

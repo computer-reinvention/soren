@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare, ShieldCheck } from 'lucide-react';
+import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare, ShieldCheck, Settings as SettingsIcon } from 'lucide-react';
+import { useSettingsPanelStore } from '@/stores/settingsPanelStore';
 import {
   CommandDialog,
   CommandEmpty,
@@ -260,6 +261,14 @@ export function CommandPalette() {
           >
             <Monitor className="h-4 w-4 mr-2" />
             <span>Theme: System</span>
+          </CommandItem>
+
+          <CommandItem
+            value="settings density notifications terminal shortcuts"
+            onSelect={() => runAction(() => useSettingsPanelStore.getState().setOpen(true))}
+          >
+            <SettingsIcon className="h-4 w-4 mr-2" />
+            <span>Settings</span>
           </CommandItem>
         </CommandGroup>
       </CommandList>

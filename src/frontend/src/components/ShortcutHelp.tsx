@@ -1,6 +1,10 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
-const GROUPS: { title: string; items: [string, string][] }[] = [
+// Exported so the Settings panel (P5.2) can embed the same reference list
+// instead of maintaining a second copy — shortcuts aren't remappable (see
+// hooks/useKeyboardShortcuts.ts, which hardcodes every binding), so this is
+// intentionally read-only in both places.
+export const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
   {
     title: 'navigate',
     items: [
@@ -30,6 +34,34 @@ const GROUPS: { title: string; items: [string, string][] }[] = [
   },
 ];
 
+export function ShortcutGroupsGrid() {
+  return (
+    <div className="grid gap-4 sm:grid-cols-2">
+      {SHORTCUT_GROUPS.map((group) => (
+        <section key={group.title} aria-label={group.title}>
+          <h3 className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            {group.title}
+          </h3>
+          <dl className="space-y-1">
+            {group.items.map(([keys, desc]) => (
+              <div key={keys} className="flex items-center justify-between gap-3">
+                <dt>
+                  <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground/90">
+                    {keys}
+                  </kbd>
+                </dt>
+                <dd className="flex-1 text-right font-mono text-[11px] text-muted-foreground">
+                  {desc}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 export function ShortcutHelp({
   open,
   onOpenChange,
@@ -45,29 +77,7 @@ export function ShortcutHelp({
             keyboard shortcuts
           </DialogTitle>
         </DialogHeader>
-        <div className="grid gap-4 sm:grid-cols-2">
-          {GROUPS.map((group) => (
-            <section key={group.title} aria-label={group.title}>
-              <h3 className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {group.title}
-              </h3>
-              <dl className="space-y-1">
-                {group.items.map(([keys, desc]) => (
-                  <div key={keys} className="flex items-center justify-between gap-3">
-                    <dt>
-                      <kbd className="rounded border border-border bg-muted px-1.5 py-0.5 font-mono text-[10px] text-foreground/90">
-                        {keys}
-                      </kbd>
-                    </dt>
-                    <dd className="flex-1 text-right font-mono text-[11px] text-muted-foreground">
-                      {desc}
-                    </dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
-          ))}
-        </div>
+        <ShortcutGroupsGrid />
       </DialogContent>
     </Dialog>
   );

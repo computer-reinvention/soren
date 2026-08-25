@@ -31,6 +31,7 @@ export function AgentRow({ agent, isSupervisor = false, tokens }: AgentRowProps)
       className={({ isActive }) =>
         cn(
           'group flex w-full items-center gap-2 rounded px-2 py-1 text-left',
+          'compact:py-0.5',
           'hover:bg-accent/60 transition-colors',
           isActive && 'bg-accent',
           isSleeping && 'opacity-55'

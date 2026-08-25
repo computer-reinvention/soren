@@ -119,7 +119,7 @@ export function ActivityTimelineItem({ activity, isLast, showProjectBadge }: Act
         <CollapsibleTrigger asChild disabled={!hasDetails}>
           <button
             className={cn(
-              'w-full text-left rounded-lg border bg-card p-2.5 transition-colors',
+              'w-full text-left rounded-lg border bg-card p-2.5 compact:p-1.5 transition-colors',
               hasDetails && 'hover:bg-accent cursor-pointer',
               !hasDetails && 'cursor-default'
             )}

@@ -565,19 +565,19 @@ export const api = {
     return res.json();
   },
 
-  async getPrefs(): Promise<Record<string, unknown>> {
+  async getPrefs(): Promise<Prefs> {
     const res = await apiFetch(`${API_BASE}/api/prefs`);
     if (!res.ok) throw new Error('Failed to fetch prefs');
     return res.json();
   },
 
-  async updatePrefs(patch: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updatePrefs(patch: Partial<Prefs>): Promise<Prefs> {
     const res = await apiFetch(`${API_BASE}/api/prefs`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    if (!res.ok) throw new Error('Failed to update prefs');
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Failed to update prefs');
     return res.json();
   },
 
@@ -640,6 +640,16 @@ export interface ScorecardResponse {
   agents_sleeping: number;
   git_branch: string;
   git_sha: string;
+}
+
+export interface Prefs {
+  heartbeat_warn_threshold: number;
+  heartbeat_nudge_interval: number;
+  heartbeat_max_nudges: number;
+  heartbeat_observe_timeout: number;
+  /** P5.2 settings panel — the one setting synced server-side (see
+   *  lib/density.ts for why the rest stay in localStorage). */
+  ui_density: 'comfortable' | 'compact';
 }
 
 export interface ReliabilityDayBucket {

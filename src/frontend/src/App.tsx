@@ -21,6 +21,9 @@ import { useMobileNavStore } from './stores/mobileNavStore';
 import { AuthGuard } from './components/auth/AuthGuard';
 import { CommandPalette } from './components/CommandPalette';
 import { ShortcutHelp } from './components/ShortcutHelp';
+import { SettingsPanel } from './components/settings/SettingsPanel';
+import { useSettingsPanelStore } from './stores/settingsPanelStore';
+import { usePrefs } from './hooks/usePrefs';
 
 // P4.6: every routed page is lazy-loaded. CenterPanel wraps the shared
 // <Outlet/> in one Suspense boundary, so each route's own dependency
@@ -59,9 +62,11 @@ function Shell() {
   useWebSocket();
   useAgentEvents(); // Load historical events on app start
   useThoughts(); // Load historical thoughts so they persist across refreshes
+  usePrefs(); // Fetch + apply ui_density on boot, not just when Settings is opened
   const { helpOpen, setHelpOpen } = useKeyboardShortcuts();
   const isMobile = useIsMobile();
   const { sidebarOpen, activityOpen, setSidebarOpen, setActivityOpen } = useMobileNavStore();
+  const { open: settingsOpen, setOpen: setSettingsOpen } = useSettingsPanelStore();
   const location = useLocation();
 
   // Selecting an agent/file/route from the mobile Agents drawer should
@@ -124,6 +129,7 @@ function Shell() {
       )}
       <CommandPalette />
       <ShortcutHelp open={helpOpen} onOpenChange={setHelpOpen} />
+      <SettingsPanel open={settingsOpen} onOpenChange={setSettingsOpen} />
       <OnboardingModal />
     </Layout>
   );
