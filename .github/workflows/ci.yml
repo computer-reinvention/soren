@@ -1,0 +1,58 @@
+name: CI
+
+# P6.2: SOREN is a live, self-hosted multi-agent orchestration system, not
+# a stateless web app — the supervisor, workers, tmux session, and mailbox
+# don't exist in a GitHub Actions runner, and bootstrapping a full fake
+# instance of them isn't worth the fragility it would add. This workflow
+# deliberately covers only the checks that are genuinely deterministic and
+# don't need that runtime: backend unit/integration tests (FastAPI's
+# ASGI test client, no live agents required) and the frontend's static
+# checks. It does NOT run e2e or visual regression tests (both live in
+# src/frontend/e2e/) — those need a running `uv run uvicorn` instance
+# *and* a real user account, which is exercised locally instead (see
+# docs/FRONTEND.md's Testing section). Workers already run the equivalent
+# of every job below locally before reporting [DONE] (see AGENTS.md); this
+# workflow is a second, independent confirmation on a clean checkout.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --locked --extra dev
+      - name: Run pytest
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend (lint, typecheck, build, unit tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: src/frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests
+        run: npm run test
+      - name: Build
+        run: npm run build

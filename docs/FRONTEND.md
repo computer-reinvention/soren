@@ -284,11 +284,41 @@ mailbox, not a disposable fixture.
   matching the moment it changes. Scope by role alone and assert content
   with `toContainText`/`toHaveText` instead once the name isn't stable.
 
-### What's *not* set up
+### Visual regression (`npm run test:visual`)
 
-`npm run lint --max-warnings 0` passes clean, but it's advisory — nothing
-currently blocks a commit on it (there's no pre-commit hook or required
-check). Run it yourself before committing frontend changes.
+A narrow subset of `e2e/visual.spec.ts`, pixel-diffed against baselines
+committed in `e2e/visual.spec.ts-snapshots/`. Deliberately **not** "all
+views" (the P6.2 plan's original wording) — most of this dashboard
+(chat feed, activity timeline, token/cost counters, timestamps, agent
+status) changes second-to-second because a real supervisor is actually
+running, so pixel-diffing those would be flaky by construction: a red
+diff would usually mean "the supervisor did something," not "a UI
+regression." Only genuinely static-for-a-given-app-state screens are
+covered: the login form, the onboarding modal's five informational
+steps, and the Settings panel (all local-state-only, no live queries).
+Before adding another view, verify two consecutive baseline captures a
+few seconds apart are byte-identical — if they're not, it's not a safe
+target. Regenerate baselines after an intentional visual change:
+`npm run test:visual:update`. Baselines are OS-specific
+(`-chromium-darwin.png` locally) — this suite is for local use only,
+not run in CI (see below), so that isn't a cross-platform problem today,
+but would need addressing (e.g. running in a container) before ever
+adding it to a Linux CI runner.
+
+### CI (`.github/workflows/ci.yml`)
+
+Two jobs, both running on a clean `ubuntu-latest` checkout on every push
+and PR to `main`: backend (`uv sync --locked --extra dev`, `uv run
+pytest`) and frontend (`npm ci`, lint, typecheck, unit tests, build).
+Deliberately does **not** run e2e or visual regression tests — both need
+a running SOREN instance (`uv run uvicorn ...`) plus a real logged-in
+user, and reliably bootstrapping that fresh in a stateless runner is a
+bigger, separate lift (spawning the backend, waiting for health, creating
+a disposable account via `tools/auth`, and validating none of that is
+flaky) that hasn't been done yet. Workers already run the equivalent of
+both CI jobs locally before reporting `[DONE]` (see the root `AGENTS.md`)
+— this workflow is a second, independent confirmation on a clean
+checkout, not a replacement for that local gate.
 
 ## Development workflow
 
@@ -303,6 +333,8 @@ npm run test           # vitest run (unit/component)
 npm run test:watch     # vitest watch mode
 npm run test:ui        # vitest's browser UI
 npm run test:e2e       # playwright, against a running instance (see Testing)
+npm run test:visual    # visual regression subset only (see Testing)
+npm run test:visual:update  # regenerate baselines after an intentional visual change
 ```
 
 The backend must be running (`./soren.sh start`, or `uv run uvicorn
