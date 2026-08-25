@@ -93,7 +93,13 @@ export function HeartbeatIndicator() {
     update();
     const interval = setInterval(update, 1000);
     return () => clearInterval(interval);
-  }, [latest?.clientReceivedAt, latest?.supervisor_idle_seconds]);
+    // `setLatest` (heartbeatStore.ts) always creates a new object on every
+    // heartbeat, so depending on the whole `latest` reference re-runs this
+    // effect exactly once per heartbeat — the same frequency the previous
+    // clientReceivedAt/supervisor_idle_seconds-only deps produced, since
+    // clientReceivedAt is `Date.now()` at receipt time and therefore always
+    // differs between heartbeats anyway.
+  }, [latest]);
 
   const getStatus = useCallback((): HeartStatus => {
     if (!latest) return 'idle';

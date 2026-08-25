@@ -157,7 +157,6 @@ export function AgentLog({ agentId }: AgentLogProps) {
 
   useEffect(() => {
     requestAnimationFrame(() => scrollToBottom(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId]);
 
   if (entries.length === 0) {

@@ -101,20 +101,20 @@ export function CommandPalette() {
     }
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, []);
+  }, [setOpen]);
 
   // Reset the query when the palette closes so it doesn't reopen showing
   // stale search results from last time.
   useEffect(() => {
     if (!open) setQuery('');
-  }, [open]);
+  }, [open, setQuery]);
 
   const runAction = useCallback(
     (action: () => void) => {
       action();
       setOpen(false);
     },
-    []
+    [setOpen]
   );
 
   // Sort agents: active first, then by name

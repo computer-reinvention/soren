@@ -191,10 +191,13 @@ components never touch the WebSocket directly, they subscribe to the store.
 ## Keyboard shortcuts
 
 Defined in `hooks/useKeyboardShortcuts.ts`; the reference list shown in the
-`?` help overlay and in Settings lives in `components/ShortcutHelp.tsx`'s
-exported `SHORTCUT_GROUPS` (both places import the same array — don't
-maintain a second copy). **Shortcuts are not currently remappable** — every
-binding is a hardcoded `switch` in the hook.
+`?` help overlay and in Settings both import `lib/shortcuts.ts`'s
+`SHORTCUT_GROUPS` (don't maintain a second copy). It lives in its own
+module rather than in `ShortcutHelp.tsx` because a data constant exported
+alongside a component breaks Vite Fast Refresh for that file — if you add
+another shared data constant next to a component, consider the same split.
+**Shortcuts are not currently remappable** — every binding is a hardcoded
+`switch` in the hook.
 
 | Keys | Action |
 |---|---|
@@ -268,13 +271,9 @@ mailbox, not a disposable fixture.
 
 ### What's *not* set up
 
-No CI pipeline exists in this repo (no `.github/workflows`), so P6.2
-("visual regression testing... run in CI") from the original dashboard
-grand-plan is not implemented — it would need CI infrastructure built
-first, which is a separate release-engineering task, not a testing-only
-one. `npm run lint` also currently has some pre-existing warnings/errors
-unrelated to any single phase of dashboard work; it's not wired into any
-required check yet.
+`npm run lint --max-warnings 0` passes clean, but it's advisory — nothing
+currently blocks a commit on it (there's no pre-commit hook or required
+check). Run it yourself before committing frontend changes.
 
 ## Development workflow
 
@@ -284,7 +283,7 @@ npm install
 npm run dev          # vite dev server on :5173, proxies /api and /ws to :8000
 npm run build         # tsc --noEmit, then vite build -> dist/
 npm run typecheck     # tsc --noEmit only
-npm run lint          # eslint (has known pre-existing issues, see above)
+npm run lint          # eslint --max-warnings 0
 npm run test           # vitest run (unit/component)
 npm run test:watch     # vitest watch mode
 npm run test:ui        # vitest's browser UI

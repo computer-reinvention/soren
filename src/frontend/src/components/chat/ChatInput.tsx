@@ -190,7 +190,6 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     lastRestoredNonce.current = failedSend.nonce;
     setMessage((current) => current || failedSend.content);
     internalRef.current?.focus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [failedSend]);
 
   const textareaRef = internalRef;

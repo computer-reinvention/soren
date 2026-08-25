@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useActivityStore } from '@/stores/activityStore';
 import { useThoughtStore, type Thought } from '@/stores/thoughtStore';
@@ -63,10 +63,18 @@ export function useToolCorrelation(sortedMessages: Message[]): ReadonlyMap<strin
     () => [...new Set(sortedMessages.map((m) => m.from_agent).filter((a) => a && a !== 'user'))],
     [sortedMessages]
   );
-  const isRelevantAgent = (agentId: string) =>
-    relevantAgentIds.some(
-      (from) => agentId === from || agentId.toLowerCase().includes(from.toLowerCase())
-    );
+  // useCallback (not a plain function) so its identity is stable across
+  // renders where relevantAgentIds didn't change — the correlation useMemo
+  // below depends on it, and a function recreated every render would
+  // defeat that memoization entirely (the exact bug this hook's EMPTY_MAP
+  // pattern elsewhere was written to avoid, see P6.3).
+  const isRelevantAgent = useCallback(
+    (agentId: string) =>
+      relevantAgentIds.some(
+        (from) => agentId === from || agentId.toLowerCase().includes(from.toLowerCase())
+      ),
+    [relevantAgentIds]
+  );
 
   const { data: persistedEvents } = useQuery({
     queryKey: ['events-by-messages', agentMessageIds],
@@ -139,7 +147,7 @@ export function useToolCorrelation(sortedMessages: Message[]): ReadonlyMap<strin
     }
 
     return map.size > 0 ? map : EMPTY_MAP;
-  }, [sortedMessages, activities, persistedEvents]);
+  }, [sortedMessages, activities, persistedEvents, isRelevantAgent]);
 }
 
 /**
@@ -165,10 +173,13 @@ export function useThoughtCorrelation(sortedMessages: Message[]): ReadonlyMap<st
     () => [...new Set(sortedMessages.map((m) => m.from_agent).filter((a) => a && a !== 'user'))],
     [sortedMessages]
   );
-  const isRelevantAgent = (agentName: string) =>
-    relevantAgentNames.some(
-      (from) => agentName === from || agentName.toLowerCase().includes(from.toLowerCase())
-    );
+  const isRelevantAgent = useCallback(
+    (agentName: string) =>
+      relevantAgentNames.some(
+        (from) => agentName === from || agentName.toLowerCase().includes(from.toLowerCase())
+      ),
+    [relevantAgentNames]
+  );
 
   const allThoughts = useMemo(() => {
     const persisted = (persistedThoughtsData?.thoughts || []) as Thought[];
@@ -176,8 +187,7 @@ export function useThoughtCorrelation(sortedMessages: Message[]): ReadonlyMap<st
     return [...thoughts, ...persisted.filter((t) => !liveIds.has(t.id))].filter((t) =>
       isRelevantAgent(t.agent_name)
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [thoughts, persistedThoughtsData, relevantAgentNames]);
+  }, [thoughts, persistedThoughtsData, isRelevantAgent]);
 
   return useMemo(() => {
     if (allThoughts.length === 0) return EMPTY_MAP;

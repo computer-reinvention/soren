@@ -297,7 +297,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
       fitRef.current = null;
       searchRef.current = null;
     };
-  }, [scheduleFit]);
+  }, [scheduleFit, closeSearch]);
 
   // Find-as-you-type: re-run the search on every keystroke (incremental
   // mode expands/contracts the current match instead of always jumping to

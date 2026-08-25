@@ -1,38 +1,5 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
-
-// Exported so the Settings panel (P5.2) can embed the same reference list
-// instead of maintaining a second copy — shortcuts aren't remappable (see
-// hooks/useKeyboardShortcuts.ts, which hardcodes every binding), so this is
-// intentionally read-only in both places.
-export const SHORTCUT_GROUPS: { title: string; items: [string, string][] }[] = [
-  {
-    title: 'navigate',
-    items: [
-      ['⌘1 – ⌘4', 'overview / chat / terminal / tasks'],
-      ['g then o·c·t·e', 'overview / chat / tasks / terminal'],
-      ['j / k', 'next / previous agent'],
-      ['esc', 'back to overview'],
-    ],
-  },
-  {
-    title: 'find',
-    items: [
-      ['⌘K', 'command palette'],
-      ['/', 'focus sidebar filter'],
-    ],
-  },
-  {
-    title: 'chat & terminal',
-    items: [
-      ['⌘↵', 'send message'],
-      ['ctrl+`', 'toggle terminal'],
-    ],
-  },
-  {
-    title: 'help',
-    items: [['?', 'toggle this overlay']],
-  },
-];
+import { SHORTCUT_GROUPS } from '@/lib/shortcuts';
 
 export function ShortcutGroupsGrid() {
   return (
