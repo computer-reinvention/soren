@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare, ShieldCheck, Settings as SettingsIcon } from 'lucide-react';
+import { Bot, Moon, Sun, Monitor, Terminal, LayoutDashboard, MessageSquare, ListTodo, FileCode, BookOpen, CheckSquare, ShieldCheck, Settings as SettingsIcon, Brain } from 'lucide-react';
 import { useSettingsPanelStore } from '@/stores/settingsPanelStore';
+import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
 import {
   CommandDialog,
   CommandEmpty,
@@ -19,6 +20,7 @@ import { useFilesystem } from '@/hooks/useFilesystem';
 import { flattenTasks } from '@/components/tasks/task-utils';
 import { api } from '@/lib/api';
 import { routes } from '@/lib/navigation';
+import { cn } from '@/lib/utils';
 import type { FilesystemItem } from '@/types/filesystem';
 
 /** Recursively flatten the .soren/ filesystem tree into files only (search
@@ -47,8 +49,9 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 }
 
 export function CommandPalette() {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState('');
+  // P5.5: lifted from local state to a shared store so ChatInput's
+  // `/search <query>` slash command can open this same dialog pre-filled.
+  const { open, query, setOpen, setQuery } = useCommandPaletteStore();
   const navigate = useNavigate();
 
   const agents = useAgentStore((s) => s.agents);
@@ -73,12 +76,27 @@ export function CommandPalette() {
     staleTime: 30_000,
   });
 
+  // P5.4: semantic memory search, same debounce/gating as journal search
+  // above — a real (and heavier, embedding-based) network call, not a
+  // client-side filter. Folded into this one palette rather than a
+  // separate MemorySearch dialog: P5.1 already established "Cmd+K is the
+  // single global search surface," and memory results are conceptually
+  // the same shape as journal results (query -> ranked snippets -> jump to
+  // source file), so a second standalone search UI next to this one would
+  // just be two places to look for the same kind of thing.
+  const { data: memoryData } = useQuery({
+    queryKey: ['memory-search', debouncedQuery],
+    queryFn: () => api.searchMemory(debouncedQuery, 5),
+    enabled: open && debouncedQuery.trim().length > 1,
+    staleTime: 30_000,
+  });
+
   // Cmd+K / Ctrl+K to open
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === 'k' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        setOpen(!useCommandPaletteStore.getState().open);
       }
     }
     document.addEventListener('keydown', onKeyDown);
@@ -195,6 +213,40 @@ export function CommandPalette() {
                 <span className="ml-2 shrink-0 text-xs text-muted-foreground">{result.date}</span>
               </CommandItem>
             ))}
+          </CommandGroup>
+        )}
+
+        {memoryData && memoryData.results.length > 0 && (
+          <CommandGroup heading="Memory">
+            {memoryData.results.map((result) => {
+              // Only memories from the current project's own .soren/ tree
+              // are navigable via the file viewer; other projects' source
+              // paths ("{project_id}/.soren/...") aren't browsable from
+              // here, so those just render as a label, not a link.
+              const isLocalFile = result.source_path?.startsWith('.soren/');
+              return (
+                <CommandItem
+                  key={result.id}
+                  value={`memory ${query} ${result.content.slice(0, 60)}`}
+                  onSelect={() =>
+                    isLocalFile && runAction(() => navigate(routes.file(result.source_path!)))
+                  }
+                  className={cn(!isLocalFile && 'aria-selected:bg-transparent cursor-default')}
+                >
+                  <Brain className="h-4 w-4 mr-2 shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate">{result.content}</div>
+                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                      <span className="shrink-0 uppercase">{result.source_type}</span>
+                      {result.source_path && <span className="truncate">{result.source_path}</span>}
+                    </div>
+                  </div>
+                  <span className="ml-2 shrink-0 text-xs text-muted-foreground">
+                    {Math.round(result.score * 100)}%
+                  </span>
+                </CommandItem>
+              );
+            })}
           </CommandGroup>
         )}
 

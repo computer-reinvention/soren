@@ -1,8 +1,12 @@
 import { useState, useRef, useEffect, useCallback, type Ref } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
-import { Send, Loader2, Bot, Square, AlertTriangle } from 'lucide-react';
+import { Send, Loader2, Bot, Square, AlertTriangle, CheckCircle2, Zap } from 'lucide-react';
 import { cn, getAgentBadgeLabel, getAgentBadgeColor } from '@/lib/utils';
+import { api } from '@/lib/api';
+import { routes } from '@/lib/navigation';
+import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
 import type { Agent } from '@/types/agent';
 
 interface ChatInputProps {
@@ -35,6 +39,91 @@ interface MentionState {
   selectedIndex: number;
 }
 
+interface SlashCommandState {
+  active: boolean;
+  query: string; // command name typed so far, no leading '/'
+  selectedIndex: number;
+}
+
+interface SlashCommandFeedback {
+  type: 'success' | 'error';
+  text: string;
+}
+
+interface SlashCommandContext {
+  navigate: ReturnType<typeof useNavigate>;
+}
+
+/**
+ * P5.5 — slash commands. These execute directly against existing REST
+ * endpoints (or open the global search) instead of being sent as a chat
+ * message — `run()` never calls onSend.
+ *
+ * Deliberately NOT included: /spawn and /kill. There is no REST endpoint
+ * for either (spawning/killing workers is shell-only via `tools/workers`,
+ * per AGENTS.md's execution-engine section) and adding one just to satisfy
+ * a chat command would mean exposing a much more consequential operation
+ * over HTTP without the deliberation that deserves — mirrors this system's
+ * existing stance of keeping soren.sh stop/restart sudo-gated rather than
+ * agent-triggerable. Worth revisiting as its own reviewed feature, not a
+ * side effect of this one.
+ */
+const SLASH_COMMANDS: Array<{
+  name: string;
+  argsHint: string;
+  description: string;
+  run: (arg: string, ctx: SlashCommandContext) => Promise<SlashCommandFeedback> | SlashCommandFeedback;
+}> = [
+  {
+    name: 'compact',
+    argsHint: '<agent>',
+    description: 'Trigger context compaction for an agent',
+    run: async (arg) => {
+      if (!arg) return { type: 'error', text: 'Usage: /compact <agent>' };
+      await api.compactAgent(arg);
+      return { type: 'success', text: `Compaction triggered for ${arg}` };
+    },
+  },
+  {
+    name: 'wake',
+    argsHint: '<agent>',
+    description: 'Wake a sleeping worker',
+    run: async (arg) => {
+      if (!arg) return { type: 'error', text: 'Usage: /wake <agent>' };
+      await api.wakeAgent(arg);
+      return { type: 'success', text: `Wake requested for ${arg}` };
+    },
+  },
+  {
+    name: 'interrupt',
+    argsHint: '<agent>',
+    description: 'Interrupt an agent mid-task',
+    run: async (arg) => {
+      if (!arg) return { type: 'error', text: 'Usage: /interrupt <agent>' };
+      await api.interruptAgent(arg);
+      return { type: 'success', text: `Interrupt sent to ${arg}` };
+    },
+  },
+  {
+    name: 'status',
+    argsHint: '[agent]',
+    description: 'Open an agent (or the overview if none given)',
+    run: (arg, ctx) => {
+      ctx.navigate(arg ? routes.agent(arg) : routes.overview());
+      return { type: 'success', text: arg ? `Opened ${arg}` : 'Opened overview' };
+    },
+  },
+  {
+    name: 'search',
+    argsHint: '<query>',
+    description: 'Open global search (agents, tasks, files, journal, memory)',
+    run: (arg) => {
+      useCommandPaletteStore.getState().openWithQuery(arg);
+      return { type: 'success', text: arg ? `Searching "${arg}"` : 'Opened search' };
+    },
+  },
+];
+
 // P5.6: message history recall. sessionStorage (not localStorage) — history
 // is meant to be "what I typed this browsing session", not a permanent
 // cross-session log; it also naturally clears on browser close, which
@@ -62,6 +151,7 @@ function saveHistory(history: string[]) {
 }
 
 export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt, failedSend }: ChatInputProps) {
+  const navigate = useNavigate();
   const [message, setMessage] = useState('');
   const [showInterruptFeedback, setShowInterruptFeedback] = useState(false);
   const lastRestoredNonce = useRef<number | null>(null);
@@ -73,6 +163,15 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     startIndex: 0,
     selectedIndex: 0,
   });
+  // P5.5: slash command autocomplete. Unlike @mention, always anchored at
+  // index 0 — slash commands are only recognized as the very first thing
+  // typed in the message, not mid-sentence.
+  const [slashCommand, setSlashCommand] = useState<SlashCommandState>({
+    active: false,
+    query: '',
+    selectedIndex: 0,
+  });
+  const [commandFeedback, setCommandFeedback] = useState<SlashCommandFeedback | null>(null);
   // History recall (P5.6): null = not currently browsing history.
   const historyRef = useRef<string[]>(loadHistory());
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
@@ -113,6 +212,14 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     return () => clearTimeout(timer);
   }, [interruptedAt]);
 
+  // Slash command result feedback (P5.5) — same transient-banner pattern
+  // as the interrupt feedback above.
+  useEffect(() => {
+    if (!commandFeedback) return;
+    const timer = setTimeout(() => setCommandFeedback(null), 4000);
+    return () => clearTimeout(timer);
+  }, [commandFeedback]);
+
   // Filter agents based on mention query
   const filteredAgents = mention.active
     ? agents.filter((a) =>
@@ -121,26 +228,47 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
       )
     : [];
 
-  // Close dropdown when clicking outside
+  // Filter slash commands by name prefix (not fuzzy — these are short,
+  // memorable names, prefix match is more predictable while typing).
+  const filteredCommands = slashCommand.active
+    ? SLASH_COMMANDS.filter((c) => c.name.startsWith(slashCommand.query.toLowerCase()))
+    : [];
+
+  // Close either dropdown when clicking outside. Mention and slash-command
+  // dropdowns can't both be active at once (see SlashCommandState's
+  // comment), so one shared handler covers both.
   useEffect(() => {
-    if (!mention.active) return;
+    if (!mention.active && !slashCommand.active) return;
     const handleClickOutside = (e: MouseEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setMention((m) => ({ ...m, active: false }));
+        setSlashCommand((s) => ({ ...s, active: false }));
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [mention.active]);
+  }, [mention.active, slashCommand.active]);
 
   // Scroll selected item into view
   useEffect(() => {
-    if (!mention.active || !dropdownRef.current) return;
+    if ((!mention.active && !slashCommand.active) || !dropdownRef.current) return;
     const selected = dropdownRef.current.querySelector('[data-selected="true"]');
     if (selected) {
       selected.scrollIntoView({ block: 'nearest' });
     }
-  }, [mention.selectedIndex, mention.active]);
+  }, [mention.selectedIndex, mention.active, slashCommand.selectedIndex, slashCommand.active]);
+
+  const insertSlashCommand = useCallback((name: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const newMessage = `/${name} `;
+    setMessage(newMessage);
+    setSlashCommand({ active: false, query: '', selectedIndex: 0 });
+    requestAnimationFrame(() => {
+      textarea.selectionStart = textarea.selectionEnd = newMessage.length;
+      textarea.focus();
+    });
+  }, [textareaRef]);
 
   const insertMention = useCallback((agentId: string) => {
     const textarea = textareaRef.current;
@@ -161,25 +289,57 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     });
   }, [message, mention.startIndex, textareaRef]);
 
-  const handleSubmit = () => {
+  // P5.5: `/name arg` where `name` matches a known slash command runs that
+  // command directly (REST call, navigation, or opening search) instead of
+  // being sent as a chat message. Anything starting with `/` that ISN'T a
+  // recognized command name falls through to a normal send — chat content
+  // starting with a literal slash shouldn't silently do nothing.
+  const matchSlashCommand = (text: string) => {
+    const match = text.match(/^\/(\S+)(?:\s+(.*))?$/s);
+    if (!match) return null;
+    const command = SLASH_COMMANDS.find((c) => c.name === match[1]);
+    return command ? { command, arg: (match[2] ?? '').trim() } : null;
+  };
+
+  const runSlashCommand = async (trimmed: string) => {
+    const matched = matchSlashCommand(trimmed);
+    if (!matched) return false;
+    try {
+      const feedback = await matched.command.run(matched.arg, { navigate });
+      setCommandFeedback(feedback);
+    } catch (err) {
+      setCommandFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : `/${matched.command.name} failed`,
+      });
+    }
+    setMessage('');
+    setSlashCommand({ active: false, query: '', selectedIndex: 0 });
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    return true;
+  };
+
+  const handleSubmit = async () => {
     const trimmed = message.trim();
-    if (trimmed && !isPending) {
-      onSend(trimmed);
-      // Record history (skip immediate consecutive duplicates, e.g. retrying
-      // the exact same failed send shouldn't produce two identical entries).
-      const hist = historyRef.current;
-      if (hist[hist.length - 1] !== trimmed) {
-        hist.push(trimmed);
-        if (hist.length > HISTORY_MAX) hist.shift();
-        saveHistory(hist);
-      }
-      setHistoryIndex(null);
-      setMessage('');
-      setMention({ active: false, query: '', startIndex: 0, selectedIndex: 0 });
-      // Reset height after sending
-      if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-      }
+    if (!trimmed || isPending) return;
+
+    if (await runSlashCommand(trimmed)) return;
+
+    onSend(trimmed);
+    // Record history (skip immediate consecutive duplicates, e.g. retrying
+    // the exact same failed send shouldn't produce two identical entries).
+    const hist = historyRef.current;
+    if (hist[hist.length - 1] !== trimmed) {
+      hist.push(trimmed);
+      if (hist.length > HISTORY_MAX) hist.shift();
+      saveHistory(hist);
+    }
+    setHistoryIndex(null);
+    setMessage('');
+    setMention({ active: false, query: '', startIndex: 0, selectedIndex: 0 });
+    // Reset height after sending
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
     }
   };
 
@@ -233,6 +393,38 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    // Handle slash command dropdown navigation — checked first, same
+    // priority position as the @mention block below (the two can't be
+    // active simultaneously, see SlashCommandState's docstring).
+    if (slashCommand.active && filteredCommands.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSlashCommand((s) => ({
+          ...s,
+          selectedIndex: (s.selectedIndex + 1) % filteredCommands.length,
+        }));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSlashCommand((s) => ({
+          ...s,
+          selectedIndex: (s.selectedIndex - 1 + filteredCommands.length) % filteredCommands.length,
+        }));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        insertSlashCommand(filteredCommands[slashCommand.selectedIndex].name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setSlashCommand({ active: false, query: '', selectedIndex: 0 });
+        return;
+      }
+    }
+
     // Handle mention dropdown navigation
     if (mention.active && filteredAgents.length > 0) {
       if (e.key === 'ArrowDown') {
@@ -283,6 +475,19 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
     // drafting something new — stop treating further ArrowDown as "return
     // to draft" once they've already started typing over a recalled entry.
     if (historyIndex !== null) setHistoryIndex(null);
+
+    // Detect slash command trigger — only ever at the very start of the
+    // message, and only while typing the command name itself (before the
+    // first space, which starts the argument). This is deliberately
+    // stricter than @mention: unlike agent tags, which make sense
+    // mid-sentence, a slash command IS the message.
+    if (value.startsWith('/') && !value.slice(0, cursorPos).includes(' ')) {
+      setSlashCommand({ active: true, query: value.slice(1, cursorPos), selectedIndex: 0 });
+      return;
+    }
+    if (slashCommand.active) {
+      setSlashCommand({ active: false, query: '', selectedIndex: 0 });
+    }
 
     // Detect @mention trigger
     // Look backwards from cursor to find an '@' that starts a mention
@@ -380,6 +585,67 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
           </div>
         )}
 
+        {/* Slash command autocomplete dropdown (P5.5) */}
+        {slashCommand.active && filteredCommands.length > 0 && (
+          <div
+            ref={dropdownRef}
+            className="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border rounded-lg shadow-lg overflow-hidden z-50 max-h-[200px] overflow-y-auto"
+          >
+            <div className="py-1">
+              {filteredCommands.map((cmd, index) => (
+                <button
+                  key={cmd.name}
+                  data-selected={index === slashCommand.selectedIndex}
+                  className={cn(
+                    'w-full flex items-center gap-2 px-3 py-2 text-sm text-left transition-colors',
+                    index === slashCommand.selectedIndex
+                      ? 'bg-accent text-accent-foreground'
+                      : 'hover:bg-muted/50'
+                  )}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertSlashCommand(cmd.name);
+                  }}
+                  onMouseEnter={() => setSlashCommand((s) => ({ ...s, selectedIndex: index }))}
+                >
+                  <Zap className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                  <span className="font-mono font-medium">/{cmd.name}</span>
+                  <span className="font-mono text-xs text-muted-foreground">{cmd.argsHint}</span>
+                  <span className="ml-auto truncate text-xs text-muted-foreground">{cmd.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {slashCommand.active && slashCommand.query.length > 0 && filteredCommands.length === 0 && (
+          <div className="absolute bottom-full left-0 right-0 mb-1 bg-popover border border-border rounded-lg shadow-lg z-50">
+            <div className="px-3 py-2 text-sm text-muted-foreground">
+              No command matching &ldquo;/{slashCommand.query}&rdquo;
+            </div>
+          </div>
+        )}
+
+        {/* Slash command result feedback */}
+        {commandFeedback && (
+          <div
+            role="status"
+            className={cn(
+              'mb-2 flex items-center gap-1.5 text-xs animate-in fade-in duration-200',
+              commandFeedback.type === 'success'
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : 'text-red-500 dark:text-red-400'
+            )}
+          >
+            {commandFeedback.type === 'success' ? (
+              <CheckCircle2 className="h-3 w-3 shrink-0" aria-hidden />
+            ) : (
+              <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
+            )}
+            {commandFeedback.text}
+          </div>
+        )}
+
         {/* Command Center routing chip — where this message will be delivered */}
         {resolveTarget && (
           <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -421,7 +687,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             value={message}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder={placeholder || 'Type a message — Enter to send, @mention agents'}
+            placeholder={placeholder || 'Type a message — Enter to send, @mention agents, /command'}
             disabled={isPending}
             className={cn(
               'min-h-[44px] max-h-[200px] resize-none',

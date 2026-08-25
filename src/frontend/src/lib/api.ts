@@ -7,6 +7,7 @@ import type { SessionListResponse, Session, SessionCreateRequest } from '../type
 import type { ProjectList, Project, ProjectCreate, ProjectAgentsResponse } from '../types/project';
 import type { TeamList, Team } from '../types/team';
 import type { TaskListResponse, TaskTreeResponse, TaskStatsResponse, Task, TaskDagResponse } from '../types/task';
+import type { MemorySearchResponse, MemoryStatsResponse } from '../types/memory';
 import { API_BASE } from './constants';
 import { useAuthStore } from '../stores/authStore';
 
@@ -164,6 +165,25 @@ export const api = {
     const params = new URLSearchParams({ q: query, limit: String(limit) });
     const res = await apiFetch(`${API_BASE}/api/journal/search?${params}`);
     if (!res.ok) throw new Error('Failed to search journal');
+    return res.json();
+  },
+
+  // P5.4 — semantic memory search (automatic pipeline, see
+  // .opencode/skills/memory/SKILL.md), surfaced as another CommandPalette
+  // search group rather than a separate dialog (see CommandPalette.tsx).
+  async searchMemory(query: string, limit = 5, projectId?: string): Promise<MemorySearchResponse> {
+    const res = await apiFetch(`${API_BASE}/api/memory/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, limit, project_id: projectId ?? null }),
+    });
+    if (!res.ok) throw new Error('Failed to search memory');
+    return res.json();
+  },
+
+  async getMemoryStats(): Promise<MemoryStatsResponse> {
+    const res = await apiFetch(`${API_BASE}/api/memory/stats`);
+    if (!res.ok) throw new Error('Failed to fetch memory stats');
     return res.json();
   },
 
