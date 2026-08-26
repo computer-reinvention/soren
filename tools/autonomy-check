@@ -51,6 +51,7 @@ worker_idle_count=0
 worker_idle_names=""
 backlog_summary=""
 backlog_total=0
+backlog_pending_summary=""
 supervisor_summary=""
 git_summary=""
 git_file_count=0
@@ -266,10 +267,24 @@ fi
 #───────────────────────────────────────────────────────────────────────────────
 
 if [[ -f "$SOREN_DB_PATH" ]]; then
-    p1=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='critical';" 2>/dev/null || echo 0)
-    p2=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='high';" 2>/dev/null || echo 0)
-    p3=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='medium';" 2>/dev/null || echo 0)
-    p4=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='low';" 2>/dev/null || echo 0)
+    # In supervised mode (the default — see tools/backlog's is_supervised),
+    # agent-filed proposals sit with approved=0 until a human runs
+    # `backlog approve` — they're genuinely unclaimable by any agent until
+    # then (tools/backlog's own cmd_claim rejects them). Counting them here
+    # the same as claimable work meant the heartbeat nudged the supervisor
+    # every idle cycle to "act on" something it was explicitly forbidden to
+    # touch — a loop only a human approving/rejecting could break.
+    # Autonomous mode has no such gate (tools/backlog's cmd_next drops the
+    # approved filter entirely), so nothing changes there.
+    approval_filter=""
+    if [[ "${SOREN_AUTONOMY:-supervised}" != "autonomous" ]]; then
+        approval_filter="AND approved=1"
+    fi
+
+    p1=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='critical' ${approval_filter};" 2>/dev/null || echo 0)
+    p2=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='high' ${approval_filter};" 2>/dev/null || echo 0)
+    p3=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='medium' ${approval_filter};" 2>/dev/null || echo 0)
+    p4=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND priority='low' ${approval_filter};" 2>/dev/null || echo 0)
     backlog_total=$((p1 + p2 + p3 + p4))
 
     if ((backlog_total > 0)); then
@@ -285,6 +300,20 @@ if [[ -f "$SOREN_DB_PATH" ]]; then
             highest_priority="Backlog has ${p1} critical-priority item(s) — claim with ./tools/backlog next"
         elif ((p2 > 0)) && [[ -z "$highest_priority" ]]; then
             highest_priority="Backlog has ${p2} high-priority item(s) pending"
+        fi
+    fi
+
+    # Pending-approval proposals are reported for visibility only — they
+    # deliberately do NOT feed backlog_summary/highest_priority/has_findings
+    # above, so a cycle where the only "work" is unclaimable proposals goes
+    # genuinely quiet instead of renudging "act on it" every idle period.
+    # A human still sees them any time via `./tools/backlog list` or the
+    # dashboard, on their own schedule, without the supervisor being
+    # interrupted about something it cannot act on.
+    if [[ "${SOREN_AUTONOMY:-supervised}" != "autonomous" ]]; then
+        pending_approval_total=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog' AND approved=0;" 2>/dev/null || echo 0)
+        if ((pending_approval_total > 0)); then
+            backlog_pending_summary="${pending_approval_total} item(s) awaiting human approval (not actionable by agents)"
         fi
     fi
 fi
@@ -444,6 +473,10 @@ if [[ "$OUTPUT_MODE" == "summary" ]]; then
     [[ -n "$mailbox_summary" ]]    && echo "Mailbox: ${mailbox_summary}"
     [[ -n "$worker_summary" ]]     && echo "Workers: ${worker_summary}"
     [[ -n "$backlog_summary" ]]    && echo "Backlog: ${backlog_summary}"
+    # Purely informational — never the reason this cycle counted as
+    # "actionable" (see has_findings below), so it only ever gets shown
+    # piggybacking on other genuine findings, never on its own.
+    [[ -n "$backlog_pending_summary" ]] && echo "Backlog (pending approval): ${backlog_pending_summary}"
     [[ -n "$supervisor_summary" ]] && echo "Supervisors: ${supervisor_summary}"
     [[ -n "$schedule_summary" ]]   && echo "Reminders: ${schedule_summary}"
     [[ -n "$watchdog_summary" ]]   && echo "Watchdog: ${watchdog_summary}"
