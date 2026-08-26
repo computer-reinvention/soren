@@ -305,8 +305,16 @@ async def _send_error(websocket: WebSocket, message: str) -> None:
         await websocket.send_json({"type": "error", "message": message})
 
 
-async def _pump_output(bridge: _PtyBridge, websocket: WebSocket) -> None:
-    """Forward PTY output to the client. Returns on child EOF or send failure."""
+async def _pump_output(
+    bridge: _PtyBridge, websocket: WebSocket, send_lock: asyncio.Lock
+) -> None:
+    """Forward PTY output to the client. Returns on child EOF or send failure.
+
+    Serialized on ``send_lock`` — this task and ``_client_loop``'s pong reply
+    both call ``websocket.send_json`` independently, and ASGI/Starlette
+    disallows overlapping sends on one connection (same hazard
+    ``websocket/manager.py``'s per-connection locks exist for).
+    """
     # Incremental decoder so multi-byte UTF-8 split across read() chunks
     # doesn't produce replacement characters mid-stream.
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
@@ -318,13 +326,17 @@ async def _pump_output(bridge: _PtyBridge, websocket: WebSocket) -> None:
         if not text:
             continue
         try:
-            await websocket.send_json({"type": "output", "data": text})
+            async with send_lock:
+                await websocket.send_json({"type": "output", "data": text})
         except Exception:
             return  # client gone; handler cleans up
 
 
 async def _client_loop(
-    bridge: _PtyBridge, websocket: WebSocket, idle_timeout: float
+    bridge: _PtyBridge,
+    websocket: WebSocket,
+    idle_timeout: float,
+    send_lock: asyncio.Lock,
 ) -> None:
     """Process client frames until disconnect or idle timeout.
 
@@ -337,7 +349,7 @@ async def _client_loop(
     while True:
         remaining = idle_timeout - (loop.time() - last_input)
         if remaining <= 0:
-            await _send_idle_timeout(websocket)
+            await _send_idle_timeout(websocket, send_lock)
             return
         try:
             raw = await asyncio.wait_for(websocket.receive_text(), timeout=remaining)
@@ -365,14 +377,22 @@ async def _client_loop(
             except (TypeError, ValueError):
                 pass  # malformed resize frames are ignored
         elif frame_type == "ping":
-            await websocket.send_json({"type": "pong"})
+            # Best-effort: a client that disconnects in the gap between
+            # receiving this ping frame and us replying shouldn't raise here
+            # — the outer handler's disconnect path already covers cleanup.
+            with contextlib.suppress(Exception):
+                async with send_lock:
+                    await websocket.send_json({"type": "pong"})
 
 
-async def _send_idle_timeout(websocket: WebSocket) -> None:
+async def _send_idle_timeout(websocket: WebSocket, send_lock: asyncio.Lock) -> None:
+    # Runs from _client_loop while _pump_output may still be concurrently
+    # sending PTY output on the same connection — needs the same send_lock.
     with contextlib.suppress(Exception):
-        await websocket.send_json(
-            {"type": "output", "data": "\r\n[soren] terminal idle timeout\r\n"}
-        )
+        async with send_lock:
+            await websocket.send_json(
+                {"type": "output", "data": "\r\n[soren] terminal idle timeout\r\n"}
+            )
 
 
 @router.websocket("/ws")
@@ -444,15 +464,26 @@ async def terminal_ws(websocket: WebSocket):
         logger.info(
             "Terminal opened (user=%s mode=%s pid=%s)", username, mode, bridge.proc.pid
         )
-        await websocket.send_json({"type": "ready", "mode": mode})
+        send_lock = asyncio.Lock()
+        try:
+            await websocket.send_json({"type": "ready", "mode": mode})
+        except Exception:
+            # Client disconnected in the gap between accept() and here (PTY
+            # spawn takes a moment) — nothing to serve, skip straight to
+            # cleanup instead of raising out of the handler uncaught (this
+            # was the confirmed "ConnectionClosedError: no close frame
+            # received or sent" surfacing as an unhandled ASGI exception).
+            return
 
         if not override and mode == "shell":
             # new-session -A may have just created webterm; global option from
             # soren.sh usually covers it, but set it explicitly (best-effort).
             resize_task = asyncio.create_task(_set_aggressive_resize(WEBTERM_SESSION))
 
-        pump_task = asyncio.create_task(_pump_output(bridge, websocket))
-        client_task = asyncio.create_task(_client_loop(bridge, websocket, idle_timeout))
+        pump_task = asyncio.create_task(_pump_output(bridge, websocket, send_lock))
+        client_task = asyncio.create_task(
+            _client_loop(bridge, websocket, idle_timeout, send_lock)
+        )
         try:
             # First completion wins: child EOF (pump) or disconnect/idle (client)
             await asyncio.wait(

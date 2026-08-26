@@ -7,6 +7,7 @@ autouse fixture in conftest.py.
 import json
 
 import pytest
+from fastapi import WebSocket
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -113,3 +114,101 @@ def test_terminal_over_capacity(monkeypatch):
             frame = ws2.receive_json()
             assert frame["type"] == "error"
             assert "too many concurrent terminals" in frame["message"]
+
+
+def test_terminal_ready_send_failure_does_not_crash_handler(monkeypatch):
+    """Regression for the confirmed bug: if the client disconnects in the
+    gap between accept() and the server's "ready" frame (PTY spawn takes a
+    moment), the resulting send failure must not propagate out of the
+    handler as an unhandled ASGI exception
+    (``websockets.exceptions.ConnectionClosedError: no close frame received
+    or sent``, logged at ERROR by uvicorn) — it must be caught, and cleanup
+    (the terminal counter, the PTY child) must still run.
+    """
+    monkeypatch.setenv("SOREN_TERMINAL_CMD", "/bin/cat")
+
+    import src.server.routes.terminal as terminal_module
+
+    async def failing_send_json(self, data):
+        raise RuntimeError("simulated: no close frame received or sent")
+
+    monkeypatch.setattr(WebSocket, "send_json", failing_send_json)
+
+    assert terminal_module._active_terminals == 0
+    client = TestClient(app)
+    # The regression being guarded against is a server-side crash (an
+    # unhandled exception propagating out of the ASGI app) — the important
+    # assertion is that opening and immediately exiting the connection
+    # completes without raising at all, and that cleanup still ran (no
+    # leaked "active terminal" slot from skipping straight to `finally`).
+    with client.websocket_connect(f"/api/terminal/ws?token={_token()}"):
+        pass
+
+    assert terminal_module._active_terminals == 0
+
+
+def test_terminal_pong_send_failure_does_not_crash_handler(monkeypatch):
+    """Same failure class as above, but for the pong reply in _client_loop
+    (also previously unwrapped) rather than the initial ready frame."""
+    monkeypatch.setenv("SOREN_TERMINAL_CMD", "/bin/cat")
+
+    import src.server.routes.terminal as terminal_module
+
+    original_send_json = WebSocket.send_json
+    call_count = 0
+
+    async def fail_after_ready(self, data):
+        nonlocal call_count
+        call_count += 1
+        if data.get("type") == "pong":
+            raise RuntimeError("simulated: no close frame received or sent")
+        return await original_send_json(self, data)
+
+    monkeypatch.setattr(WebSocket, "send_json", fail_after_ready)
+
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/terminal/ws?token={_token()}") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        # The failing pong send must not kill the connection outright —
+        # the PTY output path (_pump_output, on a separate send_lock-guarded
+        # call) keeps working afterward.
+        ws.send_text(json.dumps({"type": "ping"}))
+        ws.send_text(json.dumps({"type": "input", "data": "hi\n"}))
+        buffer = ""
+        for _ in range(20):
+            frame = ws.receive_json()
+            if frame["type"] == "output":
+                buffer += frame["data"]
+                if "hi" in buffer:
+                    break
+    assert "hi" in buffer
+    assert terminal_module._active_terminals == 0
+
+
+def test_terminal_concurrent_output_and_pong_do_not_interleave(monkeypatch):
+    """The send_lock shared between _pump_output and _client_loop's pong
+    reply must serialize sends on the same connection — verified indirectly
+    by flooding both paths at once and asserting every received frame is
+    still valid, complete JSON (an unserialized interleave would corrupt a
+    frame boundary and produce a JSONDecodeError on the client)."""
+    monkeypatch.setenv("SOREN_TERMINAL_CMD", "/bin/cat")
+    client = TestClient(app)
+    with client.websocket_connect(f"/api/terminal/ws?token={_token()}") as ws:
+        assert ws.receive_json()["type"] == "ready"
+        # Interleave a burst of input (drives _pump_output via PTY echo)
+        # with a burst of pings (drives _client_loop's pong send) so both
+        # tasks are racing to send on the same websocket.
+        for i in range(15):
+            ws.send_text(json.dumps({"type": "input", "data": f"{i}\n"}))
+            ws.send_text(json.dumps({"type": "ping"}))
+
+        seen_pongs = 0
+        frames_checked = 0
+        while frames_checked < 60 and seen_pongs < 15:
+            raw = ws.receive_text()
+            frame = json.loads(raw)  # raises if a frame got corrupted
+            assert frame["type"] in ("output", "pong")
+            if frame["type"] == "pong":
+                seen_pongs += 1
+            frames_checked += 1
+        assert seen_pongs == 15
