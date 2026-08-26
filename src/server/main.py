@@ -48,6 +48,34 @@ logging.basicConfig(level=getattr(logging, settings.log_level))
 logger = logging.getLogger(__name__)
 
 
+class _BenignKeepaliveFilter(logging.Filter):
+    """Suppresses one specific, harmless log pattern from the ``websockets``
+    library (surfaced through uvicorn's ``uvicorn.error`` logger, which has
+    no handler of its own and propagates to root -- see main.py's
+    basicConfig above): a client that silently disconnects (backgrounded
+    tab, phone locked, network drop) makes the server's own periodic
+    keepalive ping time out, which ``websockets.legacy.protocol`` logs at
+    ERROR with a full traceback even though ``websocket/manager.py``
+    already detects and cleans up that same disconnect correctly (marks
+    the connection stale, removes it) on its own send path.
+
+    Filtering on the literal substring "keepalive ping" is deliberately
+    narrow: that phrase is only ever emitted by this exact keepalive
+    machinery (``keepalive_ping()``'s "keepalive ping failed"/"keepalive
+    ping timeout" — see websockets/legacy/protocol.py) and nothing else in
+    this codebase or its dependencies uses that wording, so this can't
+    accidentally swallow an unrelated error. Every other uvicorn.error
+    record -- including genuinely novel exceptions logged by the same
+    library under "data transfer failed" -- still passes through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "keepalive ping" not in record.getMessage()
+
+
+logging.getLogger("uvicorn.error").addFilter(_BenignKeepaliveFilter())
+
+
 def _should_auto_sleep(agent: Agent, threshold_minutes: int) -> bool:
     """Return True if this agent should be auto-slept now.
 
