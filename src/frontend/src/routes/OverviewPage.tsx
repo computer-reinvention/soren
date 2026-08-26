@@ -8,7 +8,6 @@ import { routes } from '@/lib/navigation';
 import { useAgents } from '@/hooks/useAgents';
 import { useProjects } from '@/hooks/useProjects';
 import { groupAgentsByProject } from '@/components/sidebar/sidebar-utils';
-import { PRICING } from '@/lib/pricing';
 
 function formatUptime(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
@@ -96,11 +95,9 @@ export function OverviewPage() {
     let cost = 0;
     for (const a of agents) {
       tokens += a.input_tokens + a.output_tokens;
-      cost +=
-        (a.input_tokens / 1_000_000) * PRICING.input +
-        (a.output_tokens / 1_000_000) * PRICING.output +
-        (a.cache_read_tokens / 1_000_000) * PRICING.cache_read +
-        (a.cache_creation_tokens / 1_000_000) * PRICING.cache_creation;
+      // Real cost from opencode's own session data where available, not
+      // re-derived client-side — see BudgetAgentUsage.cost_usd.
+      cost += a.cost_usd;
     }
     return { tokens, cost };
   }, [budget]);

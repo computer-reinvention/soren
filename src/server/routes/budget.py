@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Query
 
 from ..services.conversation_store import conversation_store
-from ..services import budget_guard
+from ..services import budget_guard, opencode_transcripts
 
 router = APIRouter()
 
@@ -37,15 +37,24 @@ async def get_daily_budget():
     """
     days = conversation_store.get_daily_budget()
 
-    # Compute USD cost per day and attach trending fields
+    # Real per-day cost straight from opencode's own session database where
+    # available (see opencode_transcripts.py) — falls back to SOREN's own
+    # token-based estimate only for days it doesn't have a record of.
+    real_by_day = opencode_transcripts.get_daily_real_cost(
+        budget_guard.project_directory()
+    )
+
     enriched = []
     for day in days:
-        cost = budget_guard.tokens_to_usd(
-            day["input_tokens"],
-            day["output_tokens"],
-            day.get("cache_read_tokens", 0),
-            day.get("cache_creation_tokens", 0),
-        )
+        if day["date"] in real_by_day:
+            cost = real_by_day[day["date"]]
+        else:
+            cost = budget_guard.tokens_to_usd(
+                day["input_tokens"],
+                day["output_tokens"],
+                day.get("cache_read_tokens", 0),
+                day.get("cache_creation_tokens", 0),
+            )
         day["cost_usd"] = round(cost, 4)
         enriched.append(day)
 

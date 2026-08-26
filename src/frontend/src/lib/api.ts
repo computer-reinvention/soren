@@ -18,6 +18,14 @@ export interface BudgetAgentUsage {
   cache_read_tokens: number;
   cache_creation_tokens: number;
   event_count: number;
+  /**
+   * Real USD cost straight from opencode's own session database where
+   * available (the exact number its own TUI status bar shows), falling
+   * back to a token-based estimate only for sessions it has no record of.
+   * Always trust this field over recomputing from the token counts above
+   * — see src/server/services/opencode_transcripts.py.
+   */
+  cost_usd: number;
 }
 
 export interface BudgetResponse {
@@ -486,6 +494,11 @@ export const api = {
       cache_read_tokens: number;
       cache_creation_tokens: number;
       event_count: number;
+      /** Real cost where opencode's own session database has that day's
+       * data, else a token-based estimate — see BudgetAgentUsage.cost_usd. */
+      cost_usd: number;
+      '7_day_moving_avg': number;
+      day_over_day_delta: number | null;
     }>;
   }> {
     const res = await apiFetch(`${API_BASE}/api/budget/daily`);

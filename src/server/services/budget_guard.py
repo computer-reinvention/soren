@@ -1,40 +1,47 @@
 """Budget guard — cost estimation and task deferral helpers.
 
-Token pricing uses Claude Opus 4.6 rates (via opencode) since all agents run on Opus.
+Real cost (see ``opencode_transcripts.py``, which reads opencode's own
+already-priced numbers straight from its session database) is used first
+wherever it's available. ``pricing.tokens_to_usd`` (re-exported below for
+backward compatibility) is only the fallback estimate for the gap — a
+session opencode's own database doesn't have a record of, or the database
+being unreachable entirely.
 """
 
 import os
 from datetime import date
 
+from . import opencode_transcripts
 from .conversation_store import conversation_store
-
-# Anthropic token pricing (Claude Opus 4.6 via opencode, USD per token)
-_INPUT_PRICE_PER_TOKEN        = 5.00  / 1_000_000
-_OUTPUT_PRICE_PER_TOKEN       = 25.00 / 1_000_000
-_CACHE_READ_PRICE_PER_TOKEN   = 0.50  / 1_000_000
-_CACHE_WRITE_PRICE_PER_TOKEN  = 6.25  / 1_000_000
+from .pricing import tokens_to_usd  # noqa: F401 — re-exported for callers
 
 THROTTLE_THRESHOLD = 0.80  # defer low-priority work above 80% of daily budget
 
 
-def tokens_to_usd(
-    input_tokens: int,
-    output_tokens: int,
-    cache_read_tokens: int = 0,
-    cache_creation_tokens: int = 0,
-) -> float:
-    """Convert token counts to estimated USD cost."""
-    return (
-        input_tokens        * _INPUT_PRICE_PER_TOKEN
-        + output_tokens     * _OUTPUT_PRICE_PER_TOKEN
-        + cache_read_tokens * _CACHE_READ_PRICE_PER_TOKEN
-        + cache_creation_tokens * _CACHE_WRITE_PRICE_PER_TOKEN
-    )
+def project_directory() -> str:
+    """Repo root as opencode's own session table records it (its
+    ``directory`` column) — mirrors ``routes/terminal.py``'s
+    ``_repo_root()``, duplicated rather than imported to avoid a
+    services -> routes layering dependency for one small helper.
+    """
+    env_root = os.environ.get("SOREN_PROJECT_ROOT")
+    if env_root:
+        return str(env_root)
+    from ..config import settings
+
+    return str(settings.soren_dir.resolve().parent)
 
 
 def get_daily_spend_usd() -> float:
-    """Return today's estimated token cost in USD (UTC date)."""
+    """Return today's real cost in USD (UTC date) if opencode's own
+    session database has it; falls back to SOREN's own token-based
+    estimate for the gap (missing/unreachable DB, or a day opencode has no
+    record of, e.g. from before this feature existed).
+    """
     today = date.today().isoformat()
+    real_by_day = opencode_transcripts.get_daily_real_cost(project_directory())
+    if today in real_by_day:
+        return real_by_day[today]
     for day in conversation_store.get_daily_budget():
         if day["date"] == today:
             return tokens_to_usd(

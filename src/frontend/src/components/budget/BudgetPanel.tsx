@@ -2,7 +2,6 @@ import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { formatTokenCount } from '@/lib/utils';
-import { PRICING } from '@/lib/pricing';
 import {
   Tooltip,
   TooltipContent,
@@ -44,19 +43,18 @@ export function BudgetStatusline() {
         output: acc.output + a.output_tokens,
         cache_read: acc.cache_read + a.cache_read_tokens,
         cache_write: acc.cache_write + a.cache_creation_tokens,
+        // Real cost from opencode's own session data where available, not
+        // re-derived client-side — see BudgetAgentUsage.cost_usd.
+        cost_usd: acc.cost_usd + a.cost_usd,
       }),
-      { input: 0, output: 0, cache_read: 0, cache_write: 0 }
+      { input: 0, output: 0, cache_read: 0, cache_write: 0, cost_usd: 0 }
     );
   }, [budgetData]);
 
   if (!totals) return null;
 
   const totalTokens = totals.input + totals.output;
-  const totalCost =
-    (totals.input / 1_000_000) * PRICING.input +
-    (totals.output / 1_000_000) * PRICING.output +
-    (totals.cache_read / 1_000_000) * PRICING.cache_read +
-    (totals.cache_write / 1_000_000) * PRICING.cache_creation;
+  const totalCost = totals.cost_usd;
 
   const throttled = statusData?.throttled ?? false;
 

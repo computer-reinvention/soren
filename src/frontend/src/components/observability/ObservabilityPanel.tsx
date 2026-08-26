@@ -9,23 +9,8 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import { api } from '@/lib/api';
-import { PRICING } from '@/lib/pricing';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { AlertTriangle, TrendingUp, Zap, DollarSign } from 'lucide-react';
-
-function computeDayCost(day: {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_creation_tokens: number;
-}): number {
-  return (
-    (day.input_tokens / 1_000_000) * PRICING.input +
-    (day.output_tokens / 1_000_000) * PRICING.output +
-    (day.cache_read_tokens / 1_000_000) * PRICING.cache_read +
-    (day.cache_creation_tokens / 1_000_000) * PRICING.cache_creation
-  );
-}
 
 function formatCost(v: number | null | undefined): string {
   if (v == null) return '—';
@@ -107,7 +92,7 @@ function BudgetOverview() {
     const last7 = [...daily.days].reverse().slice(-7);
     return last7.map((d) => ({
       date: d.date.slice(5), // "MM-DD"
-      cost: parseFloat(computeDayCost(d).toFixed(4)),
+      cost: parseFloat(d.cost_usd.toFixed(4)),
     }));
   }, [daily]);
 

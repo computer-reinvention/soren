@@ -64,6 +64,17 @@ def setup_test_environment(tmp_path, monkeypatch):
     auth_module.init_db()
     auth_module.add_user("testuser", "testpass")
 
+    # Point real-cost lookups (services/opencode_transcripts.py) at a path
+    # guaranteed not to exist rather than the host machine's real
+    # ~/.local/share/opencode/opencode.db. Collision with a real session id
+    # is effectively impossible (opencode's ids are random ses_* strings,
+    # tests use plain names like "sess-bg-1"), but this makes the
+    # estimate-fallback behavior hermetic instead of incidentally true —
+    # tests must not depend on what happens to be on the machine running them.
+    monkeypatch.setenv(
+        "SOREN_OPENCODE_DB_PATH", str(test_soren_dir / "opencode-does-not-exist.db")
+    )
+
     yield
 
     # Restore original paths

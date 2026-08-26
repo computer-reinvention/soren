@@ -10,7 +10,6 @@ import { useProjectAgents } from '@/hooks/useProjects';
 import { useChatKeyboard } from '@/hooks/useChatKeyboard';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { cn, formatTokenCount } from '@/lib/utils';
-import { PRICING } from '@/lib/pricing';
 import { ChatMessages } from './ChatMessages';
 import { ChatInput } from './ChatInput';
 import { ChatHeader } from './ChatHeader';
@@ -326,11 +325,9 @@ function AgentCostLine({ agentId }: { agentId: string }) {
   if (!agentUsage) return null;
 
   const totalTokens = agentUsage.input_tokens + agentUsage.output_tokens;
-  const cost =
-    (agentUsage.input_tokens / 1_000_000) * PRICING.input +
-    (agentUsage.output_tokens / 1_000_000) * PRICING.output +
-    (agentUsage.cache_read_tokens / 1_000_000) * PRICING.cache_read +
-    (agentUsage.cache_creation_tokens / 1_000_000) * PRICING.cache_creation;
+  // Real cost from opencode's own session data where available, not
+  // re-derived client-side — see BudgetAgentUsage.cost_usd.
+  const cost = agentUsage.cost_usd;
 
   const costStr = cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
 

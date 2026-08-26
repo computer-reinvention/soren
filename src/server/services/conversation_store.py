@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from ..models.message import Message, MessageType, TaskStatus
 from ..middleware.redact import redact_sensitive
+from . import opencode_transcripts, pricing
 from .db import get_db, get_db_path
 
 
@@ -658,31 +659,33 @@ class ConversationStore:
         )
         return f"AND {parts}"
 
-    def get_budget_summary(self) -> list[dict]:
-        """Get per-agent token usage totals from events with usage data.
+    def _get_agent_session_usage(self, agent_id: str | None = None) -> list[dict]:
+        """Per-(agent_id, session_id) latest usage snapshot.
 
+        One row per session — NOT yet summed across an agent's sessions.
         Usage values in agent_events are CUMULATIVE per session (each Stop
-        event reports the running total, not a delta).  We take the LATEST
-        event per (agent, session) to get each session's total, then SUM
-        across sessions per agent.  This correctly counts tokens when agents
-        respawn with a new session_id.
+        event reports the running total, not a delta), so the latest event
+        per session is that session's total. Kept separate from the final
+        per-agent aggregation (get_budget_summary/get_agent_budget) because
+        blending in opencode's real per-session cost has to happen before
+        summing across sessions, not after.
 
-        Test-prefixed agents (qual-*, worker-budget-*, test-*) are excluded.
+        With no ``agent_id`` filter, test-prefixed agents (qual-*,
+        worker-budget-*, test-*) are excluded — matches the production
+        budget views. An explicit ``agent_id`` lookup is never filtered:
+        the caller asked for that exact agent by name.
         """
-        exclude = self._test_prefix_filter()
+        exclude = "" if agent_id else self._test_prefix_filter()
+        agent_filter = "AND agent_id = ?" if agent_id else ""
+        params = (agent_id,) if agent_id else ()
         with self._get_connection() as conn:
             cursor = conn.execute(
                 f"""
-                SELECT
-                    agent_id,
-                    SUM(event_count)          as event_count,
-                    SUM(input_tokens)         as input_tokens,
-                    SUM(output_tokens)        as output_tokens,
-                    SUM(cache_read_tokens)    as cache_read_tokens,
-                    SUM(cache_creation_tokens) as cache_creation_tokens
+                SELECT agent_id, session_id, event_count, input_tokens, output_tokens,
+                       cache_read_tokens, cache_creation_tokens
                 FROM (
                     SELECT
-                        agent_id,
+                        agent_id, session_id,
                         COUNT(*) OVER (PARTITION BY agent_id, session_id) as event_count,
                         json_extract(usage, '$.input_tokens')              as input_tokens,
                         json_extract(usage, '$.output_tokens')             as output_tokens,
@@ -690,24 +693,64 @@ class ConversationStore:
                         json_extract(usage, '$.cache_creation_input_tokens') as cache_creation_tokens,
                         ROW_NUMBER() OVER (PARTITION BY agent_id, session_id ORDER BY timestamp DESC) as rn
                     FROM agent_events
-                    WHERE usage IS NOT NULL {exclude}
+                    WHERE usage IS NOT NULL {exclude} {agent_filter}
                 )
                 WHERE rn = 1
-                GROUP BY agent_id
-                ORDER BY input_tokens DESC
-                """
+                """,
+                params,
             )
-            return [
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_budget_summary(self) -> list[dict]:
+        """Get per-agent token usage totals, plus real USD cost.
+
+        Token counts are SUMmed across each agent's sessions (see
+        _get_agent_session_usage for why that's correct for cumulative
+        per-session values). Cost prefers opencode's own real,
+        already-priced number per session (opencode_transcripts.py) —
+        falling back to a token-based estimate only for sessions opencode's
+        own database has no record of.
+        """
+        rows = self._get_agent_session_usage()
+        session_ids = [r["session_id"] for r in rows if r["session_id"]]
+        real_costs = opencode_transcripts.get_session_costs(session_ids)
+
+        agents: dict[str, dict] = {}
+        for row in rows:
+            bucket = agents.setdefault(
+                row["agent_id"],
                 {
                     "agent_id": row["agent_id"],
-                    "input_tokens": row["input_tokens"] or 0,
-                    "output_tokens": row["output_tokens"] or 0,
-                    "cache_read_tokens": row["cache_read_tokens"] or 0,
-                    "cache_creation_tokens": row["cache_creation_tokens"] or 0,
-                    "event_count": row["event_count"],
-                }
-                for row in cursor.fetchall()
-            ]
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "event_count": 0,
+                    "cost_usd": 0.0,
+                },
+            )
+            input_tokens = row["input_tokens"] or 0
+            output_tokens = row["output_tokens"] or 0
+            cache_read = row["cache_read_tokens"] or 0
+            cache_creation = row["cache_creation_tokens"] or 0
+            bucket["input_tokens"] += input_tokens
+            bucket["output_tokens"] += output_tokens
+            bucket["cache_read_tokens"] += cache_read
+            bucket["cache_creation_tokens"] += cache_creation
+            bucket["event_count"] += row["event_count"] or 0
+
+            real = real_costs.get(row["session_id"])
+            if real is not None:
+                bucket["cost_usd"] += real["cost_usd"]
+            else:
+                bucket["cost_usd"] += pricing.tokens_to_usd(
+                    input_tokens, output_tokens, cache_read, cache_creation
+                )
+
+        result = sorted(agents.values(), key=lambda a: a["input_tokens"], reverse=True)
+        for a in result:
+            a["cost_usd"] = round(a["cost_usd"], 6)
+        return result
 
     def get_daily_budget(self) -> list[dict]:
         """Get per-day token usage totals grouped by date.
@@ -763,47 +806,49 @@ class ConversationStore:
             ]
 
     def get_agent_budget(self, agent_id: str, limit: int = 50) -> dict:
-        """Get token usage detail for a single agent.
+        """Get token usage detail for a single agent, plus real USD cost.
 
-        Usage values are CUMULATIVE per session.  We take the latest event
-        per session to get each session's total, then SUM across sessions.
-        event_count reflects the true number of recorded usage events.
+        Token counts are cumulative per session (latest event per session,
+        summed across sessions — see _get_agent_session_usage). Cost
+        prefers opencode's own real, already-priced number per session,
+        falling back to a token-based estimate for sessions opencode's own
+        database has no record of. event_count reflects the true number of
+        recorded usage events.
         """
-        with self._get_connection() as conn:
-            # Totals — latest event per session, then sum across sessions
-            cursor = conn.execute(
-                """
-                SELECT
-                    SUM(event_count)          as event_count,
-                    SUM(input_tokens)         as input_tokens,
-                    SUM(output_tokens)        as output_tokens,
-                    SUM(cache_read_tokens)    as cache_read_tokens,
-                    SUM(cache_creation_tokens) as cache_creation_tokens
-                FROM (
-                    SELECT
-                        COUNT(*) OVER (PARTITION BY session_id) as event_count,
-                        json_extract(usage, '$.input_tokens')              as input_tokens,
-                        json_extract(usage, '$.output_tokens')             as output_tokens,
-                        json_extract(usage, '$.cache_read_input_tokens')   as cache_read_tokens,
-                        json_extract(usage, '$.cache_creation_input_tokens') as cache_creation_tokens,
-                        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp DESC) as rn
-                    FROM agent_events
-                    WHERE agent_id = ? AND usage IS NOT NULL
-                )
-                WHERE rn = 1
-                """,
-                (agent_id,),
-            )
-            row = cursor.fetchone()
-            totals = {
-                "agent_id": agent_id,
-                "input_tokens": row["input_tokens"] or 0 if row else 0,
-                "output_tokens": row["output_tokens"] or 0 if row else 0,
-                "cache_read_tokens": row["cache_read_tokens"] or 0 if row else 0,
-                "cache_creation_tokens": row["cache_creation_tokens"] or 0 if row else 0,
-                "event_count": row["event_count"] or 0 if row else 0,
-            }
+        rows = self._get_agent_session_usage(agent_id=agent_id)
+        session_ids = [r["session_id"] for r in rows if r["session_id"]]
+        real_costs = opencode_transcripts.get_session_costs(session_ids)
 
+        totals = {
+            "agent_id": agent_id,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "event_count": 0,
+            "cost_usd": 0.0,
+        }
+        for row in rows:
+            input_tokens = row["input_tokens"] or 0
+            output_tokens = row["output_tokens"] or 0
+            cache_read = row["cache_read_tokens"] or 0
+            cache_creation = row["cache_creation_tokens"] or 0
+            totals["input_tokens"] += input_tokens
+            totals["output_tokens"] += output_tokens
+            totals["cache_read_tokens"] += cache_read
+            totals["cache_creation_tokens"] += cache_creation
+            totals["event_count"] += row["event_count"] or 0
+
+            real = real_costs.get(row["session_id"])
+            if real is not None:
+                totals["cost_usd"] += real["cost_usd"]
+            else:
+                totals["cost_usd"] += pricing.tokens_to_usd(
+                    input_tokens, output_tokens, cache_read, cache_creation
+                )
+        totals["cost_usd"] = round(totals["cost_usd"], 6)
+
+        with self._get_connection() as conn:
             # Recent events with usage
             cursor = conn.execute(
                 """
