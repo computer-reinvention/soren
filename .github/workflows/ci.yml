@@ -43,7 +43,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # jsdom@30 requires Node ^22.22.2 || ^24.15.0 || >=26.0.0 (several
+          # other deps — undici, whatwg-url, @asamuzakjp/*, jest-dom@7 —
+          # need >=22 too). Node 20 satisfied none of them, which was
+          # producing EBADENGINE warnings on every CI install. Matches the
+          # Node version already verified working in local dev.
+          node-version: '26'
           cache: 'npm'
           cache-dependency-path: src/frontend/package-lock.json
       - name: Install dependencies
