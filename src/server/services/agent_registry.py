@@ -98,6 +98,39 @@ class AgentRegistry:
         self.db_path = Path(db_path) if db_path else get_db_path()
         self._open(import_json=False)
 
+    def close(self):
+        """Checkpoint and close the persistent connection for real process
+        shutdown (called from main.py's lifespan teardown).
+
+        This connection lives for the entire process lifetime and is the
+        only long-held WAL-mode connection in the app (every other module
+        uses services/db.py's get_db(), which opens/commits/closes per
+        call) — everywhere else, a process exit just drops a short-lived,
+        already-committed connection, which is harmless. This one was
+        previously left for the OS to clean up on process exit, with no
+        explicit checkpoint. WAL+NORMAL is documented as crash-safe against
+        *structural* corruption, but two real incidents (backlog 3dfa022a,
+        escalated in 6fdcaa79) showed "database disk image is malformed"
+        recurring specifically across restarts of this connection — an
+        explicit TRUNCATE checkpoint folds the WAL back into the main file
+        and closes cleanly *before* the process actually exits, removing
+        the dependency on the OS/kill-timing doing the right thing instead.
+        Best-effort: shutdown must proceed either way, so failures here are
+        logged, not raised.
+        """
+        with self._lock:
+            if self._conn is None:
+                return
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error as exc:
+                logger.warning(f"agent_registry: checkpoint before close failed: {exc}")
+            try:
+                self._conn.close()
+            except sqlite3.Error as exc:
+                logger.warning(f"agent_registry: close failed: {exc}")
+            self._conn = None
+
     def _create_schema(self):
         with self._lock:
             self._conn.executescript("""

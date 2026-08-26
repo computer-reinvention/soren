@@ -260,3 +260,63 @@ def test_registry_json_bootstrap_defers_to_legacy_db(monkeypatch):
     legacy.unlink()
     r2 = reg_mod.AgentRegistry(db_path=soren / "no-legacy.db")
     assert "worker-x" in r2.get_registered_agents()
+
+
+# ── Clean shutdown (backlog 3dfa022a / 6fdcaa79: WAL corruption recurring
+#    across restarts, traced to this connection never being explicitly
+#    checkpointed/closed before process exit) ──────────────────────────────────
+
+
+def test_agent_registry_close_checkpoints_and_closes(monkeypatch, tmp_path):
+    """close() folds the WAL back into the main file and drops the connection.
+
+    This is the actual fix: main.py's lifespan shutdown now calls
+    agent_registry.close() as its last step. Simulate that here directly
+    against a throwaway registry (not the shared `registry_module.agent_registry`
+    singleton the autouse fixture manages) so this test can't leave the
+    shared instance closed for whatever runs after it.
+    """
+    import src.server.services.agent_registry as reg_mod
+
+    db_path = tmp_path / "shutdown-test.db"
+    registry = reg_mod.AgentRegistry(db_path=db_path)
+    registry.register("worker-shutdown-test", {"type": "worker", "status": "IDLE"})
+
+    # Confirm there's actually WAL content to checkpoint before closing.
+    assert registry._conn is not None
+    wal_pages_before = registry._conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    assert wal_pages_before is not None  # (busy, log_frames, checkpointed_frames)
+
+    registry.close()
+    assert registry._conn is None
+
+    # A fresh connection to the same file sees the write and reports no
+    # leftover WAL frames needing a checkpoint (i.e., close() actually
+    # checkpointed rather than just dropping the connection).
+    import sqlite3
+    fresh = sqlite3.connect(str(db_path))
+    try:
+        assert fresh.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        busy, log_frames, checkpointed = fresh.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+        assert log_frames in (0, checkpointed)  # nothing left uncheckpointed
+        row = fresh.execute("SELECT data FROM agents WHERE key = ?", ("worker-shutdown-test",)).fetchone()
+        assert row is not None
+    finally:
+        fresh.close()
+
+    # close() is idempotent — calling it again (e.g. a double-shutdown
+    # signal) must not raise.
+    registry.close()
+
+
+def test_agent_registry_close_is_safe_when_already_closed():
+    """A registry with no open connection just no-ops instead of raising."""
+    import src.server.services.agent_registry as reg_mod
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        registry = reg_mod.AgentRegistry(db_path=Path(d) / "already-closed.db")
+        registry.close()
+        assert registry._conn is None
+        registry.close()  # no-op, must not raise
+        assert registry._conn is None

@@ -145,6 +145,15 @@ async def lifespan(app: FastAPI):
         pass
     await ws_manager.stop_ping_task()
     await ws_manager.disconnect_all()
+    # agent_registry holds the one long-lived WAL-mode sqlite connection in
+    # this process (every other module opens/commits/closes per call via
+    # services/db.py's get_db()) — explicitly checkpoint + close it here
+    # instead of leaving it for the OS to drop on process exit. See
+    # AgentRegistry.close()'s docstring: this is the fix for backlog
+    # 3dfa022a/6fdcaa79 ("database disk image is malformed" recurring
+    # across restarts). Runs last, after every other shutdown step that
+    # could still touch the registry has already finished.
+    agent_registry.close()
     logger.info("Shutting down soren server...")
 
 
