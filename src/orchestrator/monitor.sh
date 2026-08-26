@@ -1752,7 +1752,7 @@ run_dashboard() {
             local syscheck_tool="${SOREN_PROJECT_ROOT}/tools/system-verify"
             if [[ -x "$syscheck_tool" ]]; then
                 local syscheck_output=""
-                if syscheck_output=$(timeout 10 "$syscheck_tool" 2>&1); then
+                if syscheck_output=$(run_with_timeout 10 "$syscheck_tool" 2>&1); then
                     SYSCHECK_FAIL_COUNT=0
                     SYSCHECK_FAIL_SUMMARY=""
                 else
