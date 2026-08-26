@@ -105,68 +105,106 @@ if [[ -f "$SOREN_MAILBOX" ]] && [[ -s "$SOREN_MAILBOX" ]]; then
     other_count=0
     senders=()
 
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
+    # Sentinel-wrapped resolved_ids for a single bash pattern-match lookup
+    # per line instead of a `grep -qxF` subprocess per line. (No
+    # associative arrays — this machine's /bin/bash is 3.2, which
+    # predates bash 4's `declare -A`.)
+    resolved_ids_wrapped=$'\n'"${resolved_ids}"$'\n'
 
-        # Try to parse as JSON to check if it's a status_update record
-        local_type=""
-        local_id=""
-        if command -v jq &>/dev/null; then
-            local_type=$(echo "$line" | jq -r '.type // empty' 2>/dev/null || true)
-            local_id=$(echo "$line" | jq -r '.id // empty' 2>/dev/null || true)
-        fi
+    if command -v jq &>/dev/null; then
+        # Extract type/id/from/subject for every mailbox line in ONE jq
+        # pass instead of up to 4 jq subprocess spawns PER LINE — measured
+        # 3.3s wall-clock for a 290-line mailbox before this fix, all of
+        # it synchronous inside monitor.sh's 5s dashboard loop whenever
+        # the supervisor is idle past the heartbeat threshold. jq's
+        # default (non-slurp) mode already treats a JSONL file as a
+        # stream of independent top-level values, so this naturally
+        # emits one delimited line per mailbox line, in order.
+        #
+        # @tsv (not a plain join) specifically so jq escapes any embedded
+        # tab/newline/backslash *within* a field's own value (a subject
+        # or body can legitimately contain a real newline once jq has
+        # parsed it out of JSON's "\n" escape) — without that, an embedded
+        # newline would prematurely end a `read` line and misalign every
+        # field after it. The tabs @tsv joins fields WITH are then swapped
+        # to `|` before `read` ever sees them, for two independent
+        # reasons: (1) bash's `read` treats IFS *whitespace* characters
+        # (space/tab/newline) specially even when IFS is set to just one
+        # of them — a LEADING delimiter is silently stripped instead of
+        # producing an empty first field, shifting every field left by one
+        # whenever a line's first value (.type, empty for ordinary
+        # messages) is empty; (2) this machine's /bin/bash is 3.2, which
+        # has a separate, confirmed bug of its own where IFS set to a
+        # control character via `$'\x01'`-style ANSI-C quoting silently
+        # fails to split at all inside a `read` fed by process
+        # substitution (reproduced directly: works fine piped to `cat`,
+        # breaks the instant a `while read` loop consumes it). An ordinary
+        # printable character sidesteps both bugs. `|` specifically is
+        # safe against real message content because `subject` is the LAST
+        # variable `read` populates — even if a subject legitimately
+        # contains a literal "|", `read` places everything from the 4th
+        # field onward into `subject` as one unsplit remainder, embedded
+        # delimiters and all. (.type/.id/.from never contain "|": a
+        # literal "status_update"/empty, a UUID, and a tmux address.)
+        while IFS='|' read -r local_type local_id sender subject; do
+            [[ "$local_type" == "status_update" ]] && continue
 
-        # Skip status_update records entirely — they are not messages
-        [[ "$local_type" == "status_update" ]] && continue
-
-        # Skip messages whose id appears in the resolved set (completed/failed)
-        if [[ -n "$local_id" ]] && [[ -n "$resolved_ids" ]]; then
-            if echo "$resolved_ids" | grep -qxF "$local_id"; then
+            if [[ -n "$local_id" ]] && [[ "$resolved_ids_wrapped" == *$'\n'"$local_id"$'\n'* ]]; then
                 continue
             fi
-        fi
 
-        # This line is an actionable unread message — count it
-        ((mailbox_count++))
+            ((mailbox_count++))
+            [[ -n "$sender" ]] && senders+=("$sender")
 
-        # Extract sender name
-        sender=""
-        if command -v jq &>/dev/null; then
-            sender=$(echo "$line" | jq -r '.from // empty' 2>/dev/null || true)
-        fi
-        if [[ -z "$sender" ]]; then
-            sender=$(echo "$line" | sed -n 's/.*\] \([^:]*:[^ ]*\) ->.*/\1/p' | head -1)
-            if [[ -z "$sender" ]]; then
-                sender=$(echo "$line" | sed -n 's/.*\] \([^ ]*\) ->.*/\1/p' | head -1)
+            # Quoting the literal brackets keeps this a literal-string
+            # match rather than a glob character class (`[BLOCKED]`
+            # unquoted would match any single one of those letters).
+            case "$subject" in
+                "[BLOCKED]"*)  ((blocked_count++)) ;;
+                "[DONE]"*)     ((done_count++)) ;;
+                "[STATUS]"*)   ((status_count++)) ;;
+                "[QUESTION]"*) ((question_count++)) ;;
+                *)             ((other_count++)) ;;
+            esac
+        done < <(jq -r '[(.type // ""), (.id // ""), (.from // ""), (.subject // "")] | @tsv' "$SOREN_MAILBOX" 2>/dev/null | tr '\t' '|')
+    else
+        # Fallback when jq is entirely unavailable — rare (jq is a hard
+        # dependency pervasively elsewhere in this codebase), so this path
+        # is intentionally left as the original, unoptimized per-line
+        # sed-based parsing rather than adding more complexity for a case
+        # that basically never executes in practice.
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+
+            local_type=$(echo "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+            [[ "$local_type" == "status_update" ]] && continue
+
+            local_id=$(echo "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+            if [[ -n "$local_id" ]] && [[ "$resolved_ids_wrapped" == *$'\n'"$local_id"$'\n'* ]]; then
+                continue
             fi
-        fi
-        [[ -n "$sender" ]] && senders+=("$sender")
 
-        # Extract subject field, then match tag at the START of subject only
-        subject=""
-        if command -v jq &>/dev/null; then
-            subject=$(echo "$line" | jq -r '.subject // empty' 2>/dev/null || true)
-        fi
-        if [[ -z "$subject" ]]; then
+            ((mailbox_count++))
+
+            sender=$(echo "$line" | sed -n 's/.*\] \([^:]*:[^ ]*\) ->.*/\1/p' | head -1)
+            [[ -z "$sender" ]] && sender=$(echo "$line" | sed -n 's/.*\] \([^ ]*\) ->.*/\1/p' | head -1)
+            [[ -n "$sender" ]] && senders+=("$sender")
+
             if echo "$line" | grep -q '"subject"'; then
                 subject=$(echo "$line" | sed -n 's/.*"subject":"\([^"]*\)".*/\1/p')
             else
                 subject=$(echo "$line" | sed -n 's/.*-> [^:]*: *\(.*\)/\1/p')
             fi
-        fi
 
-        if echo "$subject" | grep -qE '^\[BLOCKED\]'; then
-            ((blocked_count++))
-        elif echo "$subject" | grep -qE '^\[DONE\]'; then
-            ((done_count++))
-        elif echo "$subject" | grep -qE '^\[STATUS\]'; then
-            ((status_count++))
-        elif echo "$subject" | grep -qE '^\[QUESTION\]'; then
-            ((question_count++))
-        else
-            ((other_count++))
-        fi
-    done < "$SOREN_MAILBOX"
+            case "$subject" in
+                "[BLOCKED]"*)  ((blocked_count++)) ;;
+                "[DONE]"*)     ((done_count++)) ;;
+                "[STATUS]"*)   ((status_count++)) ;;
+                "[QUESTION]"*) ((question_count++)) ;;
+                *)             ((other_count++)) ;;
+            esac
+        done < "$SOREN_MAILBOX"
+    fi
 
     if ((mailbox_count > 0)); then
         # Build detail string

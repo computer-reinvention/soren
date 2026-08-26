@@ -138,6 +138,119 @@ else
 $output"
 fi
 
+# ── Mailbox scan correctness + performance ──────────────────────────────────
+# The mailbox section was rewritten from up to 4 jq subprocess spawns PER
+# LINE (measured 3.3s wall-clock for a 290-line mailbox, run synchronously
+# inside monitor.sh's 5s dashboard loop) down to a single jq pass for the
+# whole file. That rewrite hit a real field-alignment bug during
+# development (bash's `read` silently drops a leading empty field when
+# IFS is a whitespace character, even set via `IFS=$'\t'` — every
+# ordinary message, whose first field `.type` is empty, had every
+# subsequent field shifted left by one) — these tests guard against that
+# regressing, along with a bash-3.2-specific bug where `IFS=$'\x01'`
+# (a control character via ANSI-C quoting) silently fails to split at all
+# inside `read` fed by process substitution.
+
+TEST_MAILBOX="$(mktemp -t autonomy-check-mailbox-XXXXXX.jsonl)"
+rm -f "$TEST_MAILBOX"
+trap 'rm -f "$TEST_DB" "$TEST_MAILBOX"' EXIT
+
+run_autonomy_check_with_mailbox() {
+    SOREN_DB="$TEST_DB" SOREN_AUTONOMY="supervised" \
+        SOREN_SESSION="autonomy-check-test-no-such-session" \
+        SOREN_MAILBOX="$TEST_MAILBOX" \
+        "${REPO_ROOT}/tools/autonomy-check" --summary 2>&1
+}
+
+echo ""
+echo "=== autonomy-check mailbox scan tests ==="
+
+# Test 5: ordinary messages (no .type field, i.e. the common case) must
+# have every field correctly aligned -- not all bucketed into "other" the
+# way the leading-empty-field bug caused.
+echo ""
+echo "Test 5: mixed subject tags are correctly categorized, not all 'other'"
+cat > "$TEST_MAILBOX" <<'EOF'
+{"id":"11111111-0000-4000-8000-000000000001","ts":"2026-01-01T00:00:00+00:00","from":"soren:worker-a","to":"soren:supervisor","subject":"[BLOCKED] cannot proceed","status":"submitted"}
+{"id":"22222222-0000-4000-8000-000000000002","ts":"2026-01-01T00:01:00+00:00","from":"soren:worker-a","to":"soren:supervisor","subject":"[DONE] task complete","status":"submitted"}
+{"id":"33333333-0000-4000-8000-000000000003","ts":"2026-01-01T00:02:00+00:00","from":"soren:worker-b","to":"soren:supervisor","subject":"[QUESTION] need input","status":"submitted"}
+{"id":"44444444-0000-4000-8000-000000000004","ts":"2026-01-01T00:03:00+00:00","from":"soren:worker-b","to":"soren:supervisor","subject":"just a plain update","status":"submitted"}
+EOF
+output=$(run_autonomy_check_with_mailbox)
+mailbox_line=$(echo "$output" | grep "^Mailbox:")
+if echo "$mailbox_line" | grep -q "4 unread" \
+    && echo "$mailbox_line" | grep -q "1 BLOCKED" \
+    && echo "$mailbox_line" | grep -q "1 DONE" \
+    && echo "$mailbox_line" | grep -q "1 QUESTION"; then
+    pass "all 4 subject tags correctly categorized: $mailbox_line"
+else
+    fail "expected correct per-tag categorization, got: $mailbox_line"
+fi
+
+# Test 6: a resolved (completed/failed) message is correctly excluded from
+# the unread count -- this is the exact check the field-alignment bug
+# silently defeated (a garbled id never matches the resolved-id set, so
+# everything looked perpetually unread).
+echo ""
+echo "Test 6: a message resolved via status_update is excluded from unread count"
+cat > "$TEST_MAILBOX" <<'EOF'
+{"id":"55555555-0000-4000-8000-000000000005","ts":"2026-01-01T00:00:00+00:00","from":"soren:worker-a","to":"soren:supervisor","subject":"[DONE] resolved task","status":"submitted"}
+{"type":"status_update","id":"55555555-0000-4000-8000-000000000005","ts":"2026-01-01T00:01:00+00:00","from":"soren:supervisor","status":"completed"}
+{"id":"66666666-0000-4000-8000-000000000006","ts":"2026-01-01T00:02:00+00:00","from":"soren:worker-b","to":"soren:supervisor","subject":"[DONE] still unread","status":"submitted"}
+EOF
+output=$(run_autonomy_check_with_mailbox)
+mailbox_line=$(echo "$output" | grep "^Mailbox:" || true)
+if echo "$mailbox_line" | grep -q "1 unread"; then
+    pass "resolved message correctly excluded, only the unresolved one counted: $mailbox_line"
+else
+    fail "expected exactly 1 unread (the unresolved message), got: $mailbox_line"
+fi
+
+# Test 7: a message whose subject contains a literal newline (a real
+# multi-line DONE report, common in practice) must not corrupt the
+# following line's field alignment.
+echo ""
+echo "Test 7: embedded newline in a subject does not corrupt subsequent lines"
+python3 - "$TEST_MAILBOX" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path, "w") as f:
+    f.write(json.dumps({
+        "id": "77777777-0000-4000-8000-000000000007", "ts": "2026-01-01T00:00:00+00:00",
+        "from": "soren:worker-a", "to": "soren:supervisor",
+        "subject": "[DONE] multi-line report\nsecond line\nthird line", "status": "submitted",
+    }) + "\n")
+    f.write(json.dumps({
+        "id": "88888888-0000-4000-8000-000000000008", "ts": "2026-01-01T00:01:00+00:00",
+        "from": "soren:worker-b", "to": "soren:supervisor",
+        "subject": "[BLOCKED] this must still parse correctly", "status": "submitted",
+    }) + "\n")
+PYEOF
+output=$(run_autonomy_check_with_mailbox)
+mailbox_line=$(echo "$output" | grep "^Mailbox:" || true)
+if echo "$mailbox_line" | grep -q "2 unread" && echo "$mailbox_line" | grep -q "1 BLOCKED" && echo "$mailbox_line" | grep -q "1 DONE"; then
+    pass "embedded newline handled correctly, both messages categorized: $mailbox_line"
+else
+    fail "expected 2 unread (1 BLOCKED, 1 DONE) despite the embedded newline, got: $mailbox_line"
+fi
+
+# Test 8: performance guard -- a mailbox with many lines must complete
+# well under a second, not the ~3s+ the old per-line-jq approach took.
+echo ""
+echo "Test 8: performance -- a 100-line mailbox scans quickly"
+: > "$TEST_MAILBOX"
+for i in $(seq 1 100); do
+    printf '{"id":"aaaaaaaa-0000-4000-8000-%012d","ts":"2026-01-01T00:00:00+00:00","from":"soren:worker-a","to":"soren:supervisor","subject":"[DONE] task %d","status":"submitted"}\n' "$i" "$i" >> "$TEST_MAILBOX"
+done
+start=$(date +%s)
+run_autonomy_check_with_mailbox >/dev/null 2>&1
+elapsed=$(( $(date +%s) - start ))
+if ((elapsed <= 2)); then
+    pass "100-line mailbox scanned in ${elapsed}s (well under the old per-line-jq cost)"
+else
+    fail "100-line mailbox took ${elapsed}s -- expected well under 2s"
+fi
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
