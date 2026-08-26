@@ -8,6 +8,7 @@ import { useTerminalSettingsStore } from '@/stores/terminalSettingsStore';
 import { usePrefs, useUpdatePrefs } from '@/hooks/usePrefs';
 import { requestNotificationPermission } from '@/lib/notifications';
 import { ShortcutGroupsGrid } from '@/components/ShortcutHelp';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 const SCROLLBACK_OPTIONS = [5_000, 10_000, 25_000, 50_000] as const;
 
@@ -79,6 +80,10 @@ export function SettingsPanel({
   const { fontSize, scrollback, increaseFontSize, decreaseFontSize, setScrollback } = useTerminalSettingsStore();
   const { data: prefs } = usePrefs();
   const updatePrefs = useUpdatePrefs();
+  // Both sections below are dead weight on mobile: the terminal isn't
+  // available there at all (see CenterPanel's MobileTerminalUnavailable),
+  // and there's no physical keyboard to use these shortcuts with.
+  const isMobile = useIsMobile();
 
   const density = prefs?.ui_density ?? 'comfortable';
 
@@ -163,53 +168,57 @@ export function SettingsPanel({
             </p>
           </SettingsSection>
 
-          <Separator />
+          {!isMobile && (
+            <>
+              <Separator />
 
-          <SettingsSection title="terminal">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-mono text-xs text-foreground/80">font size</span>
-              <div className="flex items-center gap-0.5 rounded-md border border-border/60 p-0.5">
-                <button
-                  type="button"
-                  onClick={decreaseFontSize}
-                  title="Decrease font size"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                >
-                  <Minus className="h-3.5 w-3.5" />
-                </button>
-                <span className="w-8 text-center font-mono text-xs tabular-nums text-foreground/80">{fontSize}px</span>
-                <button
-                  type="button"
-                  onClick={increaseFontSize}
-                  title="Increase font size"
-                  className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
+              <SettingsSection title="terminal">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono text-xs text-foreground/80">font size</span>
+                  <div className="flex items-center gap-0.5 rounded-md border border-border/60 p-0.5">
+                    <button
+                      type="button"
+                      onClick={decreaseFontSize}
+                      title="Decrease font size"
+                      className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                    >
+                      <Minus className="h-3.5 w-3.5" />
+                    </button>
+                    <span className="w-8 text-center font-mono text-xs tabular-nums text-foreground/80">{fontSize}px</span>
+                    <button
+                      type="button"
+                      onClick={increaseFontSize}
+                      title="Increase font size"
+                      className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="font-mono text-xs text-foreground/80">scrollback</span>
-              <div className="flex gap-1 rounded-md border border-border/60 p-0.5">
-                {SCROLLBACK_OPTIONS.map((n) => (
-                  <SegmentButton key={n} active={scrollback === n} onClick={() => setScrollback(n)}>
-                    {n >= 1000 ? `${n / 1000}k` : n}
-                  </SegmentButton>
-                ))}
-              </div>
-            </div>
-            <p className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
-              scrollback is read once when a terminal opens — changes apply the next time you open one, not to an
-              already-running session.
-            </p>
-          </SettingsSection>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-mono text-xs text-foreground/80">scrollback</span>
+                  <div className="flex gap-1 rounded-md border border-border/60 p-0.5">
+                    {SCROLLBACK_OPTIONS.map((n) => (
+                      <SegmentButton key={n} active={scrollback === n} onClick={() => setScrollback(n)}>
+                        {n >= 1000 ? `${n / 1000}k` : n}
+                      </SegmentButton>
+                    ))}
+                  </div>
+                </div>
+                <p className="font-mono text-[10px] text-muted-foreground dark:text-muted-foreground/80">
+                  scrollback is read once when a terminal opens — changes apply the next time you open one, not to an
+                  already-running session.
+                </p>
+              </SettingsSection>
 
-          <Separator />
+              <Separator />
 
-          <SettingsSection title="keyboard shortcuts">
-            <ShortcutGroupsGrid />
-          </SettingsSection>
+              <SettingsSection title="keyboard shortcuts">
+                <ShortcutGroupsGrid />
+              </SettingsSection>
+            </>
+          )}
         </div>
       </DialogContent>
     </Dialog>

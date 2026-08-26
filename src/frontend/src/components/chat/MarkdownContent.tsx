@@ -136,7 +136,14 @@ function HighlightedCode({ code, language, className }: { code: string; language
 
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
   return (
-    <div className={cn('prose prose-sm dark:prose-invert max-w-none', className)}>
+    // break-words: an agent response with a long unbroken token (a hash, a
+    // path with no slashes, a URL) would otherwise overflow the container
+    // width instead of wrapping — harmless on a wide desktop pane, but on
+    // a ~350px-wide phone screen that overflow pushes past the viewport
+    // edge entirely. `<pre>` code blocks are unaffected (they use
+    // `white-space: pre` + their own `overflow-x-auto` scroll, which this
+    // doesn't override) — this only catches ordinary prose/inline-code text.
+    <div className={cn('prose prose-sm dark:prose-invert max-w-none break-words', className)}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

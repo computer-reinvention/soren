@@ -1,4 +1,5 @@
 import { useState, memo } from 'react';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { cn, getAgentBadgeLabel, getAgentBadgeColor, parseMessagePrefix } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -170,6 +171,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   isPhoto: boolean;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
+  const isMobile = useIsMobile();
 
   let rawContent = message.content;
   if (photoMatch) rawContent = rawContent.trimStart().slice(photoMatch[0].length);
@@ -192,16 +194,166 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   const preciseTime = format(messageDate, 'HH:mm:ss');
   const showToIndicator = !isUser && !(message.from_agent === 'supervisor' && (message.to_agent === 'user'));
 
-  // Bare messages (no badge row) render MessageActions as an absolute
-  // overlay in the top-right corner instead of inline, to stay visually
-  // quiet. On touch devices `can-hover:` doesn't apply (see
-  // tailwind.config.js), so that overlay is *permanently* visible rather
-  // than hover-revealed — without reserved space, short-wrapped text (e.g.
-  // a one-line user message on a narrow phone) renders directly underneath
-  // the icons. Reserve room on the content element whenever this overlay
-  // path is used so text never collides with it, on any viewport.
+  // Desktop only: bare messages (no badge row) render MessageActions as an
+  // absolute overlay in the top-right corner instead of inline, to stay
+  // visually quiet, revealed on hover. Mobile doesn't use this at all (see
+  // the mobile branch below) — actions live inline in the header row
+  // there instead, which sidesteps the touch-can't-hover problem entirely
+  // rather than working around it with reserved padding.
   const hasBadgeRow = Boolean((!isUser && agentData) || prefixInfo || (collapseCount && collapseCount > 1));
   const actionsOverlayClearance = hasBadgeRow ? '' : 'pr-20';
+
+  // Shared content pieces, reused by both the mobile and desktop layouts
+  // below so the two never drift out of sync with each other.
+  const badgeChips = (
+    <>
+      {!isUser && agentData && (() => {
+        const label = getAgentBadgeLabel(agentData);
+        return (
+          <Badge
+            variant="outline"
+            className={cn('text-2xs h-4 px-1 font-mono', getAgentBadgeColor(label))}
+          >
+            {label}
+          </Badge>
+        );
+      })()}
+      {prefixInfo && (
+        <Badge
+          variant="outline"
+          className={cn('text-2xs h-4 px-1 font-mono font-semibold', prefixInfo.className)}
+        >
+          {prefixInfo.label}
+        </Badge>
+      )}
+      {collapseCount && collapseCount > 1 && (
+        <span className="text-2xs font-mono text-muted-foreground dark:text-muted-foreground/80">
+          x{collapseCount}
+        </span>
+      )}
+    </>
+  );
+
+  const timelineBlock = !isUser && ((thoughts && thoughts.length > 0) || (toolCalls && toolCalls.length > 0)) && (
+    <InterleavedTimeline thoughts={thoughts || []} toolCalls={toolCalls || []} />
+  );
+
+  const photoBlock = isPhoto && (
+    photoFilePath ? (
+      <div className="mb-1.5">
+        <a
+          href={`${API_BASE}/api/filesystem/image?path=${encodeURIComponent(photoFilePath)}`}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          <img
+            src={`${API_BASE}/api/filesystem/image?path=${encodeURIComponent(photoFilePath)}`}
+            alt={photoMatch?.[1] || 'Photo'}
+            className="max-w-sm rounded cursor-pointer hover:opacity-90 transition-opacity"
+          />
+        </a>
+      </div>
+    ) : (
+      <div className="flex items-center gap-1.5 mb-1 text-xs text-muted-foreground font-mono">
+        <ImageIcon className="h-3.5 w-3.5" />
+        <span>{photoMatch?.[1] || 'Photo'}</span>
+      </div>
+    )
+  );
+
+  const collapseToggle = shouldCollapse && (
+    <Button
+      variant="ghost"
+      size="sm"
+      onClick={() => setIsExpanded(!isExpanded)}
+      className="h-5 px-1.5 text-2xs text-muted-foreground hover:text-foreground font-mono mt-1"
+    >
+      {isCollapsed ? (
+        <>
+          <ChevronDown className="h-3 w-3 mr-0.5" />
+          +{messageContent.length - displayContent.length} chars
+        </>
+      ) : (
+        <>
+          <ChevronUp className="h-3 w-3 mr-0.5" />
+          collapse
+        </>
+      )}
+    </Button>
+  );
+
+  // Mobile: a real chat layout instead of the desktop's fixed-width
+  // timestamp/sender columns. Those columns ate ~180px of a ~390px phone
+  // screen before any content even started, forcing the actual message
+  // text into a ~200px column and wrapping every few words — this is the
+  // layout that was reported as "broken" on mobile. Sender + time collapse
+  // into one compact header line instead, and content gets the full width.
+  if (isMobile) {
+    return (
+      <div className="group relative py-2 hover:bg-muted/20 transition-colors rounded-sm px-2 -mx-2">
+        {/* Header line: sender, time, and actions all in one row — actions
+            live here (not an absolute overlay) so there's never a
+            touch-only "always visible and possibly colliding with text"
+            problem to work around in the first place. */}
+        <div className="flex items-center gap-1.5 mb-1">
+          {isCurrentUser ? (
+            <span className="text-xs font-mono font-medium text-primary">you</span>
+          ) : isUser ? (
+            <span className="text-xs font-mono font-medium text-foreground truncate">
+              {displayName}
+            </span>
+          ) : (
+            <Link
+              to={routes.agent(message.from_agent)}
+              className="text-xs font-mono font-medium text-foreground hover:text-primary transition-colors truncate"
+            >
+              {displayName}
+            </Link>
+          )}
+          {showToIndicator && (
+            <span className="text-2xs text-muted-foreground dark:text-muted-foreground/80 font-mono shrink-0">
+              {'>'}{message.to_agent}
+            </span>
+          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-2xs font-mono text-muted-foreground dark:text-muted-foreground/80 select-none cursor-default shrink-0">
+                {preciseTime}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="bottom" className="text-xs font-mono">
+              {format(messageDate, 'MMM d, yyyy HH:mm:ss')}
+            </TooltipContent>
+          </Tooltip>
+          <MessageActions content={message.content} isUser={isCurrentUser} className="ml-auto" />
+        </div>
+
+        {hasBadgeRow && (
+          <div className="flex items-center gap-1.5 flex-wrap mb-1">{badgeChips}</div>
+        )}
+
+        {timelineBlock}
+        {photoBlock}
+
+        {isUser ? (
+          <div className={cn(
+            'text-sm whitespace-pre-wrap break-words',
+            isCurrentUser && 'bg-primary/10 border border-primary/20 rounded-lg px-3 py-2'
+          )}>
+            {rawContent}
+          </div>
+        ) : (
+          <>
+            <MarkdownContent
+              content={displayContent}
+              className={cn('text-sm', '[&_p]:mb-1 [&_p]:last:mb-0')}
+            />
+            {collapseToggle}
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={cn('group relative flex gap-0 py-1 hover:bg-muted/20 transition-colors rounded-sm px-1 -mx-1')}>
@@ -247,30 +399,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
         {/* Badges row — only render when there is visible static content */}
         {hasBadgeRow && (
           <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
-            {!isUser && agentData && (() => {
-              const label = getAgentBadgeLabel(agentData);
-              return (
-                <Badge
-                  variant="outline"
-                  className={cn('text-2xs h-4 px-1 font-mono', getAgentBadgeColor(label))}
-                >
-                  {label}
-                </Badge>
-              );
-            })()}
-            {prefixInfo && (
-              <Badge
-                variant="outline"
-                className={cn('text-2xs h-4 px-1 font-mono font-semibold', prefixInfo.className)}
-              >
-                {prefixInfo.label}
-              </Badge>
-            )}
-            {collapseCount && collapseCount > 1 && (
-              <span className="text-2xs font-mono text-muted-foreground dark:text-muted-foreground/80">
-                x{collapseCount}
-              </span>
-            )}
+            {badgeChips}
             <MessageActions
               content={message.content}
               isUser={isCurrentUser}
@@ -285,41 +414,13 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
           </div>
         )}
 
-        {/* Tool calls / thoughts timeline */}
-        {!isUser && ((thoughts && thoughts.length > 0) || (toolCalls && toolCalls.length > 0)) && (
-          <InterleavedTimeline
-            thoughts={thoughts || []}
-            toolCalls={toolCalls || []}
-          />
-        )}
-
-        {/* Photo */}
-        {isPhoto && photoFilePath && (
-          <div className="mb-1.5">
-            <a
-              href={`${API_BASE}/api/filesystem/image?path=${encodeURIComponent(photoFilePath)}`}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              <img
-                src={`${API_BASE}/api/filesystem/image?path=${encodeURIComponent(photoFilePath)}`}
-                alt={photoMatch?.[1] || 'Photo'}
-                className="max-w-sm rounded cursor-pointer hover:opacity-90 transition-opacity"
-              />
-            </a>
-          </div>
-        )}
-        {isPhoto && !photoFilePath && (
-          <div className="flex items-center gap-1.5 mb-1 text-xs text-muted-foreground font-mono">
-            <ImageIcon className="h-3.5 w-3.5" />
-            <span>{photoMatch?.[1] || 'Photo'}</span>
-          </div>
-        )}
+        {timelineBlock}
+        {photoBlock}
 
         {/* Message content */}
         {isUser ? (
           <div className={cn(
-            'text-sm whitespace-pre-wrap',
+            'text-sm whitespace-pre-wrap break-words',
             isCurrentUser && 'bg-primary/10 border border-primary/20 rounded px-3 py-2',
             actionsOverlayClearance
           )}>
@@ -335,27 +436,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
                 actionsOverlayClearance
               )}
             />
-
-            {shouldCollapse && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setIsExpanded(!isExpanded)}
-                className="h-5 px-1.5 text-2xs text-muted-foreground hover:text-foreground font-mono mt-1"
-              >
-                {isCollapsed ? (
-                  <>
-                    <ChevronDown className="h-3 w-3 mr-0.5" />
-                    +{messageContent.length - displayContent.length} chars
-                  </>
-                ) : (
-                  <>
-                    <ChevronUp className="h-3 w-3 mr-0.5" />
-                    collapse
-                  </>
-                )}
-              </Button>
-            )}
+            {collapseToggle}
           </>
         )}
       </div>

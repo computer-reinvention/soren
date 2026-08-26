@@ -132,28 +132,33 @@ export function Header() {
 
         {/* Heartbeat + cost badge + dark mode grouped tight */}
         <div className="flex items-center">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={toggleTerminal}
-                className={cn(
-                  'h-8 w-8',
-                  terminalActive && 'bg-accent text-emerald-700 dark:text-emerald-500 hover:text-emerald-700 dark:text-emerald-500'
-                )}
-                aria-pressed={terminalActive}
-              >
-                <TerminalSquare
-                  className={cn('h-4 w-4', !terminalActive && 'text-muted-foreground')}
-                />
-                <span className="sr-only">Toggle terminal</span>
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="bottom" className="text-xs font-mono">
-              terminal (ctrl+`)
-            </TooltipContent>
-          </Tooltip>
+          {/* A real shell isn't usable at phone width (see CenterPanel's
+              MobileTerminalUnavailable) — showing the toggle there would
+              just be a dead-end tap, so it's desktop-only. */}
+          {!isMobile && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={toggleTerminal}
+                  className={cn(
+                    'h-8 w-8',
+                    terminalActive && 'bg-accent text-emerald-700 dark:text-emerald-500 hover:text-emerald-700 dark:text-emerald-500'
+                  )}
+                  aria-pressed={terminalActive}
+                >
+                  <TerminalSquare
+                    className={cn('h-4 w-4', !terminalActive && 'text-muted-foreground')}
+                  />
+                  <span className="sr-only">Toggle terminal</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs font-mono">
+                terminal (ctrl+`)
+              </TooltipContent>
+            </Tooltip>
+          )}
           <NotificationToggle />
           <div className="hidden md:flex items-center">
             <HeartbeatIndicator />
