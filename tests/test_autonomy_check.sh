@@ -62,12 +62,22 @@ echo "=== autonomy-check backlog approval-gating tests ==="
 
 # Test 1: pending-approval-only backlog in supervised mode must NOT be
 # claimable and must NOT drive "Highest priority" text -- it's reported
-# only via the separate, informational "pending approval" line.
+# only via the separate, informational "pending approval" line, which
+# itself is gated behind has_findings same as every other section (a
+# pending-approval-only backlog deliberately does NOT set has_findings on
+# its own, so this needs an independent, controlled "other finding" to
+# actually reach the output section at all -- ambient git status would
+# also do it, but isn't deterministic across a dev session).
 echo ""
 echo "Test 1: pending-approval-only backlog is not claimable (supervised)"
 sqlite3 "$TEST_DB" "DELETE FROM tasks;"
 seed_task "t1" "critical" 0
-output=$(run_autonomy_check supervised)
+test1_mailbox="$(mktemp -t autonomy-check-test1-mailbox-XXXXXX.jsonl)"
+echo '{"id":"99999999-0000-4000-8000-000000000099","ts":"2026-01-01T00:00:00+00:00","from":"soren:worker-a","to":"soren:supervisor","subject":"trigger a finding","status":"submitted"}' > "$test1_mailbox"
+output=$(SOREN_DB="$TEST_DB" SOREN_AUTONOMY="supervised" \
+    SOREN_SESSION="autonomy-check-test-no-such-session" SOREN_MAILBOX="$test1_mailbox" \
+    "${REPO_ROOT}/tools/autonomy-check" --summary 2>&1)
+rm -f "$test1_mailbox"
 if echo "$output" | grep -q "^Backlog:"; then
     fail "must not report a claimable 'Backlog:' line when nothing is approved -- got:
 $output"
@@ -85,6 +95,26 @@ if echo "$output" | grep -qi "claim with"; then
 $output"
 else
     pass "no 'claim with' suggestion for an unapproved item"
+fi
+
+# Test 1b: with genuinely NOTHING happening anywhere (no mailbox, no git
+# override so it uses the real repo's status, no approved backlog), a
+# pending-approval-only backlog must not force output on its own --
+# "All clear" (no nudge at all) is the correct, intended outcome, not a
+# bug. This only meaningfully asserts something when the real repo
+# happens to be clean at test time; skip gracefully otherwise.
+echo ""
+echo "Test 1b: pending-approval-only backlog alone does not force a nudge"
+output_alone=$(run_autonomy_check supervised)
+if echo "$output_alone" | grep -q "^Git:"; then
+    echo "SKIP: real repo has uncommitted changes right now, which independently justifies output -- not a meaningful check of this specific guarantee at this moment"
+else
+    if echo "$output_alone" | grep -q "All clear"; then
+        pass "pending-approval-only backlog correctly produces no nudge on its own"
+    else
+        fail "expected 'All clear' with nothing else going on, got:
+$output_alone"
+    fi
 fi
 
 # Test 2: approved items ARE still reported as claimable/actionable.
