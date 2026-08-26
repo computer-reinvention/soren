@@ -213,7 +213,19 @@ section "Code Health"
 
 health_tool="${SOREN_HOME}/tools/code-health"
 if [[ -x "$health_tool" ]]; then
-    health_json=$("$health_tool" --json 2>/dev/null) || health_json=""
+    # code-health --json deliberately exits 1 whenever it finds issues>0
+    # (correct linter convention) while still printing valid JSON to
+    # stdout either way. There's no `set -e` in this script (see top),
+    # so a plain assignment here already keeps whatever health_json got
+    # captured regardless of exit code -- the `|| health_json=""` this
+    # used to have ran on ANY nonzero exit, which is the *normal* case
+    # whenever there are findings, and clobbered the already-captured
+    # valid JSON with an empty string, masking the results below the
+    # `-n` check on every run that actually found anything (i.e.
+    # effectively always). The empty-output case (tool crashed / was
+    # killed / genuinely produced nothing) is still correctly handled by
+    # that same `-n` check below -- no fallback needed for it.
+    health_json=$("$health_tool" --json 2>/dev/null)
     if [[ -n "$health_json" ]]; then
         health_issues=$(echo "$health_json" | jq -r '.issues // 0' 2>/dev/null)
         unused=$(echo "$health_json" | jq -r '.unused_imports // 0' 2>/dev/null)
