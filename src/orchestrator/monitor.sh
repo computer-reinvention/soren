@@ -631,10 +631,32 @@ fetch_due_reminders() {
 }
 
 check_supervisor_heartbeat() {
-    # Only check if supervisor window exists
-    if ! tmux_window_exists "$SOREN_SESSION" "supervisor"; then
+    # Accepts the caller's already-known window-existence result (the
+    # dashboard loop computes this immediately before calling this
+    # function, for its own "Supervisor: running" status line) to avoid a
+    # second, redundant tmux_window_exists call for the same window on
+    # the same cycle. Falls back to checking directly when called without
+    # an argument, so this function stays correct if ever called from
+    # somewhere that hasn't already done that check.
+    local window_exists="${1:-}"
+    if [[ -z "$window_exists" ]]; then
+        if tmux_window_exists "$SOREN_SESSION" "supervisor"; then
+            window_exists=true
+        else
+            window_exists=false
+        fi
+    fi
+    if [[ "$window_exists" != "true" ]]; then
         return
     fi
+
+    # Same idea as window_exists above: the caller (the dashboard loop)
+    # already checked server health once this cycle for its own "FastAPI:
+    # running" status line. Accepting it here avoids curling
+    # /api/webhooks/health a second time moments later purely to fill in
+    # this function's own heartbeat payload. Empty/missing falls back to
+    # a direct check so this function stays correct called on its own.
+    local known_server_healthy="${2:-}"
 
     # If no heartbeat file yet, supervisor may still be starting up
     if [[ ! -f "$SUPERVISOR_HEARTBEAT_FILE" ]]; then
@@ -707,7 +729,11 @@ check_supervisor_heartbeat() {
         hb_mailbox=$(( _total_lines - _router_pos ))
         [[ $hb_mailbox -lt 0 ]] && hb_mailbox=0
         hb_backlog=$(soren_db "SELECT COUNT(*) FROM tasks WHERE status='backlog';" 2>/dev/null || echo "0")
-        hb_health=$(curl -sf --max-time 1 "http://localhost:${SOREN_PORT}/api/webhooks/health" 2>/dev/null | grep -q '"api":"healthy"' && echo "healthy" || echo "degraded")
+        if [[ -n "$known_server_healthy" ]]; then
+            hb_health=$([[ "$known_server_healthy" == "true" ]] && echo "healthy" || echo "degraded")
+        else
+            hb_health=$(curl -sf --max-time 1 "http://localhost:${SOREN_PORT}/api/webhooks/health" 2>/dev/null | grep -q '"api":"healthy"' && echo "healthy" || echo "degraded")
+        fi
         hb_git=$(git -C "$SOREN_PROJECT_ROOT" diff --stat HEAD 2>/dev/null | tail -1 | sed 's/^ *//')
         [[ -z "$hb_git" ]] && hb_git="clean"
 
@@ -1550,9 +1576,15 @@ run_dashboard() {
         printf "${DIM}Ctrl+C twice to quit${NC}\n"
         echo ""
 
-        # Server health
+        # Server health — computed once per cycle and handed to
+        # check_supervisor_heartbeat below (which used to redundantly
+        # curl this exact same health endpoint again moments later, for
+        # its own heartbeat payload's "healthy"/"degraded" field).
+        local server_is_healthy=false
+        is_server_running && server_is_healthy=true
+
         printf "${BOLD}Services:${NC}\n"
-        if is_server_running; then
+        if [[ "$server_is_healthy" == "true" ]]; then
             printf "  FastAPI:    ${GREEN}●${NC} running (port ${SOREN_PORT})\n"
             # PID mismatch check — detect if server was restarted externally
             local pid_file="${SOREN_PROJECT_ROOT}/.soren/server.pid"
@@ -1689,8 +1721,14 @@ run_dashboard() {
             printf "  Sentry:     ${DIM}●${NC} inactive\n"
         fi
 
-        # Supervisor status with sentry-aware auto-relaunch
+        # Supervisor status with sentry-aware auto-relaunch. Computed once
+        # and handed to check_supervisor_heartbeat below (which used to
+        # redundantly call tmux_window_exists itself for this exact same
+        # window on this exact same cycle — two tmux round trips a
+        # heartbeat check that only needs one).
+        local supervisor_window_exists=false
         if tmux_window_exists "$SOREN_SESSION" "supervisor"; then
+            supervisor_window_exists=true
             printf "  Supervisor: ${GREEN}●${NC} running\n"
         else
             local lockfile_phase=""
@@ -1708,7 +1746,7 @@ run_dashboard() {
 
         # Supervisor heartbeat check (skip while sentry is active)
         if [[ "$SENTRY_ACTIVE" != "true" ]]; then
-            check_supervisor_heartbeat
+            check_supervisor_heartbeat "$supervisor_window_exists" "$server_is_healthy"
         fi
 
         # System-verify status
