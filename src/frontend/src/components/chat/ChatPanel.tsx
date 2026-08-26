@@ -264,15 +264,20 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
         isPending={sendMutation.isPending}
         failedSend={failedSend}
         placeholder={
-          // Mobile: drop the trailing hint clause. At 16px (deliberately —
-          // see Textarea's text-base md:text-sm, prevents iOS Safari's
-          // auto-zoom-on-focus for <16px inputs) the full string wraps to
-          // 2 lines on a phone-width screen, which is what was inflating
-          // the input box height report — this was the actual fix, not a
-          // smaller font on the input itself.
-          selectedAgentId
-            ? isMobile ? `Message ${targetAgent}` : `Message ${targetAgent} — Enter to send`
-            : isMobile ? 'Message supervisor' : 'Message supervisor — @tag any agent to route directly'
+          // Mobile: no placeholder at all, not just a shorter one. The
+          // recipient is already shown on screen either way — the bot-icon
+          // routing chip right above the input in Command Center mode, or
+          // the ChatHeader title on an individual agent page — so restating
+          // "Message <name>" here was pure redundancy. (Empty string is
+          // intentional and must reach ChatInput as "" — its fallback uses
+          // ?? not ||, specifically so this isn't overridden.) Desktop
+          // keeps the fuller hint; there's room for it there and it wasn't
+          // flagged as an issue.
+          isMobile
+            ? ''
+            : selectedAgentId
+              ? `Message ${targetAgent} — Enter to send`
+              : 'Message supervisor — @tag any agent to route directly'
         }
         inputRef={inputRef}
         agents={agentsData?.agents || []}

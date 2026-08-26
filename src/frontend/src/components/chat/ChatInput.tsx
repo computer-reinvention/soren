@@ -704,18 +704,29 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             value={message}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
-            placeholder={placeholder || 'Type a message — Enter to send, @mention agents, /command'}
+            // ?? (not ||): an explicitly passed empty string means "no
+            // placeholder, on purpose" (mobile omits it entirely — see
+            // ChatPanel, the routing chip/bot icon above already shows
+            // who it's going to) and must not fall through to the default.
+            placeholder={placeholder ?? 'Type a message — Enter to send, @mention agents, /command'}
             disabled={isPending}
             className={cn(
               'min-h-[44px] max-h-[200px] resize-none',
               // Tighter vertical padding on mobile — the 44px floor (a
               // touch-target minimum, not a font-driven height) still
-              // holds either way. Font itself is untouched: Textarea's
+              // holds either way. The *typed* font is untouched: Textarea's
               // own text-base (16px) on mobile is deliberate, not
               // something to shrink (see the placeholder comment above).
               isMobile ? 'py-1.5' : 'py-2',
               'bg-muted/50 border-muted-foreground/20',
-              'focus-visible:ring-1 focus-visible:ring-primary'
+              'focus-visible:ring-1 focus-visible:ring-primary',
+              // The placeholder specifically can be smaller than that —
+              // `::placeholder` is a separate rendering path from the
+              // actual editable text, so this has no bearing on iOS
+              // Safari's zoom-on-focus check (that's keyed to the input's
+              // own font-size, which stays at 16px here; only the *empty,
+              // unfocused-or-not* placeholder glyph rendering shrinks).
+              isMobile && 'placeholder:text-[13px]'
             )}
             rows={1}
           />
