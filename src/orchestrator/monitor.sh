@@ -41,6 +41,19 @@ SOREN_MAILBOX="${SOREN_MAILBOX:-.soren/mailbox}"
 SOREN_PROJECT_ROOT="${SOREN_PROJECT_ROOT:-$(pwd)}"
 ROUTER_LOG=".soren/router.log"
 
+# Every tools/* script resolves its own root the same way:
+# "${SOREN_HOME:-${SOREN_PROJECT_ROOT:-$(git rev-parse --show-toplevel ...)}}"
+# — without SOREN_PROJECT_ROOT actually being exported into this process's
+# environment, every single tool monitor.sh invokes (system-verify every
+# 15s, autonomy-check + its nested schedule/watchdog calls whenever idle,
+# memory-index/auto-maintenance/budget periodically, ...) falls through to
+# spawning `git rev-parse --show-toplevel` itself. Measured ~11ms per
+# call — a small but purely avoidable tax paid by ~30 different tool
+# scripts, over and over, for a value this process already computed once
+# on the line above.
+export SOREN_PROJECT_ROOT
+export SOREN_HOME="$SOREN_PROJECT_ROOT"
+
 # Shared opencode helpers (model mapping, ports, health, HTTP send)
 source "${SOREN_PROJECT_ROOT}/tools/lib/opencode.sh"
 
