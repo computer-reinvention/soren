@@ -24,9 +24,21 @@ can get it" module, not a required dependency.
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Short TTL cache for get_daily_real_cost(), keyed by directory. This
+# query used to be a genuine hot path (BudgetPanel polls
+# /api/budget/status every 60s, monitor.sh's budget check every 5min) —
+# even with the indexed-query fix below, repeated identical calls within
+# a few seconds of each other (e.g. several open dashboard tabs) still
+# have no reason to re-hit opencode's database at all. 30s comfortably
+# covers that without meaningfully increasing staleness versus the 60s+
+# poll intervals that actually consume this.
+_DAILY_CACHE_TTL_SECONDS = 30
+_daily_cache: dict[str, tuple[float, dict[str, float]]] = {}
 
 
 def _db_path() -> Path:
@@ -114,23 +126,54 @@ def get_daily_real_cost(directory: str) -> dict[str, float]:
     total) is what makes day-by-day possible at all: ``session.cost`` is
     cumulative for the session's whole lifetime, not bucketable by day on
     its own.
+
+    Cached for _DAILY_CACHE_TTL_SECONDS per directory — see module docstring.
     """
+    now = time.monotonic()
+    cached = _daily_cache.get(directory)
+    if cached is not None:
+        cached_at, result = cached
+        if now - cached_at < _DAILY_CACHE_TTL_SECONDS:
+            return result
+
+    result = _query_daily_real_cost(directory)
+    _daily_cache[directory] = (now, result)
+    return result
+
+
+def _query_daily_real_cost(directory: str) -> dict[str, float]:
     conn = _connect()
     if conn is None:
         return {}
     try:
+        # Two steps rather than one JOIN: opencode's `session` table has
+        # no index on `directory`, so filtering through a JOIN forces a
+        # full scan of the much larger, blob-heavy `message` table (36k+
+        # rows, 100+ MB of JSON payloads in a real install) on every call
+        # — measured 0.6s. Finding this directory's (typically a couple
+        # dozen) session ids first, from the small `session` table, then
+        # querying `message` by `session_id IN (...)` hits the existing
+        # message_session_time_created_id_idx index instead — measured
+        # ~0.08s for the same result, about 7x faster.
+        session_rows = conn.execute(
+            "SELECT id FROM session WHERE directory = ?", (directory,)
+        ).fetchall()
+        session_ids = [row["id"] for row in session_rows]
+        if not session_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in session_ids)
         cursor = conn.execute(
-            """
+            f"""
             SELECT
-                date(message.time_created / 1000, 'unixepoch') as day,
-                SUM(json_extract(message.data, '$.cost')) as cost
+                date(time_created / 1000, 'unixepoch') as day,
+                SUM(json_extract(data, '$.cost')) as cost
             FROM message
-            JOIN session ON message.session_id = session.id
-            WHERE session.directory = ?
-              AND json_extract(message.data, '$.cost') IS NOT NULL
+            WHERE session_id IN ({placeholders})
+              AND json_extract(data, '$.cost') IS NOT NULL
             GROUP BY day
             """,
-            (directory,),
+            session_ids,
         )
         return {row["day"]: row["cost"] or 0.0 for row in cursor.fetchall()}
     except sqlite3.Error:
