@@ -39,6 +39,13 @@ IGNORE_PATTERNS=(
 # ERROR/FAILED) are appended to the digest file instead.
 CRITICAL_PATTERN='CRITICAL|Traceback|Exception'
 
+# A Python traceback's frame/code lines are indented; the final
+# "ExceptionType: message" summary line is not. Bounds how many lines a
+# single captured traceback block can grow to, so a pathological case
+# (e.g. indentation from something unrelated immediately following) can't
+# produce an unbounded alert.
+TRACEBACK_MAX_LINES=60
+
 # Signature dedup: suppress re-alerts for the same normalized error line
 LOG_SIG_DEDUP_HOURS="${SOREN_LOG_ALERT_DEDUP_HOURS:-6}"
 LOG_SIG_DEDUP_SECS=$((LOG_SIG_DEDUP_HOURS * 3600))
@@ -150,6 +157,54 @@ save_marker() {
     echo "$inode $position" > "${MARKER_DIR}/$(basename "$log_file").marker"
 }
 
+# Extract error "blocks" from raw log content, one array element per
+# element per matched error — for a header line matching Traceback, this
+# greedily pulls in the following indented frame/code lines plus exactly
+# one trailing non-indented line (the "ExceptionType: message" summary),
+# instead of just the bare "Traceback (most recent call last):" header
+# line the plain single-line grep used to capture on its own. Plain
+# ERROR/CRITICAL/FAILED/Exception headers not immediately followed by
+# their own Traceback line stay single-line, matching prior behavior.
+#
+# Echoes each block on stdout separated by a NUL byte (blocks themselves
+# contain real newlines, so NUL is the only safe delimiter for the
+# caller's `read -d ''` loop).
+extract_error_blocks() {
+    local content="$1" error_regex="$2" ignore_regex="$3"
+    local line capturing=0 block="" block_lines=0
+
+    while IFS= read -r line; do
+        if ((capturing)); then
+            block="${block}"$'\n'"${line}"
+            block_lines=$((block_lines + 1))
+            if [[ ! "$line" =~ ^[[:space:]] ]] || ((block_lines >= TRACEBACK_MAX_LINES)); then
+                printf '%s\0' "$block"
+                capturing=0
+                block=""
+                block_lines=0
+            fi
+            continue
+        fi
+        if echo "$line" | grep -qE "$error_regex" && ! echo "$line" | grep -qE "$ignore_regex"; then
+            if [[ "$line" == *Traceback* ]]; then
+                block="$line"
+                capturing=1
+                block_lines=0
+            else
+                printf '%s\0' "$line"
+            fi
+        fi
+    done <<< "$content"
+
+    # A traceback still mid-capture at EOF (no trailing summary line seen
+    # within this poll's content yet) — flush what we have rather than
+    # silently dropping it; the next poll cycle would treat any leftover
+    # frame lines as unrelated content since polling is marker-based.
+    if ((capturing)); then
+        printf '%s\0' "$block"
+    fi
+}
+
 should_alert() {
     local log_file="$1"
     local cooldown_file="${MARKER_DIR}/$(basename "$log_file").cooldown"
@@ -189,34 +244,47 @@ analyze_log() {
     error_regex=$(IFS='|'; echo "${ERROR_PATTERNS[*]}")
     ignore_regex=$(IFS='|'; echo "${IGNORE_PATTERNS[*]}")
 
-    local errors
-    errors=$(echo "$new_content" | grep -E "$error_regex" 2>/dev/null | grep -vE "$ignore_regex" 2>/dev/null || true)
+    # One array element per matched error — for a Traceback header this is
+    # the full multi-line block (frames + summary line), not just the bare
+    # header line a plain single-line grep would capture (see
+    # extract_error_blocks).
+    local blocks=()
+    while IFS= read -r -d '' block; do
+        blocks+=("$block")
+    done < <(extract_error_blocks "$new_content" "$error_regex" "$ignore_regex")
 
-    if [[ -n "$errors" ]]; then
+    if ((${#blocks[@]} > 0)); then
         # Signature dedup + severity routing:
         #   critical (CRITICAL/Traceback/Exception) → mailbox alert (interrupts supervisor)
         #   everything else (plain ERROR/FAILED)    → digest file, no mailbox send
-        local critical_lines="" digest_lines=""
-        local err_line norm_line sig
-        while IFS= read -r err_line; do
-            [[ -z "$err_line" ]] && continue
-            norm_line=$(normalize_error_line "$err_line")
+        # Dedup signatures are computed from each block's first line (the
+        # header) only — hashing the full block would make the signature
+        # drift on every occurrence of an otherwise-identical error, since
+        # line numbers/object ids inside a traceback body vary run to run,
+        # which would defeat dedup entirely.
+        local critical_lines="" digest_lines="" critical_count=0 digest_count=0
+        local block header norm_line sig
+        for block in "${blocks[@]}"; do
+            [[ -z "$block" ]] && continue
+            header="${block%%$'\n'*}"
+            norm_line=$(normalize_error_line "$header")
             sig=$(sig_hash "$norm_line")
             if sig_recently_seen "$log_file" "$sig"; then
                 continue
             fi
             sig_record "$log_file" "$sig"
-            if echo "$err_line" | grep -qE "$CRITICAL_PATTERN"; then
-                critical_lines="${critical_lines}${err_line}"$'\n'
+            if echo "$header" | grep -qE "$CRITICAL_PATTERN"; then
+                critical_lines="${critical_lines}${block}"$'\n'
+                critical_count=$((critical_count + 1))
             else
-                digest_lines="${digest_lines}${err_line}"$'\n'
+                digest_lines="${digest_lines}${block}"$'\n'
+                digest_count=$((digest_count + 1))
             fi
-        done <<< "$errors"
+        done
 
         if [[ -n "$digest_lines" ]]; then
-            local digest_ts digest_count
+            local digest_ts
             digest_ts=$(date -Iseconds)
-            digest_count=$(printf '%s' "$digest_lines" | wc -l | xargs)
             mkdir -p "$(dirname "$DIGEST_FILE")"
             printf '%s' "$digest_lines" | while IFS= read -r dline; do
                 echo "[${digest_ts}] $(basename "$log_file"): ${dline}" >> "$DIGEST_FILE"
@@ -225,8 +293,7 @@ analyze_log() {
         fi
 
         if [[ -n "$critical_lines" ]] && should_alert "$log_file"; then
-            local error_count
-            error_count=$(printf '%s' "$critical_lines" | wc -l | xargs)
+            local error_count="$critical_count"
             local timestamp
             timestamp=$(date -Iseconds)
             local summary="[LOG ALERT] $(basename "$log_file"): ${error_count} critical errors detected"
@@ -323,4 +390,10 @@ main() {
     done
 }
 
-main
+# Guard against running main() when this script is sourced (e.g. by
+# tests/test_log_watcher.sh to exercise extract_error_blocks/
+# normalize_error_line directly) rather than executed directly — sourcing
+# it must never kick off the infinite watch loop.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main
+fi

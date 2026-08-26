@@ -1591,6 +1591,25 @@ run_dashboard() {
             start_router || log_warn "Router restart failed"
         fi
 
+        # Log watcher status — adopt or restart. Previously missing from
+        # this loop entirely (router/journal-nudge/compact all had it,
+        # this one didn't) — a dead log-watcher meant silently losing all
+        # server.log/router.log error alerting until the next full
+        # ./soren.sh restart, with nothing surfacing the gap.
+        if [[ -n "${LOG_WATCHER_PID:-}" ]] && kill -0 "$LOG_WATCHER_PID" 2>/dev/null; then
+            printf "  LogWatcher: ${GREEN}●${NC} running (PID: ${LOG_WATCHER_PID})\n"
+        elif live_pid=$(pgrep -f 'orchestrator/log-watcher\.sh' 2>/dev/null | head -1) && [[ -n "$live_pid" ]]; then
+            LOG_WATCHER_PID="$live_pid"
+            echo "$LOG_WATCHER_PID" > "${SOREN_PROJECT_ROOT}/.soren/run/log-watcher.pid" 2>/dev/null || true
+            printf "  LogWatcher: ${GREEN}●${NC} adopted existing (PID: ${LOG_WATCHER_PID})\n"
+            log_status "DAEMON" "Adopted existing log watcher (PID: ${LOG_WATCHER_PID})"
+        else
+            printf "  LogWatcher: ${YELLOW}●${NC} restarting...\n"
+            log_status "DAEMON" "Log watcher died (was PID: ${LOG_WATCHER_PID:-unknown}), restarting"
+            cleanup_stale_daemons log-watcher 2>/dev/null || true
+            start_log_watcher || log_warn "Log watcher restart failed"
+        fi
+
         # Journal nudge status — adopt or restart
         if [[ -n "${JOURNAL_NUDGE_PID:-}" ]] && kill -0 "$JOURNAL_NUDGE_PID" 2>/dev/null; then
             printf "  J-Nudge:    ${GREEN}●${NC} running (PID: ${JOURNAL_NUDGE_PID})\n"
