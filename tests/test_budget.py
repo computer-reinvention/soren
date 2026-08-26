@@ -192,6 +192,55 @@ def test_budget_summary_falls_back_to_estimate_when_session_not_in_opencode_db(
     assert agent["cost_usd"] == pytest.approx(12.0)
 
 
+def test_budget_summary_includes_real_cost_for_sessions_with_no_usage_event(
+    client, tmp_path, monkeypatch
+):
+    """Regression: a session can be too short-lived to ever produce a Stop
+    event with token usage attached (just a few PostToolUse events, no
+    usage snapshot at all) while opencode's own database still has a real
+    cost recorded for it. Confirmed against a live agent where 4 of 12
+    sessions had zero usage-bearing events yet ~$8.79 of real cost between
+    them -- that cost must not be silently dropped just because SOREN's
+    own bridge plugin never got a usage snapshot for that particular
+    session.
+    """
+    fake_db = tmp_path / "opencode.db"
+    monkeypatch.setenv("SOREN_OPENCODE_DB_PATH", str(fake_db))
+    _make_fake_opencode_db(
+        fake_db,
+        sessions=[
+            ("sess-with-usage", 10.0, 100, 200, 0, 0),
+            ("sess-no-usage-event", 3.5, 50, 60, 0, 0),
+        ],
+    )
+
+    # One session posts a normal Stop-with-usage event.
+    client.post("/api/agent-events", json={
+        "event_type": "Stop",
+        "session_id": "sess-with-usage",
+        "agent_id": "budget-agent-partial",
+        "usage": {"input_tokens": 100, "output_tokens": 200},
+    })
+    # A second session for the SAME agent only ever posts a
+    # PostToolUse event with no usage field -- e.g. it ended before a
+    # Stop event fired.
+    client.post("/api/agent-events", json={
+        "event_type": "PostToolUse",
+        "session_id": "sess-no-usage-event",
+        "agent_id": "budget-agent-partial",
+        "tool_name": "Bash",
+    })
+
+    response = client.get("/api/budget")
+    agent = next(
+        a for a in response.json()["agents"]
+        if a["agent_id"] == "budget-agent-partial"
+    )
+    # Both sessions' real cost must be counted: 10.0 + 3.5, not just the
+    # 10.0 from the one session that happened to post a usage snapshot.
+    assert agent["cost_usd"] == pytest.approx(13.5)
+
+
 def test_agent_budget_detail_uses_real_cost(client, tmp_path, monkeypatch):
     fake_db = tmp_path / "opencode.db"
     monkeypatch.setenv("SOREN_OPENCODE_DB_PATH", str(fake_db))

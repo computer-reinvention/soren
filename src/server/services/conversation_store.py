@@ -701,21 +701,55 @@ class ConversationStore:
             )
             return [dict(row) for row in cursor.fetchall()]
 
+    def _get_all_session_ids_for_agents(self, agent_ids: list[str]) -> dict[str, list[str]]:
+        """Every distinct session_id ever recorded for each of these agents
+        — regardless of whether any event on that session ever had a
+        ``usage`` payload attached.
+
+        This is deliberately broader than _get_agent_session_usage: a
+        session can be too short-lived to ever produce a Stop event with
+        token usage (a handful of PostToolUse events and nothing else),
+        but opencode's own database can still have a real cost recorded
+        for it. Scoping real-cost lookups to only usage-bearing sessions
+        would silently under-count real spend by however much those
+        sessions actually cost — confirmed against a live agent where 4 of
+        12 sessions had zero usage-bearing events yet ~$8.79 of real,
+        opencode-recorded cost between them.
+        """
+        if not agent_ids:
+            return {}
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in agent_ids)
+            cursor = conn.execute(
+                f"""
+                SELECT DISTINCT agent_id, session_id FROM agent_events
+                WHERE agent_id IN ({placeholders}) AND session_id IS NOT NULL
+                """,
+                agent_ids,
+            )
+            result: dict[str, list[str]] = {a: [] for a in agent_ids}
+            for row in cursor.fetchall():
+                result[row["agent_id"]].append(row["session_id"])
+            return result
+
     def get_budget_summary(self) -> list[dict]:
         """Get per-agent token usage totals, plus real USD cost.
 
-        Token counts are SUMmed across each agent's sessions (see
-        _get_agent_session_usage for why that's correct for cumulative
-        per-session values). Cost prefers opencode's own real,
-        already-priced number per session (opencode_transcripts.py) —
-        falling back to a token-based estimate only for sessions opencode's
-        own database has no record of.
+        Token counts are SUMmed across each agent's usage-bearing sessions
+        (see _get_agent_session_usage for why that's correct for
+        cumulative per-session values) — these are what's actually
+        displayed as "tokens used". Cost is computed separately, over
+        EVERY session the agent has ever had (see
+        _get_all_session_ids_for_agents): opencode's own real,
+        already-priced number per session where available, falling back
+        to a token-based estimate only for sessions opencode's own
+        database has no record of (and only if that session did produce
+        usage data for SOREN to estimate from at all).
         """
         rows = self._get_agent_session_usage()
-        session_ids = [r["session_id"] for r in rows if r["session_id"]]
-        real_costs = opencode_transcripts.get_session_costs(session_ids)
 
         agents: dict[str, dict] = {}
+        session_estimates: dict[str, float] = {}
         for row in rows:
             bucket = agents.setdefault(
                 row["agent_id"],
@@ -738,19 +772,27 @@ class ConversationStore:
             bucket["cache_read_tokens"] += cache_read
             bucket["cache_creation_tokens"] += cache_creation
             bucket["event_count"] += row["event_count"] or 0
+            session_estimates[row["session_id"]] = pricing.tokens_to_usd(
+                input_tokens, output_tokens, cache_read, cache_creation
+            )
 
-            real = real_costs.get(row["session_id"])
-            if real is not None:
-                bucket["cost_usd"] += real["cost_usd"]
-            else:
-                bucket["cost_usd"] += pricing.tokens_to_usd(
-                    input_tokens, output_tokens, cache_read, cache_creation
-                )
+        all_sessions_by_agent = self._get_all_session_ids_for_agents(list(agents.keys()))
+        all_session_ids = {sid for sids in all_sessions_by_agent.values() for sid in sids}
+        real_costs = opencode_transcripts.get_session_costs(list(all_session_ids))
 
-        result = sorted(agents.values(), key=lambda a: a["input_tokens"], reverse=True)
-        for a in result:
-            a["cost_usd"] = round(a["cost_usd"], 6)
-        return result
+        for agent_id, bucket in agents.items():
+            cost_total = 0.0
+            for session_id in all_sessions_by_agent.get(agent_id, []):
+                real = real_costs.get(session_id)
+                if real is not None:
+                    cost_total += real["cost_usd"]
+                elif session_id in session_estimates:
+                    cost_total += session_estimates[session_id]
+                # else: no real data and no usage snapshot for this
+                # session — nothing to add, nothing to estimate from.
+            bucket["cost_usd"] = round(cost_total, 6)
+
+        return sorted(agents.values(), key=lambda a: a["input_tokens"], reverse=True)
 
     def get_daily_budget(self) -> list[dict]:
         """Get per-day token usage totals grouped by date.
@@ -816,8 +858,6 @@ class ConversationStore:
         recorded usage events.
         """
         rows = self._get_agent_session_usage(agent_id=agent_id)
-        session_ids = [r["session_id"] for r in rows if r["session_id"]]
-        real_costs = opencode_transcripts.get_session_costs(session_ids)
 
         totals = {
             "agent_id": agent_id,
@@ -828,6 +868,7 @@ class ConversationStore:
             "event_count": 0,
             "cost_usd": 0.0,
         }
+        session_estimates: dict[str, float] = {}
         for row in rows:
             input_tokens = row["input_tokens"] or 0
             output_tokens = row["output_tokens"] or 0
@@ -838,15 +879,23 @@ class ConversationStore:
             totals["cache_read_tokens"] += cache_read
             totals["cache_creation_tokens"] += cache_creation
             totals["event_count"] += row["event_count"] or 0
+            session_estimates[row["session_id"]] = pricing.tokens_to_usd(
+                input_tokens, output_tokens, cache_read, cache_creation
+            )
 
-            real = real_costs.get(row["session_id"])
+        # Cost is computed over EVERY session this agent has ever had, not
+        # just the ones that happened to produce a usage-bearing event —
+        # see _get_all_session_ids_for_agents for why that matters.
+        all_sessions = self._get_all_session_ids_for_agents([agent_id]).get(agent_id, [])
+        real_costs = opencode_transcripts.get_session_costs(all_sessions)
+        cost_total = 0.0
+        for session_id in all_sessions:
+            real = real_costs.get(session_id)
             if real is not None:
-                totals["cost_usd"] += real["cost_usd"]
-            else:
-                totals["cost_usd"] += pricing.tokens_to_usd(
-                    input_tokens, output_tokens, cache_read, cache_creation
-                )
-        totals["cost_usd"] = round(totals["cost_usd"], 6)
+                cost_total += real["cost_usd"]
+            elif session_id in session_estimates:
+                cost_total += session_estimates[session_id]
+        totals["cost_usd"] = round(cost_total, 6)
 
         with self._get_connection() as conn:
             # Recent events with usage
