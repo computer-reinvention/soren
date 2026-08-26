@@ -2,6 +2,7 @@ import asyncio
 import json
 import re
 import subprocess
+import time
 import aiofiles
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -51,6 +52,7 @@ async def add_journal_entry(entry: JournalEntryCreate):
         content=entry.content,
         project_id=entry.project_id,
     )
+    _invalidate_entries_cache()
     return {
         "success": True,
         "entry": {
@@ -106,8 +108,38 @@ async def get_tag_frequency():
 
 # ── Helpers for journal intelligence ──────────────────────────────────────────
 
+# _collect_all_entries() re-reads and re-parses every journal .md file from
+# disk on every call, and is called independently (no shared cache) by 6
+# different routes: get_journal_stats, get_recurring_issues (polled every
+# 60s by the dashboard), get_weekly_summary, get_issue_lifecycle,
+# _compute_correction_compliance (polled every 120s), get_compliance_trend.
+# Cheap only while the journal corpus is still small — this is a pure
+# function of on-disk state with an obvious caching opportunity that
+# wasn't taken. Invalidated immediately when a new entry is added through
+# this API (the common path); a short TTL is the safety net for the rare
+# case of a journal file being edited by something other than this route
+# (e.g. a shell script appending directly).
+_ENTRIES_CACHE_TTL_SECONDS = 30
+_entries_cache: dict = {"data": None, "computed_at": 0.0}
+
+
+def _invalidate_entries_cache() -> None:
+    _entries_cache["data"] = None
+
+
 async def _collect_all_entries() -> list[dict]:
-    """Parse all journal files into structured entries: date, title, content, line."""
+    """Parse all journal files into structured entries: date, title, content, line.
+
+    Cached for _ENTRIES_CACHE_TTL_SECONDS, invalidated immediately by
+    add_journal_entry — see the cache comment above.
+    """
+    now = time.monotonic()
+    if (
+        _entries_cache["data"] is not None
+        and (now - _entries_cache["computed_at"]) < _ENTRIES_CACHE_TTL_SECONDS
+    ):
+        return _entries_cache["data"]
+
     dates = await journal_service.list_dates()
     entries: list[dict] = []
     for date_str in dates:
@@ -135,6 +167,9 @@ async def _collect_all_entries() -> list[dict]:
                 current["content_lines"].append(line.rstrip())
         if current:
             entries.append(current)
+
+    _entries_cache["data"] = entries
+    _entries_cache["computed_at"] = now
     return entries
 
 
