@@ -86,6 +86,12 @@ export function WebTerminal({ active }: WebTerminalProps) {
   const fitRafRef = useRef<number>();
   const activeRef = useRef(active);
   const prevModeRef = useRef<TerminalMode | null>(null);
+  // Read inside the mount-once xterm-creation effect below without
+  // pulling isMobile into its deps (which would tear down and recreate
+  // the whole Terminal instance — losing scrollback/PTY continuity — on
+  // every viewport-crossing resize instead of just re-fitting).
+  const isMobileRef = useRef(isMobile);
+  isMobileRef.current = isMobile;
   // Sockets we closed on purpose (mode switch / unmount / manual reconnect):
   // their onclose must not paint the disconnect UX.
   const intentionallyClosedRef = useRef(new WeakSet<WebSocket>());
@@ -98,7 +104,9 @@ export function WebTerminal({ active }: WebTerminalProps) {
   const searchOpenRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [matchInfo, setMatchInfo] = useState<{ index: number; count: number } | null>(null);
-  const { fontSize, increaseFontSize, decreaseFontSize } = useTerminalSettingsStore();
+  const { desktopFontSize, mobileFontSize, increaseFontSize, decreaseFontSize } =
+    useTerminalSettingsStore();
+  const fontSize = isMobile ? mobileFontSize : desktopFontSize;
 
   // attachCustomKeyEventHandler is registered once at mount (see below) — it
   // needs a ref, not the searchOpen state value directly, or its closure
@@ -259,7 +267,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
     const term = new Terminal({
       cursorBlink: true,
       fontFamily: MONO_FONT_STACK,
-      fontSize: initial.fontSize,
+      fontSize: isMobileRef.current ? initial.mobileFontSize : initial.desktopFontSize,
       scrollback: initial.scrollback,
       theme: TERM_THEME,
       // SearchAddon's match-highlight decorations (P5.7) are a "proposed"
@@ -480,7 +488,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
             <div className="flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
               <button
                 type="button"
-                onClick={decreaseFontSize}
+                onClick={() => decreaseFontSize(false)}
                 title="Decrease font size"
                 className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
               >
@@ -489,7 +497,7 @@ export function WebTerminal({ active }: WebTerminalProps) {
               <span className="w-6 text-center font-mono text-[10px] text-zinc-400">{fontSize}</span>
               <button
                 type="button"
-                onClick={increaseFontSize}
+                onClick={() => increaseFontSize(false)}
                 title="Increase font size"
                 className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
               >

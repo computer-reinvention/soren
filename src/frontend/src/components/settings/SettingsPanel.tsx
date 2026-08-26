@@ -77,7 +77,8 @@ export function SettingsPanel({
 }) {
   const { theme, setTheme } = useThemeStore();
   const { enabled: notificationsEnabled, setEnabled: setNotificationsEnabled } = useNotificationStore();
-  const { fontSize, scrollback, increaseFontSize, decreaseFontSize, setScrollback } = useTerminalSettingsStore();
+  const { desktopFontSize, mobileFontSize, scrollback, increaseFontSize, decreaseFontSize, setScrollback } =
+    useTerminalSettingsStore();
   const { data: prefs } = usePrefs();
   const updatePrefs = useUpdatePrefs();
   // "keyboard shortcuts" is dead weight on mobile — there's no physical
@@ -87,6 +88,10 @@ export function SettingsPanel({
   // there since the panel's own header dropped its inline stepper to make
   // room for the essentials.
   const isMobile = useIsMobile();
+  // Font size is tracked per device class (see terminalSettingsStore) —
+  // a phone needs to go much smaller than a desktop user ever would to
+  // fit a usable number of columns.
+  const fontSize = isMobile ? mobileFontSize : desktopFontSize;
 
   const density = prefs?.ui_density ?? 'comfortable';
 
@@ -184,7 +189,7 @@ export function SettingsPanel({
               <div className="flex items-center gap-0.5 rounded-md border border-border/60 p-0.5">
                 <button
                   type="button"
-                  onClick={decreaseFontSize}
+                  onClick={() => decreaseFontSize(isMobile)}
                   title="Decrease font size"
                   className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                 >
@@ -193,7 +198,7 @@ export function SettingsPanel({
                 <span className="w-8 text-center font-mono text-xs tabular-nums text-foreground/80">{fontSize}px</span>
                 <button
                   type="button"
-                  onClick={increaseFontSize}
+                  onClick={() => increaseFontSize(isMobile)}
                   title="Increase font size"
                   className="rounded p-1 text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                 >
