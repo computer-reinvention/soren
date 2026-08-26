@@ -7,6 +7,7 @@ import { routes } from '@/lib/navigation';
 import { Copy, Check } from 'lucide-react';
 import { codeToHtml } from 'shiki/bundle/web';
 import { normalizeLanguage } from '@/lib/syntax';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface MarkdownContentProps {
   content: string;
@@ -135,6 +136,7 @@ function HighlightedCode({ code, language, className }: { code: string; language
 }
 
 export function MarkdownContent({ content, className }: MarkdownContentProps) {
+  const isMobile = useIsMobile();
   return (
     // break-words: an agent response with a long unbroken token (a hash, a
     // path with no slashes, a URL) would otherwise overflow the container
@@ -172,7 +174,16 @@ export function MarkdownContent({ content, className }: MarkdownContentProps) {
 
             return isInline ? (
               <code
-                className="bg-card text-foreground rounded px-1.5 py-0.5 text-xs font-mono border border-border/60"
+                className={cn(
+                  'bg-card text-foreground rounded font-mono',
+                  // Mobile: a handful of these per paragraph (paths,
+                  // hashes, commands) with a full border box each read as
+                  // busy/chunky at phone width — a plain tinted background
+                  // reads as "inline code" just as clearly with far less
+                  // visual weight. Kept the border on desktop, where
+                  // there's more breathing room around each chip.
+                  isMobile ? 'px-1 py-0.5 text-[11px]' : 'px-1.5 py-0.5 text-xs border border-border/60'
+                )}
                 {...props}
               >
                 {children}

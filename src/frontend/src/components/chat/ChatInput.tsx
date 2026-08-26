@@ -7,6 +7,7 @@ import { cn, getAgentBadgeLabel, getAgentBadgeColor } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { routes } from '@/lib/navigation';
 import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
+import { useIsMobile } from '@/hooks/use-mobile';
 import type { Agent } from '@/types/agent';
 
 interface ChatInputProps {
@@ -151,6 +152,7 @@ function saveHistory(history: string[]) {
 }
 
 export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [], resolveTarget, onInterrupt, isAgentWorking, isInterrupting, interruptedAt, failedSend }: ChatInputProps) {
+  const isMobile = useIsMobile();
   const navigate = useNavigate();
   const [message, setMessage] = useState('');
   const [showInterruptFeedback, setShowInterruptFeedback] = useState(false);
@@ -194,13 +196,26 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
 
   const textareaRef = internalRef;
 
-  // Auto-resize textarea
+  // Auto-resize textarea. When empty, clear any inline height entirely and
+  // let CSS's min-h-[44px] govern it directly — measuring scrollHeight for
+  // an empty box serves no purpose (there's nothing to size around) and
+  // was a real bug: on mount, this ran before web fonts had necessarily
+  // settled, and `scrollHeight` at that instant reflected fallback-font
+  // line metrics — taller than the real font's. That inflated pixel value
+  // then got set as a fixed inline style and never re-measured again
+  // (this effect only reruns when `message` changes, and an untouched
+  // empty textarea never does), so the box stayed visibly oversized the
+  // entire time it sat empty. Confirmed directly: forcing a re-render post
+  // font-load dropped the measured height from ~62px to 42px.
   useEffect(() => {
     const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.style.height = 'auto';
-      textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
+    if (!textarea) return;
+    if (!message) {
+      textarea.style.height = '';
+      return;
     }
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
   }, [message, textareaRef]);
 
   // Show "Agent interrupted" feedback briefly after a successful interrupt
@@ -518,7 +533,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
   };
 
   return (
-    <div className="p-4 border-t bg-background/50 backdrop-blur-sm">
+    <div className={cn('border-t bg-background/50 backdrop-blur-sm', isMobile ? 'p-2.5' : 'p-4')}>
       <div className="relative">
         {/* @mention autocomplete dropdown */}
         {mention.active && filteredAgents.length > 0 && (
@@ -647,7 +662,10 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
 
         {/* Command Center routing chip — where this message will be delivered */}
         {resolveTarget && (
-          <div className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <div className={cn(
+            'flex items-center gap-1.5 text-muted-foreground',
+            isMobile ? 'mb-1 text-2xs' : 'mb-1.5 text-xs'
+          )}>
             <Bot className="h-3 w-3" />
             <span>
               →{' '}
@@ -680,7 +698,7 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
           </div>
         )}
 
-        <div className="flex gap-2 items-end">
+        <div className={cn('flex items-end', isMobile ? 'gap-1.5' : 'gap-2')}>
           <Textarea
             ref={textareaRef}
             value={message}
@@ -690,6 +708,12 @@ export function ChatInput({ onSend, isPending, placeholder, inputRef, agents = [
             disabled={isPending}
             className={cn(
               'min-h-[44px] max-h-[200px] resize-none',
+              // Tighter vertical padding on mobile — the 44px floor (a
+              // touch-target minimum, not a font-driven height) still
+              // holds either way. Font itself is untouched: Textarea's
+              // own text-base (16px) on mobile is deliberate, not
+              // something to shrink (see the placeholder comment above).
+              isMobile ? 'py-1.5' : 'py-2',
               'bg-muted/50 border-muted-foreground/20',
               'focus-visible:ring-1 focus-visible:ring-primary'
             )}

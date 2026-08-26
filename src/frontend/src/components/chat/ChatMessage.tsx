@@ -290,22 +290,22 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   // into one compact header line instead, and content gets the full width.
   if (isMobile) {
     return (
-      <div className="group relative py-2 hover:bg-muted/20 transition-colors rounded-sm px-2 -mx-2">
+      <div className="group relative py-1.5 hover:bg-muted/20 transition-colors rounded-sm px-2 -mx-2">
         {/* Header line: sender, time, and actions all in one row — actions
             live here (not an absolute overlay) so there's never a
             touch-only "always visible and possibly colliding with text"
             problem to work around in the first place. */}
-        <div className="flex items-center gap-1.5 mb-1">
+        <div className="flex items-center gap-1.5 mb-0.5">
           {isCurrentUser ? (
-            <span className="text-xs font-mono font-medium text-primary">you</span>
+            <span className="text-2xs font-mono font-medium text-primary">you</span>
           ) : isUser ? (
-            <span className="text-xs font-mono font-medium text-foreground truncate">
+            <span className="text-2xs font-mono font-medium text-foreground truncate">
               {displayName}
             </span>
           ) : (
             <Link
               to={routes.agent(message.from_agent)}
-              className="text-xs font-mono font-medium text-foreground hover:text-primary transition-colors truncate"
+              className="text-2xs font-mono font-medium text-foreground hover:text-primary transition-colors truncate"
             >
               {displayName}
             </Link>
@@ -329,7 +329,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
         </div>
 
         {hasBadgeRow && (
-          <div className="flex items-center gap-1.5 flex-wrap mb-1">{badgeChips}</div>
+          <div className="flex items-center gap-1.5 flex-wrap mb-0.5">{badgeChips}</div>
         )}
 
         {timelineBlock}
@@ -337,8 +337,8 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
 
         {isUser ? (
           <div className={cn(
-            'text-sm whitespace-pre-wrap break-words',
-            isCurrentUser && 'bg-primary/10 border border-primary/20 rounded-lg px-3 py-2'
+            'text-[13px] leading-snug whitespace-pre-wrap break-words',
+            isCurrentUser && 'bg-primary/10 border border-primary/20 rounded-lg px-3 py-1.5'
           )}>
             {rawContent}
           </div>
@@ -346,7 +346,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
           <>
             <MarkdownContent
               content={displayContent}
-              className={cn('text-sm', '[&_p]:mb-1 [&_p]:last:mb-0')}
+              className={cn('text-[13px] leading-snug', '[&_p]:mb-1 [&_p]:last:mb-0')}
             />
             {collapseToggle}
           </>

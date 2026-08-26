@@ -4,6 +4,8 @@ import { MessageSquare } from 'lucide-react';
 import { useMessageFeed } from '@/hooks/useMessageFeed';
 import { useScrollAnchor, useInfiniteScrollTop } from '@/hooks/useScrollAnchor';
 import { LoadingMoreRow, ScrollToBottomButton } from './MessageFeedChrome';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { cn } from '@/lib/utils';
 import type { Message } from '@/types/message';
 
 interface ChatMessagesProps {
@@ -27,6 +29,7 @@ export function ChatMessages({
   hasMore,
   isLoadingMore,
 }: ChatMessagesProps) {
+  const isMobile = useIsMobile();
   const { collapsedMessages, toolCallsByMessage, thoughtsByMessage } = useMessageFeed(messages);
   const { viewportRef, bottomRef, isNearBottom, unreadCount, handleScroll, scrollToBottom } =
     useScrollAnchor(messages);
@@ -65,7 +68,13 @@ export function ChatMessages({
   return (
     <div className="flex-1 flex flex-col relative overflow-hidden">
       <ScrollArea className="flex-1" viewportRef={viewportRef} onScroll={handleScroll}>
-        <div className="p-4 space-y-4">
+        {/* space-y-4 (16px) between EVERY message plus p-4 all around was
+            never mobile-aware — on a phone-width column that's a lot of
+            dead vertical space between short back-to-back messages.
+            ChatMessage's own mobile layout already handles compact
+            per-message spacing (py-1.5, mb-0.5), so the list container
+            just needs to get out of the way with a much smaller gap. */}
+        <div className={cn(isMobile ? 'p-2 space-y-0.5' : 'p-4 space-y-4')}>
           <div ref={topSentinelRef} className="h-1" />
           <LoadingMoreRow visible={isLoadingMore} />
           {collapsedMessages.map(({ message, collapseCount }) => (

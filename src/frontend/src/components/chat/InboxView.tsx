@@ -3,10 +3,11 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { ChatMessage } from './ChatMessage';
 import { MarkdownContent } from './MarkdownContent';
 import { ClipboardList } from 'lucide-react';
-import { parseMessagePrefix } from '@/lib/utils';
+import { cn, parseMessagePrefix } from '@/lib/utils';
 import { useMessageFeed } from '@/hooks/useMessageFeed';
 import { useScrollAnchor, useInfiniteScrollTop } from '@/hooks/useScrollAnchor';
 import { LoadingMoreRow, ScrollToBottomButton } from './MessageFeedChrome';
+import { useIsMobile } from '@/hooks/use-mobile';
 import type { Message } from '@/types/message';
 
 interface InboxViewProps {
@@ -23,6 +24,7 @@ interface InboxViewProps {
  * useMessageFeed/useScrollAnchor hooks.
  */
 export function InboxView({ messages, agentId, onLoadMore, hasMore, isLoadingMore }: InboxViewProps) {
+  const isMobile = useIsMobile();
   const { sortedMessages, collapsedMessages, toolCallsByMessage, thoughtsByMessage } =
     useMessageFeed(messages);
   const { viewportRef, bottomRef, isNearBottom, unreadCount, handleScroll, scrollToBottom } =
@@ -81,7 +83,7 @@ export function InboxView({ messages, agentId, onLoadMore, hasMore, isLoadingMor
 
       {/* Message feed */}
       <ScrollArea className="flex-1" viewportRef={viewportRef} onScroll={handleScroll}>
-        <div className="p-4 space-y-4">
+        <div className={cn(isMobile ? 'p-2 space-y-0.5' : 'p-4 space-y-4')}>
           <div ref={topSentinelRef} className="h-1" />
           <LoadingMoreRow visible={isLoadingMore} />
           {collapsedMessages.map(({ message, collapseCount }) => (

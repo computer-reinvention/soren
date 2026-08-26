@@ -30,6 +30,7 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
+  const isMobile = useIsMobile();
   const { username } = useAuthStore();
   const { selectedProjectId } = useProjectStore();
   const {
@@ -263,9 +264,15 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
         isPending={sendMutation.isPending}
         failedSend={failedSend}
         placeholder={
+          // Mobile: drop the trailing hint clause. At 16px (deliberately —
+          // see Textarea's text-base md:text-sm, prevents iOS Safari's
+          // auto-zoom-on-focus for <16px inputs) the full string wraps to
+          // 2 lines on a phone-width screen, which is what was inflating
+          // the input box height report — this was the actual fix, not a
+          // smaller font on the input itself.
           selectedAgentId
-            ? `Message ${targetAgent} — Enter to send`
-            : 'Message supervisor — @tag any agent to route directly'
+            ? isMobile ? `Message ${targetAgent}` : `Message ${targetAgent} — Enter to send`
+            : isMobile ? 'Message supervisor' : 'Message supervisor — @tag any agent to route directly'
         }
         inputRef={inputRef}
         agents={agentsData?.agents || []}

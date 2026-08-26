@@ -161,7 +161,7 @@ export function ChatHeader({
         // Mobile: tighter padding buys back real vertical space for the
         // conversation itself — this bar plus the bottom nav plus the
         // input are all competing for a ~700px viewport.
-        isMobile ? 'px-3 py-2 gap-2' : 'px-4 pt-4 pb-2 gap-4'
+        isMobile ? 'px-3 py-1.5 gap-2' : 'px-4 pt-4 pb-2 gap-4'
       )}
     >
       <div className="flex-1 min-w-0">
