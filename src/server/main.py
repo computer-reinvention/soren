@@ -129,6 +129,34 @@ async def _auto_sleep_task():
             logger.warning(f"Auto-sleep task error: {exc}")
 
 
+async def _heartbeat_retention_task():
+    """Background task: prune heartbeat_history rows older than the
+    retention window (SOREN_HEARTBEAT_RETENTION_DAYS, default 14 days).
+
+    heartbeat_history has no natural bound otherwise -- monitor.sh posts
+    a heartbeat roughly every 5s, and nothing was ever deleting from this
+    table, measured at 44,700 rows / 57% of the entire consolidated
+    database. Prunes once immediately on startup (rather than only after
+    the first hourly interval) so an already-oversized table shrinks
+    promptly on deploy instead of waiting up to an hour.
+    """
+    from .routes.heartbeat import prune_old_heartbeats
+
+    while True:
+        try:
+            deleted = await asyncio.to_thread(prune_old_heartbeats)
+            if deleted:
+                logger.info(
+                    f"Pruned {deleted} heartbeat_history row(s) older than "
+                    f"{settings.heartbeat_retention_days} days"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"Heartbeat retention task error: {exc}")
+        await asyncio.sleep(3600)
+
+
 # Paths that bypass authentication entirely
 AUTH_EXEMPT_PATHS = {
     "/api/auth/login",
@@ -164,11 +192,20 @@ async def lifespan(app: FastAPI):
     ws_manager.start_ping_task()
     sleep_task = asyncio.create_task(_auto_sleep_task())
     logger.info(f"Auto-sleep task started (idle threshold: {settings.idle_sleep_minutes}min)")
+    heartbeat_retention_task = asyncio.create_task(_heartbeat_retention_task())
+    logger.info(
+        f"Heartbeat retention task started (keeping {settings.heartbeat_retention_days} days)"
+    )
     yield
     # Shutdown
     sleep_task.cancel()
+    heartbeat_retention_task.cancel()
     try:
         await sleep_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await heartbeat_retention_task
     except asyncio.CancelledError:
         pass
     await ws_manager.stop_ping_task()

@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # Auto-sleep: idle workers are put to sleep after this many minutes (SOREN_IDLE_SLEEP_MINUTES)
     idle_sleep_minutes: int = 30
 
+    # heartbeat_history retention: monitor.sh posts a heartbeat roughly
+    # every 5s with no natural bound on the table otherwise -- measured at
+    # 57% of the whole database (44,700 rows) with zero pruning ever
+    # having run. 14 days covers realistic "what happened recently"
+    # debugging while keeping the table's growth bounded. (SOREN_HEARTBEAT_RETENTION_DAYS)
+    heartbeat_retention_days: int = 14
+
     model_config = {
         "env_prefix": "SOREN_",
         "env_file": ".env",

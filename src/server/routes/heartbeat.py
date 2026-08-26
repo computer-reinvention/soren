@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 
 from fastapi import APIRouter, Query
@@ -9,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import logging
 
+from ..config import settings
 from ..services.db import get_db
 from ..websocket.manager import ws_manager
 
@@ -68,6 +70,14 @@ def _migrate_db(conn):
         conn.execute("ALTER TABLE heartbeat_history ADD COLUMN supervisor_idle_seconds INTEGER")
     if "supervisor_state" not in existing_cols:
         conn.execute("ALTER TABLE heartbeat_history ADD COLUMN supervisor_state TEXT")
+    # Supports both get_heartbeat_history's ORDER BY id (already covered by
+    # the rowid-backed primary key) and prune_old_heartbeats' DELETE ...
+    # WHERE timestamp < ? -- there was no index of any kind on this table
+    # before, so that DELETE would otherwise be a full table scan every
+    # time it runs.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_heartbeat_timestamp ON heartbeat_history(timestamp)"
+    )
 
 
 def _init_db():
@@ -109,6 +119,26 @@ def _store_heartbeat(hb: HeartbeatResponse):
                 hb.supervisor_state,
             ),
         )
+
+
+def prune_old_heartbeats(retention_days: Optional[int] = None) -> int:
+    """Delete heartbeat_history rows older than the retention window.
+
+    monitor.sh posts a heartbeat roughly every 5s with nothing anywhere
+    ever deleting from this table -- measured at 44,700 rows / 57% of the
+    entire consolidated database with zero pruning having ever run.
+    Called periodically by main.py's background task; also safe to call
+    directly (e.g. from a one-off maintenance script or a test).
+
+    Returns the number of rows deleted.
+    """
+    days = retention_days if retention_days is not None else settings.heartbeat_retention_days
+    cutoff = time.time() - days * 86400
+    with _get_connection() as conn:
+        cursor = conn.execute(
+            "DELETE FROM heartbeat_history WHERE timestamp < ?", (cutoff,)
+        )
+        return cursor.rowcount
 
 
 def _row_to_heartbeat(row: sqlite3.Row) -> HeartbeatResponse:
