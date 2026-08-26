@@ -11,8 +11,27 @@ import { TERMINAL_WS_URL, TERMINAL_PING_INTERVAL } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useTerminalStore, type TerminalMode } from '@/stores/terminalStore';
 import { useTerminalSettingsStore } from '@/stores/terminalSettingsStore';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 type ConnectionStatus = 'connecting' | 'connected' | 'closed';
+
+// Keys a phone keyboard doesn't have but a real shell session needs
+// constantly — Ctrl+C to interrupt a hung command is the single most
+// important one for "fix something while soren is misbehaving, from a
+// phone" use. Sent through the exact same PTY input channel as a real
+// keystroke (see sendRaw below / term.onData), so this is indistinguishable
+// from typing them on a physical keyboard as far as the shell is concerned.
+const MOBILE_KEYS: Array<{ label: string; data: string; title: string }> = [
+  { label: 'Esc', data: '\x1b', title: 'Escape' },
+  { label: 'Tab', data: '\t', title: 'Tab' },
+  { label: '^C', data: '\x03', title: 'Ctrl+C — interrupt' },
+  { label: '^D', data: '\x04', title: 'Ctrl+D — EOF' },
+  { label: '^L', data: '\x0c', title: 'Ctrl+L — clear' },
+  { label: '↑', data: '\x1b[A', title: 'Up — history' },
+  { label: '↓', data: '\x1b[B', title: 'Down' },
+  { label: '←', data: '\x1b[D', title: 'Left' },
+  { label: '→', data: '\x1b[C', title: 'Right' },
+];
 
 const MONO_FONT_STACK =
   "ui-monospace, SFMono-Regular, Menlo, Monaco, 'Cascadia Mono', 'Roboto Mono', Consolas, monospace";
@@ -53,6 +72,7 @@ interface WebTerminalProps {
  * persists server-side in tmux).
  */
 export function WebTerminal({ active }: WebTerminalProps) {
+  const isMobile = useIsMobile();
   const terminalMode = useTerminalStore((s) => s.terminalMode);
   const setTerminalMode = useTerminalStore((s) => s.setTerminalMode);
 
@@ -134,6 +154,20 @@ export function WebTerminal({ active }: WebTerminalProps) {
       fitAndReport();
     });
   }, [fitAndReport]);
+
+  // Mobile on-screen key row (MOBILE_KEYS) sends through this exact same
+  // channel term.onData uses below for real keystrokes — from the PTY's
+  // side there is no difference between this and a physical key press.
+  // Re-focusing afterward matters: these are real DOM buttons, so tapping
+  // one would otherwise blur xterm's hidden input and dismiss the on-screen
+  // keyboard along with it.
+  const sendRaw = useCallback((data: string) => {
+    const ws = wsRef.current;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', data }));
+    }
+    termRef.current?.focus();
+  }, []);
 
   const closeSocket = useCallback(() => {
     if (pingRef.current !== undefined) {
@@ -357,92 +391,149 @@ export function WebTerminal({ active }: WebTerminalProps) {
     scheduleFit();
   }, [fontSize, scheduleFit]);
 
+  const statusDot = (
+    <span
+      className={cn(
+        'h-2 w-2 rounded-full shrink-0',
+        status === 'connected' && 'bg-green-500',
+        status === 'connecting' && 'animate-pulse motion-reduce:animate-none bg-yellow-500',
+        status === 'closed' && 'bg-red-500'
+      )}
+    />
+  );
+
+  const modeSwitcher = (mobile: boolean) => (
+    <div className={cn(
+      'flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5 font-mono',
+      mobile ? 'text-[11px]' : 'text-xs'
+    )}>
+      <button
+        type="button"
+        onClick={() => setTerminalMode('shell')}
+        className={cn(
+          'rounded px-2 py-0.5 transition-colors',
+          terminalMode === 'shell'
+            ? 'bg-zinc-700 text-zinc-100'
+            : 'text-zinc-400 hover:text-zinc-300'
+        )}
+      >
+        Shell
+      </button>
+      <button
+        type="button"
+        onClick={() => setTerminalMode('soren')}
+        className={cn(
+          'rounded px-2 py-0.5 transition-colors',
+          terminalMode === 'soren'
+            ? 'bg-zinc-700 text-zinc-100'
+            : 'text-zinc-400 hover:text-zinc-300'
+        )}
+      >
+        {mobile ? 'Soren' : 'Soren session'}
+      </button>
+    </div>
+  );
+
+  const searchButton = (
+    <button
+      type="button"
+      onClick={() => {
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInputRef.current?.focus());
+      }}
+      title="Search terminal (Ctrl+F)"
+      aria-pressed={searchOpen}
+      className={cn(
+        'rounded-md border border-zinc-800 bg-zinc-900 p-1 shrink-0',
+        searchOpen ? 'text-emerald-400' : 'text-zinc-400 hover:text-zinc-300'
+      )}
+    >
+      <Search className="h-3 w-3" />
+    </button>
+  );
+
   return (
     <div className="relative flex h-full flex-col bg-zinc-950">
-      {/* Panel header: status + mode switcher */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 px-3">
-        <div className="flex items-center gap-2 font-mono text-xs text-zinc-400">
-          <span
-            className={cn(
-              'h-2 w-2 rounded-full',
-              status === 'connected' && 'bg-green-500',
-              status === 'connecting' && 'animate-pulse motion-reduce:animate-none bg-yellow-500',
-              status === 'closed' && 'bg-red-500'
-            )}
-          />
-          <span>terminal</span>
-          <span className="text-zinc-400">
-            {terminalMode === 'shell' ? 'tmux: webterm' : 'live agent session'}
-          </span>
+      {/* Panel header: status + mode switcher. Mobile drops the "terminal"/
+          mode-description labels and the inline font-size stepper (still
+          reachable via Settings) entirely — there's only room for the
+          essentials: connection dot, Shell/Soren toggle, search. */}
+      {isMobile ? (
+        <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-zinc-800 px-2">
+          {statusDot}
+          {modeSwitcher(true)}
+          {searchButton}
         </div>
-        <div className="flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5 font-mono text-xs">
-          <button
-            type="button"
-            onClick={() => setTerminalMode('shell')}
-            className={cn(
-              'rounded px-2 py-0.5 transition-colors',
-              terminalMode === 'shell'
-                ? 'bg-zinc-700 text-zinc-100'
-                : 'text-zinc-400 hover:text-zinc-300'
-            )}
-          >
-            Shell
-          </button>
-          <button
-            type="button"
-            onClick={() => setTerminalMode('soren')}
-            className={cn(
-              'rounded px-2 py-0.5 transition-colors',
-              terminalMode === 'soren'
-                ? 'bg-zinc-700 text-zinc-100'
-                : 'text-zinc-400 hover:text-zinc-300'
-            )}
-          >
-            Soren session
-          </button>
-        </div>
-
-        {/* Font size + search (P5.7) */}
-        <div className="flex items-center gap-1">
-          <div className="flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
-            <button
-              type="button"
-              onClick={decreaseFontSize}
-              title="Decrease font size"
-              className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
-            >
-              <Minus className="h-3 w-3" />
-            </button>
-            <span className="w-6 text-center font-mono text-[10px] text-zinc-400">{fontSize}</span>
-            <button
-              type="button"
-              onClick={increaseFontSize}
-              title="Increase font size"
-              className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
-            >
-              <Plus className="h-3 w-3" />
-            </button>
+      ) : (
+        <div className="flex h-9 shrink-0 items-center justify-between border-b border-zinc-800 px-3">
+          <div className="flex items-center gap-2 font-mono text-xs text-zinc-400">
+            {statusDot}
+            <span>terminal</span>
+            <span className="text-zinc-400">
+              {terminalMode === 'shell' ? 'tmux: webterm' : 'live agent session'}
+            </span>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setSearchOpen(true);
-              requestAnimationFrame(() => searchInputRef.current?.focus());
-            }}
-            title="Search terminal (Ctrl+F)"
-            aria-pressed={searchOpen}
-            className={cn(
-              'rounded-md border border-zinc-800 bg-zinc-900 p-1',
-              searchOpen ? 'text-emerald-400' : 'text-zinc-400 hover:text-zinc-300'
-            )}
-          >
-            <Search className="h-3 w-3" />
-          </button>
+          {modeSwitcher(false)}
+
+          {/* Font size + search (P5.7) */}
+          <div className="flex items-center gap-1">
+            <div className="flex items-center gap-0.5 rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+              <button
+                type="button"
+                onClick={decreaseFontSize}
+                title="Decrease font size"
+                className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <Minus className="h-3 w-3" />
+              </button>
+              <span className="w-6 text-center font-mono text-[10px] text-zinc-400">{fontSize}</span>
+              <button
+                type="button"
+                onClick={increaseFontSize}
+                title="Increase font size"
+                className="rounded p-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-300"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            </div>
+            {searchButton}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* xterm mounts here; FitAddon sizes off this box, so keep it padding-free */}
       <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden" />
+
+      {/* Mobile on-screen key row — Ctrl+C/Esc/Tab/arrows aren't reachable
+          any other way from a phone's on-screen keyboard. Horizontally
+          scrollable as a safety net (it shouldn't need to scroll at
+          practical phone widths, but never clip a key if it somehow
+          doesn't fit rather than making it unreachable). Sits directly
+          above wherever the OS keyboard appears since it's the last flex
+          child in this column, right below the terminal content. */}
+      {isMobile && (
+        <div
+          className="flex shrink-0 items-center gap-1 overflow-x-auto border-t border-zinc-800 bg-zinc-900 px-2 py-1.5"
+          style={{ paddingBottom: 'max(0.375rem, env(safe-area-inset-bottom))' }}
+        >
+          {MOBILE_KEYS.map((key) => (
+            <button
+              key={key.label}
+              type="button"
+              title={key.title}
+              // Prevent the button's own focus from stealing it away from
+              // xterm's hidden input — that hidden input is what the OS
+              // keyboard is actually attached to, and losing focus there
+              // would dismiss the keyboard on every single tap.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => sendRaw(key.data)}
+              className="shrink-0 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-xs text-zinc-300 active:bg-zinc-800"
+            >
+              {key.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* In-terminal search bar (P5.7) — replaces the browser's native find
           while the terminal has focus (see attachCustomKeyEventHandler). */}
