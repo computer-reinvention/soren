@@ -74,6 +74,30 @@ else
     fail "skipped (recurring-issues not available)"
 fi
 
+# Test 5: code-health --json returns valid JSON with no stderr syntax errors
+echo ""
+echo "Test 5: code-health --json"
+stderr_file=$(mktemp)
+output=$(./tools/code-health --json 2>"$stderr_file") && rc=$? || rc=$?
+stderr_content=$(cat "$stderr_file")
+rm -f "$stderr_file"
+# rc=0 (clean) or rc=1 (issues found) are both valid
+if [[ $rc -le 1 ]]; then
+    if echo "$output" | python3 -c "import sys,json; json.load(sys.stdin)" 2>/dev/null; then
+        pass "code-health --json returns valid JSON (rc=$rc)"
+    else
+        fail "code-health --json returned invalid JSON: $output"
+    fi
+    # Ensure no "syntax error in expression" on stderr
+    if echo "$stderr_content" | grep -qi "syntax error"; then
+        fail "code-health --json has stderr syntax errors: $stderr_content"
+    else
+        pass "code-health --json has no stderr syntax errors"
+    fi
+else
+    fail "code-health --json unexpected exit code $rc"
+fi
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1

@@ -116,8 +116,12 @@ check_unused_imports() {
             [[ "$name" == _* ]] && continue
 
             # Count occurrences of this name in the file (excluding import lines)
+            # Use -h to suppress filenames if $file ever expands to multiple
+            # paths, and pipe through awk to collapse multi-line output into a
+            # single integer (summing counts).  Guarantees count is always a
+            # plain integer for the arithmetic test below.
             local count
-            count=$(grep -c "\b${name}\b" "$file" 2>/dev/null || echo "0")
+            count=$(grep -ch "\b${name}\b" "$file" 2>/dev/null | awk '{s+=$0} END{print s+0}')
 
             # If name appears only once (the import itself), it's unused
             if (( count <= 1 )); then
