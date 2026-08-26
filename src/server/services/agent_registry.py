@@ -401,8 +401,39 @@ class AgentRegistry:
             self._write_json_cache()
         return stale
 
+    def _latest_session_id(self, agent_id: str) -> Optional[str]:
+        """Most recent opencode session_id recorded for this agent in
+        agent_events, or None if it's never posted one (e.g. it slept
+        before its first PostToolUse/Stop event landed)."""
+        try:
+            row = self._conn.execute(
+                "SELECT session_id FROM agent_events WHERE agent_id = ? "
+                "AND session_id IS NOT NULL ORDER BY timestamp DESC LIMIT 1",
+                (agent_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            logger.warning(
+                "Could not query agent_events for %s's session_id", agent_id, exc_info=True
+            )
+            return None
+        return row[0] if row and row[0] else None
+
     def mark_sleeping(self, key: str):
-        """Mark an agent SLEEPING (used for unexpected window loss)."""
+        """Mark an agent SLEEPING (used for unexpected window loss).
+
+        Captures the agent's most recent opencode session_id from
+        agent_events before marking it sleeping, mirroring what
+        `tools/workers`' own ``cmd_sleep`` already does correctly. This is
+        the *other* path an agent gets put to sleep from — auto-sleep after
+        30 idle minutes, which kills the tmux window directly via
+        tmux_service and calls this method — and it was the one skipping
+        the capture step entirely, silently leaving ``session_id`` unset
+        and breaking ``workers wake`` (see AGENTS.md's documented sleep/
+        wake contract: "session IDs captured from plugin events; wake
+        resumes with --session <id>"). Confirmed against a live agent
+        where 4 of its sessions had no session_id persisted after an
+        auto-sleep for exactly this reason.
+        """
         row = self._conn.execute(
             "SELECT data FROM agents WHERE key = ?", (key,)
         ).fetchone()
@@ -417,6 +448,16 @@ class AgentRegistry:
         # Clear the opencode port: the window is gone, and a recycled port
         # must never route HTTP messages to a different agent later.
         entry.pop("oc_port", None)
+
+        session_id = self._latest_session_id(key)
+        if session_id:
+            entry["session_id"] = session_id
+        elif not entry.get("session_id"):
+            logger.warning(
+                "No session_id found in agent_events for '%s' at sleep time "
+                "-- wake will need a fresh spawn", key,
+            )
+
         with self._lock:
             self._conn.execute(
                 "UPDATE agents SET status = 'SLEEPING', data = ? WHERE key = ?",
