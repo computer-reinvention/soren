@@ -192,6 +192,17 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
   const preciseTime = format(messageDate, 'HH:mm:ss');
   const showToIndicator = !isUser && !(message.from_agent === 'supervisor' && (message.to_agent === 'user'));
 
+  // Bare messages (no badge row) render MessageActions as an absolute
+  // overlay in the top-right corner instead of inline, to stay visually
+  // quiet. On touch devices `can-hover:` doesn't apply (see
+  // tailwind.config.js), so that overlay is *permanently* visible rather
+  // than hover-revealed — without reserved space, short-wrapped text (e.g.
+  // a one-line user message on a narrow phone) renders directly underneath
+  // the icons. Reserve room on the content element whenever this overlay
+  // path is used so text never collides with it, on any viewport.
+  const hasBadgeRow = Boolean((!isUser && agentData) || prefixInfo || (collapseCount && collapseCount > 1));
+  const actionsOverlayClearance = hasBadgeRow ? '' : 'pr-20';
+
   return (
     <div className={cn('group relative flex gap-0 py-1 hover:bg-muted/20 transition-colors rounded-sm px-1 -mx-1')}>
       {/* Timestamp column - fixed width */}
@@ -234,7 +245,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
       {/* Content column */}
       <div className="flex-1 min-w-0">
         {/* Badges row — only render when there is visible static content */}
-        {((!isUser && agentData) || prefixInfo || (collapseCount && collapseCount > 1)) && (
+        {hasBadgeRow && (
           <div className="flex items-center gap-1.5 flex-wrap mb-0.5">
             {!isUser && agentData && (() => {
               const label = getAgentBadgeLabel(agentData);
@@ -267,8 +278,8 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
             />
           </div>
         )}
-        {/* Actions for user messages — absolutely positioned */}
-        {!(!isUser && agentData) && !prefixInfo && !(collapseCount && collapseCount > 1) && (
+        {/* Actions for bare messages (no badge row) — absolutely positioned */}
+        {!hasBadgeRow && (
           <div className="absolute top-1 right-1 opacity-100 can-hover:opacity-0 can-hover:group-hover:opacity-100 transition-opacity">
             <MessageActions content={message.content} isUser={isCurrentUser} />
           </div>
@@ -309,7 +320,8 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
         {isUser ? (
           <div className={cn(
             'text-sm whitespace-pre-wrap',
-            isCurrentUser && 'bg-primary/10 border border-primary/20 rounded px-3 py-2'
+            isCurrentUser && 'bg-primary/10 border border-primary/20 rounded px-3 py-2',
+            actionsOverlayClearance
           )}>
             {rawContent}
           </div>
@@ -320,6 +332,7 @@ function LogMessage({ message, toolCalls, thoughts, collapseCount, isUser, isCur
               className={cn(
                 'text-sm',
                 '[&_p]:mb-1 [&_p]:last:mb-0',
+                actionsOverlayClearance
               )}
             />
 

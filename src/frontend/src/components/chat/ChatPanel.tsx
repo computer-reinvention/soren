@@ -8,7 +8,8 @@ import { useProjectStore } from '@/stores/projectStore';
 import { useAgents } from '@/hooks/useAgents';
 import { useProjectAgents } from '@/hooks/useProjects';
 import { useChatKeyboard } from '@/hooks/useChatKeyboard';
-import { formatTokenCount } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-mobile';
+import { cn, formatTokenCount } from '@/lib/utils';
 import { PRICING } from '@/lib/pricing';
 import { ChatMessages } from './ChatMessages';
 import { ChatInput } from './ChatInput';
@@ -297,6 +298,7 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
 }
 
 function AgentCostLine({ agentId }: { agentId: string }) {
+  const isMobile = useIsMobile();
   const { data: budgetData } = useQuery({
     queryKey: ['budget'],
     queryFn: () => api.getBudget(),
@@ -321,7 +323,16 @@ function AgentCostLine({ agentId }: { agentId: string }) {
   const costStr = cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
 
   return (
-    <div className="text-center text-xs text-muted-foreground font-mono py-1">
+    <div
+      className={cn(
+        'text-center text-muted-foreground font-mono',
+        // Mobile stacks this directly above the bottom nav bar — kept
+        // present (budget visibility isn't cut), just visually quieter so
+        // it doesn't compete with the fixed nav for the same sliver of
+        // screen the conversation needs.
+        isMobile ? 'text-[10px] py-0.5' : 'text-xs py-1'
+      )}
+    >
       {agentId} · {costStr} · {formatTokenCount(totalTokens)} tok
     </div>
   );

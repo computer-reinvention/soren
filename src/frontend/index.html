@@ -5,7 +5,12 @@
     <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
     <link rel="apple-touch-icon" href="/icon-512.png" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- interactive-widget=resizes-content (Chromium/Android): the layout
+         viewport shrinks to the visible area when the on-screen keyboard
+         opens, instead of the keyboard overlaying fixed-position chrome
+         (the mobile bottom nav, chat input) without the page knowing.
+         Unsupported browsers ignore the token safely. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0b0d11" />
     <meta name="mobile-web-app-capable" content="yes" />

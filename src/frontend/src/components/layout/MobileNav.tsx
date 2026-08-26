@@ -28,7 +28,11 @@ export function MobileNav() {
   return (
     <nav
       aria-label="primary"
-      className="fixed bottom-0 left-0 right-0 z-40 flex h-14 items-stretch border-t border-border bg-background"
+      // min-h + pb (rather than a fixed h-14) so the safe-area inset grows
+      // the tap-target strip's bottom padding instead of squeezing content
+      // that's already centered inside it — clears the home indicator on
+      // notched phones instead of rendering underneath it.
+      className="fixed bottom-0 left-0 right-0 z-40 flex min-h-14 items-stretch border-t border-border bg-background pb-[env(safe-area-inset-bottom)]"
     >
       <button
         type="button"

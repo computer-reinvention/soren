@@ -31,6 +31,7 @@ import { cn } from '@/lib/utils';
 import { useAgentStore } from '@/stores/agentStore';
 import { useMessages } from '@/hooks/useMessages';
 import { useHealthCheck } from '@/hooks/useHealthCheck';
+import { useIsMobile } from '@/hooks/use-mobile';
 import type { Agent } from '@/types/agent';
 
 interface ChatHeaderProps {
@@ -108,6 +109,7 @@ export function ChatHeader({
   const { total: totalMessagesCount } = useMessages();
   const { data: healthData } = useHealthCheck();
   const isHealthDegraded = healthData?.status === 'degraded';
+  const isMobile = useIsMobile();
 
   const isCommandCenter = !agentId;
 
@@ -153,10 +155,18 @@ export function ChatHeader({
     : summaryParts.join(' · ');
 
   return (
-    <div className="px-4 pt-4 pb-2 border-b flex items-center justify-between gap-4">
+    <div
+      className={cn(
+        'border-b flex items-center justify-between',
+        // Mobile: tighter padding buys back real vertical space for the
+        // conversation itself — this bar plus the bottom nav plus the
+        // input are all competing for a ~700px viewport.
+        isMobile ? 'px-3 py-2 gap-2' : 'px-4 pt-4 pb-2 gap-4'
+      )}
+    >
       <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold truncate">
+        <div className={cn('flex items-center', isMobile ? 'gap-1.5' : 'gap-2')}>
+          <h2 className={cn('font-semibold truncate', isMobile ? 'text-sm' : 'text-lg')}>
             {title}
             {agentId && agent?.display_name && agent.display_name !== agent.name && (
               <span className="ml-2 text-xs font-normal text-muted-foreground dark:text-muted-foreground/80">{agent.name}</span>
@@ -215,9 +225,14 @@ export function ChatHeader({
             </>
           )}
         </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>{subtitle}</span>
-          {isPermanent && (agent?.reset_count || agent?.tasks_since_reset) ? (
+        <div className={cn('flex items-center gap-2 text-muted-foreground', isMobile ? 'text-[11px]' : 'text-xs')}>
+          <span className="truncate">{subtitle}</span>
+          {/* Reset/task counters and last-activity time are secondary
+              detail already surfaced on Overview and the sidebar agent
+              row — dropped here on mobile so the header stays one line
+              instead of wrapping and eating the vertical space a phone
+              chat view needs for the actual conversation. */}
+          {!isMobile && isPermanent && (agent?.reset_count || agent?.tasks_since_reset) ? (
             <>
               <span className="text-muted-foreground dark:text-muted-foreground/80">|</span>
               <span>
@@ -227,7 +242,7 @@ export function ChatHeader({
               </span>
             </>
           ) : null}
-          {lastActivityDate && (
+          {!isMobile && lastActivityDate && (
             <>
               <span className="text-muted-foreground dark:text-muted-foreground/80">|</span>
               <Tooltip>
@@ -246,7 +261,7 @@ export function ChatHeader({
       </div>
 
       {/* Right side - connection status and actions */}
-      <div className="flex items-center gap-2">
+      <div className={cn('flex items-center', isMobile ? 'gap-0.5' : 'gap-2')}>
         {/* Chat / live tool-call log toggle — agent pages only (P3.4) */}
         {agentId && onToggleView && (
           <Tooltip>
