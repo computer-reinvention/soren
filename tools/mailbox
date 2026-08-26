@@ -322,6 +322,35 @@ cmd_read() {
     done
 }
 
+# Resolve a (possibly-partial) message id against real messages actually
+# in the mailbox — dies on no match or an ambiguous prefix rather than
+# silently accepting whatever string was typed. A real *message* is any
+# JSONL line with a "subject" key (send/quick); status_update records
+# reference a message's id but aren't messages themselves, so they're
+# excluded from the match set (mirrors tools/backlog's resolve_id, which
+# error()s the same way on a bad/ambiguous id instead of writing a
+# dangling record).
+resolve_message_id() {
+    local partial="$1"
+    [[ -f "$SOREN_MAILBOX" ]] || die "message not found: ${partial} (mailbox is empty)"
+
+    local matches
+    matches=$(jq -r --arg p "$partial" \
+        'select(has("subject")) | select(.id | startswith($p)) | .id' \
+        "$SOREN_MAILBOX" 2>/dev/null | sort -u)
+
+    if [[ -z "$matches" ]]; then
+        die "message not found: ${partial}"
+    fi
+    local count
+    count=$(echo "$matches" | wc -l | tr -d ' ')
+    if [[ "$count" -eq 1 ]]; then
+        echo "$matches"
+    else
+        die "ambiguous message id '${partial}' — matches ${count} messages. Use more characters."
+    fi
+}
+
 cmd_update() {
     local msg_id="${1:-}"
     local new_status="${2:-}"
@@ -333,13 +362,28 @@ cmd_update() {
         die "invalid status: $new_status (valid: $VALID_STATUSES)"
     fi
 
+    # Resolve to the real, full message id first — an unknown or ambiguous
+    # id must fail loudly here rather than writing a dangling status_update
+    # record that matches nothing (silent no-op that used to leave
+    # autonomy-check counting the target as permanently unread). Checked
+    # explicitly rather than relying on `set -e` propagating through the
+    # assignment: die() calls `exit 1` inside resolve_message_id, but that
+    # only terminates the $(...) subshell it runs in -- without this
+    # explicit check, a failed resolution would silently fall through with
+    # resolved_id empty and this function would keep going regardless of
+    # the caller's shell options.
+    local resolved_id
+    if ! resolved_id=$(resolve_message_id "$msg_id"); then
+        exit 1
+    fi
+
     local from=$(get_from_address)
     local ts
     ts=$(date -Iseconds)
 
     # Append a status update record to the mailbox
     local update_line
-    update_line=$(jq -cn --arg id "$msg_id" --arg ts "$ts" --arg from "$from" \
+    update_line=$(jq -cn --arg id "$resolved_id" --arg ts "$ts" --arg from "$from" \
         --arg status "$new_status" \
         '{type: "status_update", id: $id, ts: $ts, from: $from, status: $status}')
 
@@ -349,12 +393,12 @@ cmd_update() {
     mailbox_unlock
 
     # Also update via API if server is running
-    curl -sf -X PATCH "http://localhost:${SOREN_PORT}/api/messages/${msg_id}/status" \
+    curl -sf -X PATCH "http://localhost:${SOREN_PORT}/api/messages/${resolved_id}/status" \
         -H "Content-Type: application/json" \
         -d "{\"status\": \"$new_status\"}" \
         >/dev/null 2>&1 || true
 
-    ok "Updated $msg_id -> $new_status"
+    ok "Updated $resolved_id -> $new_status"
 }
 
 cmd_help() {
@@ -449,4 +493,9 @@ main() {
     esac
 }
 
-main "$@"
+# Guard against running main() when this script is sourced (e.g. by
+# tests/test_mailbox.sh to exercise resolve_message_id/cmd_update
+# directly) rather than executed directly.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
