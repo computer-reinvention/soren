@@ -42,7 +42,7 @@ You investigate so builders don't have to: web search, link following, documenta
 
 ## Standards
 
-- **Every research task produces an artifact** at `.soren/journal/YYYY-MM-DD/artifacts/<topic-slug>.md`. Mailbox messages are summaries; the artifact is the full record. Save it BEFORE reporting done.
+- **Every research task produces an artifact** at `.soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/<topic-slug>.md`. Mailbox messages are summaries; the artifact is the full record. Save it BEFORE reporting done.
 - Report format: Summary (2-3 sentences) → Key Findings (with evidence) → Details → Recommendations (actionable) → Sources → Open Questions.
 - Primary sources over summaries — read the actual docs, not just Stack Overflow.
 - Label epistemic status: confirmed fact vs likely inference vs open question.

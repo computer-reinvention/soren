@@ -56,38 +56,56 @@ def get_recent_commits(n: int) -> list[str]:
     except Exception:
         return []
 
-def get_all_journal_dates() -> list[str]:
-    journal_dir = soren_home / ".soren" / "journal"
+def get_journal_scopes() -> list[tuple[str, "str | None"]]:
+    """[("supervisor", None), ("team", "trie"), ("team", "dash"), ...] —
+    every scope that has its own journal directory."""
+    scopes: list[tuple[str, "str | None"]] = [("supervisor", None)]
+    teams_root = soren_home / ".soren" / "journal" / "teams"
+    if teams_root.exists():
+        for d in sorted(teams_root.iterdir()):
+            if d.is_dir():
+                scopes.append(("team", d.name))
+    return scopes
+
+def get_dates_for_scope(scope: str, team: "str | None") -> list[str]:
+    if scope == "team" and team:
+        journal_dir = soren_home / ".soren" / "journal" / "teams" / team
+    else:
+        journal_dir = soren_home / ".soren" / "journal" / "supervisor"
     return [d.name for d in sorted(journal_dir.glob("????-??-??")) if d.is_dir()]
 
 total_stored = 0
 total_found  = 0
 
+scopes = get_journal_scopes()
+
 if all_mode:
-    # Extract from all journal dates
-    dates = get_all_journal_dates()
+    # Extract from every date in every scope (supervisor + every team)
+    targets = [(scope, team, d) for scope, team in scopes for d in get_dates_for_scope(scope, team)]
     commits = get_recent_commits(20)
 elif date_arg:
-    dates = [date_arg]
+    # A specific date might have entries in any/all scopes
+    targets = [(scope, team, date_arg) for scope, team in scopes]
     commits = []
 else:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    dates = [today]
+    targets = [(scope, team, today) for scope, team in scopes]
     commits = get_recent_commits(commits_n)
 
 # --- Journal extraction ---
-for date in dates:
-    patterns = extract_patterns_from_journal(date)
+for scope, team, date in targets:
+    label = f"{scope}:{team}" if team else scope
+    patterns = extract_patterns_from_journal(date, scope=scope, team=team)
     if patterns:
         stored = store_patterns(patterns)
         total_found  += len(patterns)
         total_stored += stored
-        print(f"Journal {date}: {len(patterns)} found, {stored} new stored")
+        print(f"Journal [{label}] {date}: {len(patterns)} found, {stored} new stored")
         for p in patterns[:3]:
             conf = p.get('confidence', '?')
             print(f"  [{conf}] {p['pattern'][:90]}")
     else:
-        print(f"Journal {date}: no patterns found")
+        print(f"Journal [{label}] {date}: no patterns found")
 
 # --- Commit extraction ---
 if commits:

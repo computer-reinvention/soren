@@ -1,8 +1,8 @@
 import { useRecurringIssues } from '@/hooks/useJournal';
 import { AlertTriangle } from 'lucide-react';
 
-export function RecurringIssuesTable() {
-  const { data, isLoading } = useRecurringIssues();
+export function RecurringIssuesTable({ team }: { team?: string } = {}) {
+  const { data, isLoading } = useRecurringIssues(team);
 
   if (isLoading) {
     return <div className="text-xs text-muted-foreground py-2 text-center">Loading...</div>;

@@ -10,14 +10,33 @@ class JournalEntry(BaseModel):
     content: str
     timestamp: datetime = Field(default_factory=lambda: datetime.now().astimezone())
     project_id: Optional[str] = None
+    scope: str = "supervisor"
+    team: Optional[str] = None
 
 
 class JournalEntryCreate(BaseModel):
-    """Request to create a journal entry."""
+    """Request to create a journal entry.
+
+    scope/team: which journal this entry is written to. "supervisor" (the
+    default, and the only scope that existed before this field was added)
+    is the single global journal; "team" requires `team` to be set to a
+    real `teams` table prefix and writes into that team's own, isolated
+    journal. There is deliberately no cross-scope write — a caller either
+    targets their own scope or the supervisor's.
+
+    tags: previously accepted by real callers (AGENTS.md's own journaling
+    snippet, monitor.sh's daily digest) but silently dropped since this
+    model had no such field. Now recorded as a visible "Tags:" line in the
+    entry body rather than lost -- there's no structured tag-query system
+    built on top of this yet, just no-longer-silent data loss.
+    """
 
     title: str
     content: str
     project_id: Optional[str] = None
+    scope: str = "supervisor"
+    team: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class JournalDay(BaseModel):

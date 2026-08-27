@@ -28,7 +28,7 @@ Generate a PDF post-mortem report for any commit that was reverted, failed, or c
 
 ## Output
 
-- Default location: `.soren/journal/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf`
+- Default location: `.soren/journal/supervisor/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf`
 - Contains 7 sections: summary, revert status, files changed, agent activity, diff, root cause analysis, timeline
 
 ## Tips

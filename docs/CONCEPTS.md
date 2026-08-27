@@ -231,15 +231,28 @@ The journal is SOREN's persistent memory across sessions and context compactions
 
 ### Structure
 
+Journal storage is split into isolated scopes: a single global supervisor
+journal, and one private journal per team. Every agent's `journal log`/`note`/
+`decision`/`read` commands transparently target their own scope — their
+team's journal if they're on one, the supervisor's otherwise — with no way
+to browse another team's journal from an agent-facing tool.
+
 ```
 .soren/journal/
-├── 2026-01-28/
-│   ├── journal.md           # Main journal entries
-│   ├── rollback-143022.md   # Auto-generated on rollback
-│   └── artifacts/           # Diagrams, generated files
-└── 2026-01-29/
-    ├── journal.md
-    └── artifacts/
+├── supervisor/               # the single global journal
+│   ├── 2026-01-28/
+│   │   ├── journal.md           # Main journal entries
+│   │   ├── rollback-143022.md   # Auto-generated on rollback
+│   │   └── artifacts/           # Diagrams, generated files
+│   └── 2026-01-29/
+│       ├── journal.md
+│       └── artifacts/
+├── teams/                    # one isolated journal per team
+│   └── <team-prefix>/
+│       └── 2026-01-29/
+│           ├── journal.md
+│           └── artifacts/
+└── 2026-01-29/attachments/   # mailbox/webhook/log-alert files, unscoped
 ```
 
 ### What Goes in the Journal

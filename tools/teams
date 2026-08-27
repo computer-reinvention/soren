@@ -275,11 +275,11 @@ build_worker_task() {
             case "$suffix" in
                 defender)
                     other_name="${prefix}-critic"
-                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Defender in debate team '${prefix}'. Your opponent: ${other_name}. Write proposals to .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: ${task}"
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Defender in debate team '${prefix}'. Your opponent: ${other_name}. Write proposals to .soren/journal/teams/${prefix}/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: ${task}"
                     ;;
                 critic)
                     other_name="${prefix}-defender"
-                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Critic in debate team '${prefix}'. Your opponent: ${other_name}. Read proposals from .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: Critique the Defender's proposal for: ${task}"
+                    echo "Read ${SOREN_HOME}/${role_template} for your role. You are the Critic in debate team '${prefix}'. Your opponent: ${other_name}. Read proposals from .soren/journal/teams/${prefix}/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/. Your task: Critique the Defender's proposal for: ${task}"
                     ;;
             esac
             ;;
@@ -369,7 +369,7 @@ cmd_setup() {
 
     # Create debate artifacts directory if needed
     if [[ "$template" == "DEBATE_PAIR" ]]; then
-        mkdir -p "${SOREN_HOME}/.soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate"
+        mkdir -p "${SOREN_HOME}/.soren/journal/teams/${prefix}/$(date +%Y-%m-%d)/artifacts/${prefix}-debate"
     fi
 
     # All agents run on opus (Opus 4.6 only constraint)
@@ -425,6 +425,7 @@ cmd_setup() {
         fi
     done <<< "$roles"
     echo ""
+    echo "  Journal: .soren/journal/teams/${prefix}/ (private to this team)"
 
     local lead
     lead=$(get_lead_suffix "$template")
@@ -434,7 +435,7 @@ cmd_setup() {
     elif [[ "$template" == "TIGER_TEAM" ]]; then
         echo "  Flat team — no lead. Workers coordinate directly."
     elif [[ "$template" == "DEBATE_PAIR" ]]; then
-        echo "  Defender starts. Artifacts: .soren/journal/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/"
+        echo "  Defender starts. Artifacts: .soren/journal/teams/${prefix}/$(date +%Y-%m-%d)/artifacts/${prefix}-debate/"
     fi
     echo ""
 }
@@ -985,6 +986,7 @@ cmd_setup_permanent() {
         fi
     done <<< "$roles"
     echo ""
+    echo "  Journal: .soren/journal/teams/${prefix}/ (private to this team)"
 
     if [[ -n "$lead_name" ]]; then
         echo "  Lead: ${lead_name}"

@@ -35,13 +35,13 @@ You are a **RESEARCHER** on a feature development team. Your job is to investiga
 2. Explore the target: codebase, docs, web resources
 3. Take notes as you go (journal log entries)
 4. Synthesize findings into a report
-5. Save report to .soren/journal/YYYY-MM-DD/artifacts/<topic-slug>.md
+5. Save report to .soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/<topic-slug>.md
 6. Report: [DONE] with summary and artifact path
 ```
 
 ## Research Report Format
 
-Save reports to `.soren/journal/YYYY-MM-DD/artifacts/` with descriptive filenames.
+Save reports to your team's own artifacts dir (`.soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/`) with descriptive filenames.
 
 ```markdown
 # Research: <topic>
@@ -75,13 +75,13 @@ Save reports to `.soren/journal/YYYY-MM-DD/artifacts/` with descriptive filename
 ```bash
 ./tools/mailbox status "Researching authentication patterns for the auth feature"
 ./tools/mailbox status "Found 3 approaches — writing comparison report"
-./tools/mailbox done "Research complete. Report: .soren/journal/2026-02-21/artifacts/auth-patterns.md"
+./tools/mailbox done "Research complete. Report: .soren/journal/teams/<prefix>/2026-02-21/artifacts/auth-patterns.md"
 ```
 
 ### With Teammates
 ```bash
 # Share findings with backend worker
-./tools/mailbox send worker-backend "Auth Research" "JWT with refresh tokens recommended over session-based. See report: .soren/journal/.../artifacts/auth-patterns.md"
+./tools/mailbox send worker-backend "Auth Research" "JWT with refresh tokens recommended over session-based. See report: .soren/journal/teams/<prefix>/.../artifacts/auth-patterns.md"
 ```
 
 ## Key Tools
@@ -99,7 +99,7 @@ When reporting [DONE], include:
 
 ```
 [DONE] Research on <topic> complete
-Artifact: .soren/journal/YYYY-MM-DD/artifacts/<slug>.md
+Artifact: .soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/<slug>.md
 
 Key findings:
 1. <top finding>

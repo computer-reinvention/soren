@@ -141,9 +141,10 @@ const steps: OnboardingStep[] = [
           what was tried before and can make informed decisions.
         </p>
         <pre className="rounded border border-border/60 bg-muted/30 p-3 text-xs font-mono text-muted-foreground overflow-x-auto">
-{`.soren/journal/YYYY-MM-DD/
-  journal.md      daily entries
-  attachments/    screenshots, logs`}
+{`.soren/journal/
+  supervisor/YYYY-MM-DD/    global journal
+  teams/<prefix>/YYYY-MM-DD/  each team's own
+  YYYY-MM-DD/attachments/   screenshots, logs`}
         </pre>
       </div>
     ),

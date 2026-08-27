@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { cn } from '@/lib/utils';
-import { ChevronRight, Calendar, FileText, BookOpen } from 'lucide-react';
+import { ChevronRight, Calendar, FileText, BookOpen, Users } from 'lucide-react';
 import {
   Collapsible,
   CollapsibleContent,
@@ -13,6 +13,13 @@ interface JournalTreeProps {
   onFileSelect?: (item: FileTreeItem) => void;
   selectedPath?: string;
 }
+
+// Journal storage is split into supervisor/ (the single global journal)
+// and teams/<prefix>/ (one isolated journal per team) — plus any leftover
+// flat YYYY-MM-DD/ directories that hold only attachments/ (mailbox
+// messages, log alerts, screenshots — never scoped, see JournalService's
+// docstring). This tree mirrors that: a "Supervisor" group, a "Teams"
+// group (one nested group per team), then any remaining flat date folders.
 
 interface MonthGroup {
   key: string; // e.g., "2026-02"
@@ -61,53 +68,86 @@ function formatDateLabel(name: string): string {
   return `${dayName} ${dayNum}`;
 }
 
+// Group a folder's date-named children (YYYY-MM-DD) by month, most recent
+// first. Shared by the supervisor scope, each team scope, and the legacy
+// flat date folders left directly under .soren/journal/ (attachments-only).
+function groupDatesByMonth(children: FileTreeItem[] | undefined): MonthGroup[] {
+  if (!children) return [];
+
+  const dateFolders = children.filter(
+    item => item.type === 'directory' && parseDate(item.name)
+  );
+
+  const groups = new Map<string, FileTreeItem[]>();
+  for (const folder of dateFolders) {
+    const monthKey = getMonthKey(folder.name);
+    if (!groups.has(monthKey)) {
+      groups.set(monthKey, []);
+    }
+    groups.get(monthKey)!.push(folder);
+  }
+
+  for (const [, dates] of groups) {
+    dates.sort((a, b) => b.name.localeCompare(a.name));
+  }
+
+  return Array.from(groups.entries())
+    .sort((a, b) => b[0].localeCompare(a[0]))
+    .map(([key, dates]) => ({
+      key,
+      label: formatMonthLabel(key),
+      dates,
+    }));
+}
+
 export function JournalTree({ journalFolder, onFileSelect, selectedPath }: JournalTreeProps) {
   const today = getTodayString();
-  const currentMonthKey = today.substring(0, 7); // YYYY-MM
 
-  // Group dates by month, sorted in reverse chronological order
-  const monthGroups = useMemo((): MonthGroup[] => {
-    if (!journalFolder.children) return [];
+  const supervisorFolder = useMemo(
+    () => journalFolder.children?.find(item => item.type === 'directory' && item.name === 'supervisor'),
+    [journalFolder.children]
+  );
+  const teamsFolder = useMemo(
+    () => journalFolder.children?.find(item => item.type === 'directory' && item.name === 'teams'),
+    [journalFolder.children]
+  );
 
-    // Filter to only date directories (YYYY-MM-DD format)
-    const dateFolders = journalFolder.children.filter(
-      item => item.type === 'directory' && parseDate(item.name)
-    );
+  const supervisorMonthGroups = useMemo(
+    () => groupDatesByMonth(supervisorFolder?.children),
+    [supervisorFolder]
+  );
 
-    // Group by month
-    const groups = new Map<string, FileTreeItem[]>();
-    for (const folder of dateFolders) {
-      const monthKey = getMonthKey(folder.name);
-      if (!groups.has(monthKey)) {
-        groups.set(monthKey, []);
-      }
-      groups.get(monthKey)!.push(folder);
-    }
+  const teamFolders = useMemo(
+    () => (teamsFolder?.children ?? []).filter(item => item.type === 'directory'),
+    [teamsFolder]
+  );
 
-    // Sort dates within each group (most recent first)
-    for (const [, dates] of groups) {
-      dates.sort((a, b) => b.name.localeCompare(a.name));
-    }
+  // Legacy flat date folders directly under .soren/journal/ — these hold
+  // only attachments/ now (journal.md and artifacts/ moved into
+  // supervisor/), not real journal content, but still worth surfacing.
+  const legacyMonthGroups = useMemo(
+    () => groupDatesByMonth(journalFolder.children),
+    [journalFolder.children]
+  );
 
-    // Convert to array and sort by month (most recent first)
-    return Array.from(groups.entries())
-      .sort((a, b) => b[0].localeCompare(a[0]))
-      .map(([key, dates]) => ({
-        key,
-        label: formatMonthLabel(key),
-        dates,
-      }));
-  }, [journalFolder.children]);
-
-  // Handle non-date items (like attachments folder at root level)
+  // Anything else at the root that isn't supervisor/, teams/, or a date folder.
   const otherItems = useMemo(() => {
     if (!journalFolder.children) return [];
     return journalFolder.children.filter(
-      item => item.type !== 'directory' || !parseDate(item.name)
+      item =>
+        item !== supervisorFolder &&
+        item !== teamsFolder &&
+        (item.type !== 'directory' || !parseDate(item.name))
     );
-  }, [journalFolder.children]);
+  }, [journalFolder.children, supervisorFolder, teamsFolder]);
 
-  if (monthGroups.length === 0 && otherItems.length === 0) {
+  const isEmpty =
+    supervisorMonthGroups.length === 0 &&
+    teamFolders.length === 0 &&
+    legacyMonthGroups.length === 0 &&
+    otherItems.length === 0;
+
+  if (isEmpty) {
     return (
       <div className="px-3 py-2 text-xs text-muted-foreground">
         No journal entries yet
@@ -117,19 +157,29 @@ export function JournalTree({ journalFolder, onFileSelect, selectedPath }: Journ
 
   return (
     <div className="space-y-0.5">
-      {/* Month groups */}
-      {monthGroups.map((group) => (
+      {/* Supervisor scope — the single global journal */}
+      {supervisorMonthGroups.length > 0 && (
+        <ScopeGroup label="Supervisor" today={today} monthGroups={supervisorMonthGroups} onFileSelect={onFileSelect} selectedPath={selectedPath} />
+      )}
+
+      {/* Team scopes — one isolated journal per team, nested under an umbrella */}
+      {teamFolders.length > 0 && (
+        <TeamsUmbrella teamFolders={teamFolders} today={today} onFileSelect={onFileSelect} selectedPath={selectedPath} />
+      )}
+
+      {/* Legacy flat date folders (attachments-only, unscoped) */}
+      {legacyMonthGroups.map((group) => (
         <MonthGroupItem
           key={group.key}
           group={group}
-          isCurrentMonth={group.key === currentMonthKey}
+          isCurrentMonth={false}
           today={today}
           onFileSelect={onFileSelect}
           selectedPath={selectedPath}
         />
       ))}
 
-      {/* Other items (non-date folders or files) */}
+      {/* Other items at the root */}
       {otherItems.map((item) => (
         <JournalFileItem
           key={item.path}
@@ -140,6 +190,153 @@ export function JournalTree({ journalFolder, onFileSelect, selectedPath }: Journ
         />
       ))}
     </div>
+  );
+}
+
+interface ScopeGroupProps {
+  label: string;
+  today: string;
+  monthGroups: MonthGroup[];
+  onFileSelect?: (item: FileTreeItem) => void;
+  selectedPath?: string;
+}
+
+// A top-level scope (Supervisor, or a team) — one collapsible containing
+// that scope's own month/date breakdown.
+function ScopeGroup({ label, today, monthGroups, onFileSelect, selectedPath }: ScopeGroupProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const currentMonthKey = today.substring(0, 7);
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          className={cn(
+            'w-full flex items-center gap-1.5 px-2 py-1 text-sm rounded-md transition-colors text-left font-medium',
+            'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          )}
+        >
+          <ChevronRight
+            className={cn(
+              'h-3.5 w-3.5 text-muted-foreground transition-transform flex-shrink-0',
+              isOpen && 'rotate-90'
+            )}
+          />
+          <span className="truncate flex-1">{label}</span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="ml-2">
+        {monthGroups.map((group) => (
+          <MonthGroupItem
+            key={group.key}
+            group={group}
+            isCurrentMonth={group.key === currentMonthKey}
+            today={today}
+            onFileSelect={onFileSelect}
+            selectedPath={selectedPath}
+          />
+        ))}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+interface TeamsUmbrellaProps {
+  teamFolders: FileTreeItem[];
+  today: string;
+  onFileSelect?: (item: FileTreeItem) => void;
+  selectedPath?: string;
+}
+
+// Wraps every team's own group under one "Teams" heading — each team's
+// journal underneath is still fully isolated, this is just a visual
+// grouping so the sidebar scales past a handful of teams.
+function TeamsUmbrella({ teamFolders, today, onFileSelect, selectedPath }: TeamsUmbrellaProps) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          className={cn(
+            'w-full flex items-center gap-1.5 px-2 py-1 text-sm rounded-md transition-colors text-left font-medium',
+            'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          )}
+        >
+          <ChevronRight
+            className={cn(
+              'h-3.5 w-3.5 text-muted-foreground transition-transform flex-shrink-0',
+              isOpen && 'rotate-90'
+            )}
+          />
+          <span className="truncate flex-1">Teams</span>
+          <span className="text-xs text-muted-foreground">{teamFolders.length}</span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="ml-2">
+        {teamFolders.map((team) => (
+          <TeamGroup
+            key={team.path}
+            team={team}
+            today={today}
+            onFileSelect={onFileSelect}
+            selectedPath={selectedPath}
+          />
+        ))}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+interface TeamGroupProps {
+  team: FileTreeItem;
+  today: string;
+  onFileSelect?: (item: FileTreeItem) => void;
+  selectedPath?: string;
+}
+
+// One team's own journal, nested under the "Teams" umbrella.
+function TeamGroup({ team, today, onFileSelect, selectedPath }: TeamGroupProps) {
+  const monthGroups = useMemo(() => groupDatesByMonth(team.children), [team.children]);
+  const [isOpen, setIsOpen] = useState(false);
+  const currentMonthKey = today.substring(0, 7);
+
+  return (
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          className={cn(
+            'w-full flex items-center gap-1.5 pl-4 pr-2 py-1 text-sm rounded-md transition-colors text-left',
+            'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+          )}
+        >
+          <ChevronRight
+            className={cn(
+              'h-3 w-3 text-muted-foreground transition-transform flex-shrink-0',
+              isOpen && 'rotate-90'
+            )}
+          />
+          <Users className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+          <span className="truncate flex-1">{team.name}</span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="ml-2">
+        {monthGroups.length === 0 ? (
+          <div className="pl-8 py-1 text-xs text-muted-foreground">No entries yet</div>
+        ) : (
+          monthGroups.map((group) => (
+            <MonthGroupItem
+              key={group.key}
+              group={group}
+              isCurrentMonth={group.key === currentMonthKey}
+              today={today}
+              onFileSelect={onFileSelect}
+              selectedPath={selectedPath}
+            />
+          ))
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

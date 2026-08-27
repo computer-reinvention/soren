@@ -51,6 +51,17 @@ The `--name` prefix is used for worker naming (e.g., `auth-squad-lead`, `auth-ba
 | `TIGER_TEAM` | 3 (flat peers, no lead) | Urgent fixes, production incidents |
 | `DEBATE_PAIR` | 2 (defender + critic) | Design decisions with tradeoffs |
 
+## Every Team Gets Its Own Journal
+
+`setup` registers the team in the `teams` table, which is also what gives
+it a private journal at `.soren/journal/teams/<prefix>/` — every member's
+`./tools/journal log`/`note`/`decision`/`read` calls automatically land
+there instead of the supervisor's global journal, with no extra
+configuration needed on their end (see the `journal` skill). This is
+private working memory for that team, isolated from every other team's —
+there is no built-in way for one team to browse another's journal, by
+design.
+
 ## Examples
 
 ### Spawn a squad for a feature
@@ -72,7 +83,7 @@ The `--name` prefix is used for worker naming (e.g., `auth-squad-lead`, `auth-ba
 ```bash
 ./tools/teams setup DEBATE_PAIR "Design the caching architecture" --name cache
 # Spawns: cache-defender, cache-critic
-# Artifacts go to .soren/journal/YYYY-MM-DD/artifacts/cache-debate/
+# Artifacts go to .soren/journal/teams/cache/YYYY-MM-DD/artifacts/cache-debate/
 ```
 
 ### Monitor and tear down

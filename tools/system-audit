@@ -5,7 +5,7 @@
 # Flags:
 #   --quick   Core checks only (health, daemons, budget, server)
 #   --json    Machine-readable JSON output
-#   --save    Write results to .soren/journal/YYYY-MM-DD/artifacts/system-audit.json
+#   --save    Write results to .soren/journal/supervisor/YYYY-MM-DD/artifacts/system-audit.json
 #   --full    Include expensive checks (test suite, frontend typecheck)
 #
 # Exit codes: 0 = all healthy, 1 = any broken, 2 = only degraded
@@ -480,7 +480,8 @@ fi
 # Save to journal artifacts
 if [[ "$SAVE" == "true" ]]; then
     local_date=$(date +%Y-%m-%d)
-    artifact_dir=".soren/journal/${local_date}/artifacts"
+    # System audits are supervisor-level oversight, not team-scoped.
+    artifact_dir=".soren/journal/supervisor/${local_date}/artifacts"
     mkdir -p "$artifact_dir"
     echo "$FINAL_JSON" > "${artifact_dir}/system-audit.json"
     echo "(saved to ${artifact_dir}/system-audit.json)" >&2

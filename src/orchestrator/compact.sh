@@ -249,9 +249,17 @@ compact_agent() {
     if $compaction_ok; then
         sleep "$RECOVERY_DELAY"
 
-        local today
-        today=$(date +%Y-%m-%d)
-        local recovery_msg="You were just compacted. Read your recovery context from .soren/journal/${today}/artifacts/compaction-${window}-*.json (most recent one). Also check your conversation history via GET /api/agents/${window}/history if anything is unclear."
+        # Use the exact path pre-compact.sh actually wrote to (it resolves
+        # to the agent's own journal scope -- team vs supervisor -- so
+        # reconstructing a guessed path here would go stale the moment that
+        # resolution differs from a hardcoded assumption). Fall back to a
+        # scope-agnostic hint if the hook didn't produce one.
+        local recovery_msg
+        if [[ -n "$artifact_file" ]]; then
+            recovery_msg="You were just compacted. Read your recovery context from ${artifact_file#${PROJECT_ROOT}/}. Also check your conversation history via GET /api/agents/${window}/history if anything is unclear."
+        else
+            recovery_msg="You were just compacted. Also check your conversation history via GET /api/agents/${window}/history if anything is unclear."
+        fi
 
         if tmux_safe_send "$session" "$window" "$recovery_msg" --retry 3; then
             log_status "COMPACT" "Injected recovery message for ${window}"

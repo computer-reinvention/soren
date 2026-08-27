@@ -4,7 +4,7 @@
 #
 # Usage: session-snapshot
 #
-# Saves to .soren/journal/YYYY-MM-DD/session-snapshot.json (overwrites).
+# Saves to .soren/journal/supervisor/YYYY-MM-DD/session-snapshot.json (overwrites).
 # A new supervisor can read this JSON first for instant orientation.
 # Designed to complete in <10s.
 #===============================================================================
@@ -28,7 +28,8 @@ die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
 
 TODAY=$(date +%Y-%m-%d)
-OUTDIR="$SOREN_HOME/.soren/journal/$TODAY"
+# Supervisor-level orientation snapshot -- not team-scoped.
+OUTDIR="$SOREN_HOME/.soren/journal/supervisor/$TODAY"
 OUTFILE="$OUTDIR/session-snapshot.json"
 mkdir -p "$OUTDIR"
 

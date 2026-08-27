@@ -52,7 +52,7 @@ git stash list                                  # find the soren-auto-rollback-<
 git stash apply stash@{N}
 ```
 
-If no rescue branch could be created, the reflog is the only recovery path (`git reflog`). Rollback context is also journaled: `.soren/journal/<date>/rollback-*.md`.
+If no rescue branch could be created, the reflog is the only recovery path (`git reflog`). Rollback context is also journaled: `.soren/journal/supervisor/<date>/rollback-*.md`.
 
 ## Circuit Breaker
 

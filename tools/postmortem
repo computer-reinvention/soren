@@ -14,7 +14,7 @@
 #   - Chronological timeline
 #   - Root cause analysis template
 #
-# Output: .soren/journal/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
+# Output: .soren/journal/supervisor/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
 #===============================================================================
 
 set -euo pipefail
@@ -48,7 +48,7 @@ EXAMPLES:
     postmortem abc1234 -o /tmp/report.pdf
 
 OUTPUT:
-    Default: .soren/journal/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
+    Default: .soren/journal/supervisor/YYYY-MM-DD/artifacts/postmortem-<hash>.pdf
 
 ENVIRONMENT:
     SOREN_HOME    Project root (default: git rev-parse --show-toplevel)

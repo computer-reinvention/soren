@@ -22,17 +22,36 @@ from ..services.journal import journal_service
 router = APIRouter()
 
 
+def _validate_scope(scope: str, team: Optional[str]) -> None:
+    """Shared validation for the scope/team pair every journal endpoint accepts.
+
+    scope="supervisor" (default) targets the single global journal.
+    scope="team" requires `team` to be set and targets that team's own,
+    isolated journal. There is no "read/write across teams" mode here by
+    design -- see JournalService's class docstring.
+    """
+    if scope not in ("supervisor", "team"):
+        raise HTTPException(status_code=400, detail="scope must be 'supervisor' or 'team'")
+    if scope == "team" and not team:
+        raise HTTPException(status_code=400, detail="team is required when scope='team'")
+
+
 @router.get("", response_model=JournalDayResponse)
 async def get_journal(
     journal_date: Optional[str] = Query(None, alias="date", description="Date in YYYY-MM-DD format"),
     project: Optional[str] = Query(None, description="Filter entries by project ID"),
+    scope: str = Query("supervisor", description="'supervisor' (default, global) or 'team'"),
+    team: Optional[str] = Query(None, description="Team prefix, required when scope='team'"),
 ):
     """
-    Get journal for a specific date.
+    Get journal for a specific date and scope.
 
-    If no date is provided, returns today's journal.
-    Optionally filter entries by project ID.
+    If no date is provided, returns today's journal. scope defaults to
+    "supervisor" (the single global journal); pass scope=team&team=<prefix>
+    for a specific team's own journal. Optionally filter entries by project ID.
     """
+    _validate_scope(scope, team)
+
     if journal_date:
         try:
             parsed_date = date.fromisoformat(journal_date)
@@ -41,16 +60,21 @@ async def get_journal(
     else:
         parsed_date = date.today()
 
-    return await journal_service.get_day(parsed_date, project=project)
+    return await journal_service.get_day(parsed_date, project=project, scope=scope, team=team)
 
 
 @router.post("/entry")
 async def add_journal_entry(entry: JournalEntryCreate):
-    """Add a new entry to today's journal."""
+    """Add a new entry to today's journal, in the requested scope (default: supervisor)."""
+    _validate_scope(entry.scope, entry.team)
+
     created = await journal_service.add_entry(
         title=entry.title,
         content=entry.content,
         project_id=entry.project_id,
+        scope=entry.scope,
+        team=entry.team,
+        tags=entry.tags,
     )
     _invalidate_entries_cache()
     return {
@@ -59,15 +83,32 @@ async def add_journal_entry(entry: JournalEntryCreate):
             "title": created.title,
             "timestamp": created.timestamp.isoformat(),
             "project_id": created.project_id,
+            "scope": created.scope,
+            "team": created.team,
         },
     }
 
 
 @router.get("/dates", response_model=JournalDatesResponse)
-async def list_journal_dates():
-    """List all dates that have journal entries."""
-    dates = await journal_service.list_dates()
+async def list_journal_dates(
+    scope: str = Query("supervisor", description="'supervisor' (default, global) or 'team'"),
+    team: Optional[str] = Query(None, description="Team prefix, required when scope='team'"),
+):
+    """List all dates that have journal entries in the requested scope."""
+    _validate_scope(scope, team)
+    dates = await journal_service.list_dates(scope=scope, team=team)
     return JournalDatesResponse(dates=dates)
+
+
+@router.get("/teams")
+async def list_journal_teams():
+    """List team prefixes that have their own journal (i.e. have journaled at least once).
+
+    Supervisor/dashboard-facing only -- used to populate a scope selector.
+    Not part of any agent-facing skill; team journals are otherwise looked
+    up by name, never enumerated for lateral browsing between teams.
+    """
+    return {"teams": await journal_service.list_teams()}
 
 
 @router.get("/search", response_model=JournalSearchResponse)
@@ -75,9 +116,29 @@ async def search_journals(
     q: str = Query(..., description="Search query"),
     limit: int = Query(20, ge=1, le=100),
     project: Optional[str] = Query(None, description="Filter results by project ID"),
+    scope: str = Query("supervisor", description="'supervisor' (default, global) or 'team'"),
+    team: Optional[str] = Query(None, description="Team prefix, required when scope='team'"),
+    all_scopes: bool = Query(False, alias="all", description="Search across the supervisor journal and every team's journal"),
 ):
-    """Search across all journal entries, optionally filtered by project."""
-    results = await journal_service.search(query=q, limit=limit, project=project)
+    """Search journal entries, optionally filtered by project.
+
+    By default searches only the requested scope (supervisor unless a team
+    is given). Pass all=true for a supervisor/dashboard-level search across
+    every scope at once -- this is oversight tooling, not a way for one
+    team to browse another's journal (no such capability is exposed to
+    agent-facing tools).
+    """
+    if all_scopes:
+        all_results = list(await journal_service.search(query=q, limit=limit, project=project, scope="supervisor"))
+        for team_prefix in await journal_service.list_teams():
+            all_results.extend(
+                await journal_service.search(query=q, limit=limit, project=project, scope="team", team=team_prefix)
+            )
+        results = all_results[:limit]
+    else:
+        _validate_scope(scope, team)
+        results = await journal_service.search(query=q, limit=limit, project=project, scope=scope, team=team)
+
     return JournalSearchResponse(
         query=q,
         results=results,
@@ -87,38 +148,39 @@ async def search_journals(
 
 @router.get("/tag-frequency")
 async def get_tag_frequency():
-    """Count project tags across all journal entries, sorted by frequency."""
-    dates = await journal_service.list_dates()
+    """Count project tags across every scope's journal entries, sorted by frequency.
+
+    Supervisor/dashboard-level aggregate -- see _collect_all_entries().
+    """
+    entries = await _collect_all_entries()
     counts: Counter[str] = Counter()
-
-    for date_str in dates:
-        journal_date = date.fromisoformat(date_str)
-        journal_file = journal_service._get_journal_file(journal_date)
-        if not journal_file.exists():
-            continue
-        async with aiofiles.open(journal_file, "r") as f:
-            async for line in f:
-                if line.startswith("## "):
-                    tag = journal_service._parse_project_id(line)
-                    if tag:
-                        counts[tag] += 1
-
+    for e in entries:
+        if e["project"]:
+            counts[e["project"]] += 1
     return dict(counts.most_common())
 
 
 # ── Helpers for journal intelligence ──────────────────────────────────────────
 
 # _collect_all_entries() re-reads and re-parses every journal .md file from
-# disk on every call, and is called independently (no shared cache) by 6
-# different routes: get_journal_stats, get_recurring_issues (polled every
-# 60s by the dashboard), get_weekly_summary, get_issue_lifecycle,
-# _compute_correction_compliance (polled every 120s), get_compliance_trend.
-# Cheap only while the journal corpus is still small — this is a pure
-# function of on-disk state with an obvious caching opportunity that
-# wasn't taken. Invalidated immediately when a new entry is added through
-# this API (the common path); a short TTL is the safety net for the rare
-# case of a journal file being edited by something other than this route
-# (e.g. a shell script appending directly).
+# disk on every call (now across the supervisor scope AND every team's own
+# scope, tagging each entry with which one it came from), and is called
+# independently (no shared cache) by 6 different routes: get_journal_stats,
+# get_recurring_issues (polled every 60s by the dashboard), get_weekly_summary,
+# get_issue_lifecycle, _compute_correction_compliance (polled every 120s),
+# get_compliance_trend. Cheap only while the journal corpus is still small —
+# this is a pure function of on-disk state with an obvious caching
+# opportunity that wasn't taken. Invalidated immediately when a new entry is
+# added through this API (the common path); a short TTL is the safety net
+# for the rare case of a journal file being edited by something other than
+# this route (e.g. tools/journal appending directly on disk).
+#
+# This aggregate view is supervisor/dashboard-level oversight tooling — the
+# resulting entries carry a "team" field precisely so each of the 6 routes
+# below can offer an optional `team=<prefix>` filter for a supervisor
+# drilling into one team's compliance/recurring-issues. It is NOT a
+# mechanism for one team to read another's journal; no agent-facing tool
+# exposes cross-team reads (see JournalService's class docstring).
 _ENTRIES_CACHE_TTL_SECONDS = 30
 _entries_cache: dict = {"data": None, "computed_at": 0.0}
 
@@ -127,24 +189,13 @@ def _invalidate_entries_cache() -> None:
     _entries_cache["data"] = None
 
 
-async def _collect_all_entries() -> list[dict]:
-    """Parse all journal files into structured entries: date, title, content, line.
-
-    Cached for _ENTRIES_CACHE_TTL_SECONDS, invalidated immediately by
-    add_journal_entry — see the cache comment above.
-    """
-    now = time.monotonic()
-    if (
-        _entries_cache["data"] is not None
-        and (now - _entries_cache["computed_at"]) < _ENTRIES_CACHE_TTL_SECONDS
-    ):
-        return _entries_cache["data"]
-
-    dates = await journal_service.list_dates()
+async def _collect_scope_entries(scope: str, team: Optional[str]) -> list[dict]:
+    """Parse one scope's journal files into structured entries."""
+    dates = await journal_service.list_dates(scope=scope, team=team)
     entries: list[dict] = []
     for date_str in dates:
         journal_date = date.fromisoformat(date_str)
-        journal_file = journal_service._get_journal_file(journal_date)
+        journal_file = journal_service._get_journal_file(journal_date, scope=scope, team=team)
         if not journal_file.exists():
             continue
         async with aiofiles.open(journal_file, "r") as f:
@@ -160,6 +211,8 @@ async def _collect_all_entries() -> list[dict]:
                     "date": date_str,
                     "title": title,
                     "project": project,
+                    "scope": scope,
+                    "team": team,
                     "content_lines": [],
                     "line": i + 1,
                 }
@@ -167,10 +220,37 @@ async def _collect_all_entries() -> list[dict]:
                 current["content_lines"].append(line.rstrip())
         if current:
             entries.append(current)
+    return entries
+
+
+async def _collect_all_entries() -> list[dict]:
+    """Parse every scope's journal files into structured entries: date, title,
+    content, line, scope, team.
+
+    Cached for _ENTRIES_CACHE_TTL_SECONDS, invalidated immediately by
+    add_journal_entry — see the cache comment above.
+    """
+    now = time.monotonic()
+    if (
+        _entries_cache["data"] is not None
+        and (now - _entries_cache["computed_at"]) < _ENTRIES_CACHE_TTL_SECONDS
+    ):
+        return _entries_cache["data"]
+
+    entries: list[dict] = list(await _collect_scope_entries("supervisor", None))
+    for team_prefix in await journal_service.list_teams():
+        entries.extend(await _collect_scope_entries("team", team_prefix))
 
     _entries_cache["data"] = entries
     _entries_cache["computed_at"] = now
     return entries
+
+
+def _filter_by_team(entries: list[dict], team: Optional[str]) -> list[dict]:
+    """Narrow an aggregate entry list to a single team, if requested."""
+    if not team:
+        return entries
+    return [e for e in entries if e.get("team") == team]
 
 
 def _word_set(text: str) -> set[str]:
@@ -194,9 +274,9 @@ def _keyword_recall(keywords: set[str], text_words: set[str]) -> float:
 # ── 1. GET /api/journal/stats ────────────────────────────────────────────────
 
 @router.get("/stats")
-async def get_journal_stats():
+async def get_journal_stats(team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate")):
     """Corpus-level statistics: total entries, lines, date range, activity."""
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
     if not entries:
         return {"total_entries": 0, "total_lines": 0, "date_range": None, "entries_per_day_avg": 0, "most_active_days": []}
 
@@ -260,9 +340,9 @@ def _is_non_issue_title(title: str) -> bool:
 
 
 @router.get("/recurring-issues")
-async def get_recurring_issues():
+async def get_recurring_issues(team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate")):
     """Find titles appearing 2+ times across different dates using Jaccard word similarity >= 0.5."""
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
 
     # Group by title word-set, cluster similar titles
     clusters: list[dict] = []  # {canonical, canonical_ws, word_set, dates, titles}
@@ -310,14 +390,17 @@ async def get_recurring_issues():
 # ── 3. GET /api/journal/weekly-summary ───────────────────────────────────────
 
 @router.get("/weekly-summary")
-async def get_weekly_summary(weeks_ago: int = Query(0, ge=0, le=52)):
+async def get_weekly_summary(
+    weeks_ago: int = Query(0, ge=0, le=52),
+    team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate"),
+):
     """Structured weekly summary: entries/day, top tags, commit count, task completions."""
     today = date.today()
     # Week starts on Monday
     week_start = today - timedelta(days=today.weekday() + 7 * weeks_ago)
     week_end = week_start + timedelta(days=6)
 
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
 
     # Filter to this week
     week_entries = [e for e in entries if week_start.isoformat() <= e["date"] <= week_end.isoformat()]
@@ -371,9 +454,9 @@ async def get_weekly_summary(weeks_ago: int = Query(0, ge=0, le=52)):
 # ── 4. GET /api/journal/issue-lifecycle ──────────────────────────────────────
 
 @router.get("/issue-lifecycle")
-async def get_issue_lifecycle():
+async def get_issue_lifecycle(team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate")):
     """Recurring issues with git commit match for resolution detection."""
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
 
     # Build clusters (same as recurring-issues)
     clusters: list[dict] = []
@@ -478,14 +561,14 @@ def _extract_agent(entry: dict) -> str:
     return "unknown"
 
 
-async def _compute_correction_compliance() -> dict:
+async def _compute_correction_compliance(team: Optional[str] = None) -> dict:
     """Compute correction compliance with per-agent breakdown."""
     rules_path = Path(__file__).resolve().parent.parent.parent.parent / ".soren" / "corrections-rules.json"
     if not rules_path.exists():
         return {"corrections": [], "overall_compliance": 1.0, "total_rules": 0, "per_agent": {}}
 
     rules = json.loads(rules_path.read_text())
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
 
     # Per-agent tracking: agent -> {total, violations}
     agent_stats: dict[str, dict[str, int]] = defaultdict(lambda: {"total": 0, "violations": 0})
@@ -548,20 +631,23 @@ async def _compute_correction_compliance() -> dict:
 
 
 @router.get("/correction-compliance")
-async def get_correction_compliance():
+async def get_correction_compliance(team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate")):
     """Check how well the system follows its own correction rules."""
-    return await _compute_correction_compliance()
+    return await _compute_correction_compliance(team=team)
 
 
 @router.get("/compliance-trend")
-async def get_compliance_trend(weeks: int = Query(8, ge=1, le=52)):
+async def get_compliance_trend(
+    weeks: int = Query(8, ge=1, le=52),
+    team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate"),
+):
     """Per-agent correction compliance broken down by ISO week."""
     rules_path = Path(__file__).resolve().parent.parent.parent.parent / ".soren" / "corrections-rules.json"
     if not rules_path.exists():
         return {"weeks": []}
 
     rules = json.loads(rules_path.read_text())
-    entries = await _collect_all_entries()
+    entries = _filter_by_team(await _collect_all_entries(), team)
 
     # Determine the ISO weeks to cover
     today = date.today()
@@ -638,10 +724,13 @@ async def get_compliance_trend(weeks: int = Query(8, ge=1, le=52)):
 # ── 6. GET /api/journal/weekly-digest ─────────────────────────────────────────
 
 @router.get("/weekly-digest")
-async def get_weekly_digest(weeks_ago: int = Query(0, ge=0, le=52)):
+async def get_weekly_digest(
+    weeks_ago: int = Query(0, ge=0, le=52),
+    team: Optional[str] = Query(None, description="Narrow to one team's journal instead of the full aggregate"),
+):
     """Combined weekly digest: summary stats + correction compliance with per-agent breakdown."""
-    summary = await get_weekly_summary(weeks_ago=weeks_ago)
-    compliance = await _compute_correction_compliance()
+    summary = await get_weekly_summary(weeks_ago=weeks_ago, team=team)
+    compliance = await _compute_correction_compliance(team=team)
 
     return {
         **summary,
@@ -653,8 +742,12 @@ async def get_weekly_digest(weeks_ago: int = Query(0, ge=0, le=52)):
 async def upload_artifact(
     file: UploadFile = File(...),
     journal_date: Optional[str] = Query(None, alias="date"),
+    scope: str = Query("supervisor", description="'supervisor' (default, global) or 'team'"),
+    team: Optional[str] = Query(None, description="Team prefix, required when scope='team'"),
 ):
-    """Upload an artifact file to today's (or specified date's) journal."""
+    """Upload an artifact file to today's (or specified date's) journal, in the requested scope."""
+    _validate_scope(scope, team)
+
     if journal_date:
         try:
             parsed_date = date.fromisoformat(journal_date)
@@ -671,6 +764,8 @@ async def upload_artifact(
         filename=file.filename,
         content=content,
         journal_date=parsed_date,
+        scope=scope,
+        team=team,
     )
 
     return {
@@ -684,14 +779,18 @@ async def upload_artifact(
 async def get_artifact(
     filename: str,
     journal_date: str = Query(..., alias="date"),
+    scope: str = Query("supervisor", description="'supervisor' (default, global) or 'team'"),
+    team: Optional[str] = Query(None, description="Team prefix, required when scope='team'"),
 ):
-    """Download an artifact file."""
+    """Download an artifact file from the requested scope."""
+    _validate_scope(scope, team)
+
     try:
         parsed_date = date.fromisoformat(journal_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-    content = await journal_service.get_artifact(filename, parsed_date)
+    content = await journal_service.get_artifact(filename, parsed_date, scope=scope, team=team)
     if content is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
 

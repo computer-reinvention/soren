@@ -202,7 +202,10 @@ export function CommandPalette() {
                 // active on top) doesn't immediately hide it.
                 value={`journal ${query} ${result.title}`}
                 onSelect={() =>
-                  runAction(() => navigate(routes.file(`.soren/journal/${result.date}/journal.md`)))
+                  // Journal search defaults to the supervisor scope (see
+                  // api.searchJournal) — the file now lives under
+                  // supervisor/, not directly under .soren/journal/.
+                  runAction(() => navigate(routes.file(`.soren/journal/supervisor/${result.date}/journal.md`)))
                 }
               >
                 <BookOpen className="h-4 w-4 mr-2 shrink-0" />

@@ -13,7 +13,6 @@
 set -uo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-JOURNAL_DIR="${SOREN_HOME}/.soren/journal"
 PROJECTS_FILE="${SOREN_HOME}/.soren/projects.json"
 
 # Parse args
@@ -63,8 +62,23 @@ def load_projects() -> list[dict]:
     return [p for p in data.get("projects", []) if p.get("active", True)]
 
 
-def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
+def index_journal_dir(
+    journal_dir: Path,
+    pid: str,
+    source_prefix: str = ".soren/journal",
+    dates: "set[str] | None" = None,
+    extra_tags: "list[str] | None" = None,
+) -> tuple[int, int]:
     """Index journal entries and artifacts from a journal directory.
+
+    `journal_dir` is the directory that directly contains YYYY-MM-DD
+    subdirectories -- for SOREN's own journal this is now a specific scope
+    (`.soren/journal/supervisor` or `.soren/journal/teams/<prefix>`), not
+    `.soren/journal` itself (see the self-mode caller below). `source_prefix`
+    is the path segment recorded in each memory's source_path, since it no
+    longer always equals ".soren/journal" once a scope subdirectory is
+    involved. `dates`, if given, restricts indexing to those specific date
+    names instead of every date dir found.
 
     Returns (entries_added, artifacts_added).
     """
@@ -73,11 +87,14 @@ def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
 
     total_entries = 0
     total_artifacts = 0
+    extra_tags = extra_tags or []
 
     for day_dir in sorted(journal_dir.glob("????-??-??")):
         if not day_dir.is_dir():
             continue
         d = day_dir.name
+        if dates is not None and d not in dates:
+            continue
 
         # Index journal entries (split by ## headers)
         journal_file = day_dir / "journal.md"
@@ -94,9 +111,9 @@ def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
                     entries.append({
                         "content": full_text,
                         "source_type": "journal",
-                        "source_path": f"{pid}/.soren/journal/{d}/journal.md",
+                        "source_path": f"{pid}/{source_prefix}/{d}/journal.md",
                         "keywords": [],
-                        "tags": [d, pid],
+                        "tags": [d, pid, *extra_tags],
                         "project_id": pid,
                     })
                 i += 2
@@ -113,13 +130,51 @@ def index_journal_dir(journal_dir: Path, pid: str) -> tuple[int, int]:
                     artifact_entries.append({
                         "content": text[:2000],
                         "source_type": "artifact",
-                        "source_path": f"{pid}/.soren/journal/{d}/artifacts/{artifact.name}",
+                        "source_path": f"{pid}/{source_prefix}/{d}/artifacts/{artifact.name}",
                         "keywords": [],
-                        "tags": [d, artifact.stem, pid],
+                        "tags": [d, artifact.stem, pid, *extra_tags],
                         "project_id": pid,
                     })
             if artifact_entries:
                 total_artifacts += memory_store.add_memories_batch(artifact_entries)
+
+    return total_entries, total_artifacts
+
+
+def index_soren_own_journal(journal_root: Path, pid: str, dates: "set[str] | None" = None) -> tuple[int, int]:
+    """Index a SOREN installation's OWN journal tree, which is split into
+    scopes (supervisor/<date>/ + teams/<prefix>/<date>/) rather than a flat
+    list of date directories directly under `journal_root`. Walks the
+    supervisor scope plus every team scope, tagging team-sourced memories
+    with "team:<prefix>" so a semantic search result can be attributed back
+    to the right scope.
+
+    This is distinct from `index_journal_dir()`'s direct use for an
+    EXTERNAL project's `.soren/journal/` (if that project happens to be its
+    own independent SOREN-managed checkout with the old flat layout) --
+    that path is untouched by this restructuring.
+    """
+    total_entries = 0
+    total_artifacts = 0
+
+    supervisor_dir = journal_root / "supervisor"
+    e, a = index_journal_dir(supervisor_dir, pid, source_prefix=".soren/journal/supervisor", dates=dates)
+    total_entries += e
+    total_artifacts += a
+
+    teams_root = journal_root / "teams"
+    if teams_root.exists():
+        for team_dir in sorted(teams_root.iterdir()):
+            if not team_dir.is_dir():
+                continue
+            e, a = index_journal_dir(
+                team_dir, pid,
+                source_prefix=f".soren/journal/teams/{team_dir.name}",
+                dates=dates,
+                extra_tags=[f"team:{team_dir.name}"],
+            )
+            total_entries += e
+            total_artifacts += a
 
     return total_entries, total_artifacts
 
@@ -173,10 +228,11 @@ def index_project(project: dict) -> None:
     path = Path(project["path"])
     print(f"\nIndexing project: {pid} ({path})")
 
-    # If this is the self project, use date-mode journal indexing
+    # If this is the self project, use scope-aware journal indexing
+    # (supervisor + every team — see index_soren_own_journal)
     if project.get("is_self"):
         journal_dir = path / ".soren" / "journal"
-        entries, artifacts = index_journal_dir(journal_dir, pid)
+        entries, artifacts = index_soren_own_journal(journal_dir, pid)
         print(f"  Indexed {entries} journal entries, {artifacts} artifacts")
         return
 
@@ -212,74 +268,30 @@ elif project_mode == "single":
     index_project(match)
 
 else:
-    # self/date-based mode — index SOREN journal only
+    # self/date-based mode — index SOREN's own journal (supervisor scope +
+    # every team's own scope; see index_soren_own_journal). "recent"/"single"
+    # pass an explicit date filter down; nonexistent dates simply contribute
+    # zero entries rather than needing an existence check against any one
+    # particular scope up front (a date might exist in one team's journal
+    # but not another's, or not in the supervisor's at all).
     journal_dir = soren_home / ".soren" / "journal"
-    dates = []
+    dates: "set[str] | None" = None
+    dates_label = "all dates"
     if date_mode == "recent":
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-        if (journal_dir / today).is_dir():
-            dates.append(today)
-        if (journal_dir / yesterday).is_dir():
-            dates.append(yesterday)
+        dates = {today, yesterday}
+        dates_label = ", ".join(sorted(dates))
     elif date_mode == "single":
         if not specific_date:
             print("Error: --date requires YYYY-MM-DD argument", file=sys.stderr)
             sys.exit(1)
-        if (journal_dir / specific_date).is_dir():
-            dates.append(specific_date)
-    else:  # all
-        dates = [d.name for d in sorted(journal_dir.glob("????-??-??")) if d.is_dir()]
+        dates = {specific_date}
+        dates_label = specific_date
+    # else "all": dates stays None, index_journal_dir indexes every date found
 
-    if not dates:
-        print("No journal directories found to index.")
-        sys.exit(0)
-
-    print(f"Indexing {len(dates)} date(s): {' '.join(dates)}")
-    total_entries = 0
-    total_artifacts = 0
-    for d in dates:
-        day_dir = journal_dir / d
-        # Index single day (reuse logic inline for date-scoped source_path)
-        journal_file = day_dir / "journal.md"
-        if journal_file.exists():
-            content = journal_file.read_text()
-            sections = re.split(r'^(## .+)$', content, flags=re.MULTILINE)
-            entries = []
-            i = 1
-            while i < len(sections) - 1:
-                header = sections[i].strip()
-                body = sections[i + 1].strip()
-                if body:
-                    entries.append({
-                        "content": f"{header}\n{body}",
-                        "source_type": "journal",
-                        "source_path": f".soren/journal/{d}/journal.md",
-                        "keywords": [],
-                        "tags": [d],
-                        "project_id": "soren",
-                    })
-                i += 2
-            if entries:
-                total_entries += memory_store.add_memories_batch(entries)
-
-        artifacts_dir = day_dir / "artifacts"
-        if artifacts_dir.exists():
-            artifact_entries = []
-            for artifact in sorted(artifacts_dir.glob("*.md")):
-                text = artifact.read_text().strip()
-                if len(text) >= 20:
-                    artifact_entries.append({
-                        "content": text[:2000],
-                        "source_type": "artifact",
-                        "source_path": f".soren/journal/{d}/artifacts/{artifact.name}",
-                        "keywords": [],
-                        "tags": [d, artifact.stem],
-                        "project_id": "soren",
-                    })
-            if artifact_entries:
-                total_artifacts += memory_store.add_memories_batch(artifact_entries)
-
+    print(f"Indexing {dates_label} across the supervisor journal and every team's journal")
+    total_entries, total_artifacts = index_soren_own_journal(journal_dir, "soren", dates=dates)
     print(f"Indexed {total_entries} journal entries, {total_artifacts} artifacts")
 
 stats = memory_store.stats()

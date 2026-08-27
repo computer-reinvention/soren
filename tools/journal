@@ -13,12 +13,28 @@
 # Every command is one line - no excuses not to journal.
 #
 # Writes directly to the filesystem — no API dependency.
+#
+# SCOPING: journal storage is split into a single global supervisor journal
+# and one isolated journal per team:
+#   .soren/journal/supervisor/<date>/journal.md   (the default)
+#   .soren/journal/teams/<prefix>/<date>/journal.md
+#
+# Every command here transparently targets the CALLER's own scope: if
+# $SOREN_AGENT_NAME is a member of a team (per the `teams` table), reads and
+# writes go to that team's own journal; otherwise they go to the supervisor's
+# global journal. There is deliberately no flag to target a different scope
+# — a team's journal is private working memory for that team, and the
+# supervisor's is the single system-wide record. See
+# .opencode/skills/journal/SKILL.md.
 #===============================================================================
 
 set -euo pipefail
 
 SOREN_HOME="${SOREN_HOME:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 JOURNAL_DIR="${SOREN_HOME}/.soren/journal"
+
+# shellcheck source=/dev/null
+source "${SOREN_HOME}/tools/lib/db.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -30,13 +46,39 @@ NC='\033[0m'
 die() { echo -e "${RED}error:${NC} $1" >&2; exit 1; }
 ok() { echo -e "${GREEN}✓${NC} $1"; }
 
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+#-------------------------------------------------------------------------------
+# Scope resolution
+#-------------------------------------------------------------------------------
+
+# Prints the journal root directory for the calling agent's own scope: a
+# team's journal directory if $SOREN_AGENT_NAME is listed as a member of a
+# `teams` table row, otherwise the supervisor's global journal directory.
+# Best-effort — any DB error (e.g. no .soren/soren.db yet, first run before
+# any team exists) falls back to the supervisor scope rather than failing.
+resolve_scope_dir() {
+    local agent="${SOREN_AGENT_NAME:-}"
+    local team=""
+    if [[ -n "$agent" ]]; then
+        team=$(soren_db "SELECT prefix FROM teams, json_each(teams.members)
+            WHERE json_each.value = '$(sql_q "$agent")' LIMIT 1;" 2>/dev/null || true)
+    fi
+    if [[ -n "$team" ]]; then
+        echo "${JOURNAL_DIR}/teams/${team}"
+    else
+        echo "${JOURNAL_DIR}/supervisor"
+    fi
+}
+
 #-------------------------------------------------------------------------------
 # Helpers
 #-------------------------------------------------------------------------------
 
 ensure_day_dir() {
-    local target_date="$1"
-    local day_dir="${JOURNAL_DIR}/${target_date}"
+    local scope_dir="$1"
+    local target_date="$2"
+    local day_dir="${scope_dir}/${target_date}"
     mkdir -p "${day_dir}/artifacts"
 
     local journal_file="${day_dir}/journal.md"
@@ -48,14 +90,16 @@ ensure_day_dir() {
 append_entry() {
     local title="$1"
     local content="${2:-}"
+    local scope_dir
+    scope_dir="$(resolve_scope_dir)"
     local target_date
     target_date="$(date +%Y-%m-%d)"
     local time_str
     time_str="$(date +%H:%M)"
 
-    ensure_day_dir "$target_date"
+    ensure_day_dir "$scope_dir" "$target_date"
 
-    local journal_file="${JOURNAL_DIR}/${target_date}/journal.md"
+    local journal_file="${scope_dir}/${target_date}/journal.md"
 
     # Skip if last entry has identical title (dedup)
     local last_title
@@ -114,7 +158,9 @@ cmd_decision() {
 
 cmd_read() {
     local target_date="${1:-$(date +%Y-%m-%d)}"
-    local journal_file="${JOURNAL_DIR}/${target_date}/journal.md"
+    local scope_dir
+    scope_dir="$(resolve_scope_dir)"
+    local journal_file="${scope_dir}/${target_date}/journal.md"
 
     if [[ ! -f "$journal_file" ]]; then
         echo -e "${DIM}No journal entries for ${target_date}${NC}"
@@ -127,14 +173,17 @@ cmd_read() {
 }
 
 cmd_dates() {
-    if [[ ! -d "$JOURNAL_DIR" ]]; then
+    local scope_dir
+    scope_dir="$(resolve_scope_dir)"
+
+    if [[ ! -d "$scope_dir" ]]; then
         echo -e "${DIM}No journal entries found${NC}"
         return
     fi
 
     local found=0
     # List directories matching YYYY-MM-DD that contain journal.md, sorted reverse
-    for dir in $(ls -1d "${JOURNAL_DIR}"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 2>/dev/null | sort -r); do
+    for dir in $(ls -1d "${scope_dir}"/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] 2>/dev/null | sort -r); do
         if [[ -f "${dir}/journal.md" ]]; then
             if [[ $found -eq 0 ]]; then
                 echo -e "${CYAN}Journal dates:${NC}"
@@ -185,8 +234,15 @@ EXAMPLES:
     # Read a specific day
     journal read 2026-02-18
 
+SCOPE:
+    Every command above transparently reads/writes YOUR OWN journal: your
+    team's journal if you're on a team, otherwise the supervisor's global
+    journal. This is automatic based on your agent identity — there is no
+    flag to target another scope.
+
 ENVIRONMENT:
     SOREN_HOME          Project root (default: git rev-parse --show-toplevel)
+    SOREN_AGENT_NAME     Your agent identity, used to resolve your team (if any)
 EOF
 }
 
@@ -209,4 +265,6 @@ main() {
     esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

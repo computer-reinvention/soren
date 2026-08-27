@@ -12,9 +12,25 @@ WINDOW="${1:-}"
 PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 TODAY=$(date +%Y-%m-%d)
 TIMESTAMP=$(date +%H%M%S)
-ARTIFACT_DIR="${PROJECT_ROOT}/.soren/journal/${TODAY}/artifacts"
-ARTIFACT_FILE="${ARTIFACT_DIR}/compaction-${WINDOW}-${TIMESTAMP}.json"
 SOREN_SESSION="${SOREN_SESSION:-soren}"
+
+# shellcheck source=/dev/null
+source "${PROJECT_ROOT}/tools/lib/db.sh"
+
+# Compaction artifacts go into the compacted agent's own journal scope --
+# a team's own directory if WINDOW is a team member, otherwise the
+# supervisor's global scope (matches tools/journal's scope resolution).
+_team=""
+if [[ -f "$SOREN_DB_PATH" ]]; then
+    _team=$(soren_db "SELECT prefix FROM teams, json_each(teams.members)
+        WHERE json_each.value = '$(printf '%s' "$WINDOW" | sed "s/'/''/g")' LIMIT 1;" 2>/dev/null || true)
+fi
+if [[ -n "$_team" ]]; then
+    ARTIFACT_DIR="${PROJECT_ROOT}/.soren/journal/teams/${_team}/${TODAY}/artifacts"
+else
+    ARTIFACT_DIR="${PROJECT_ROOT}/.soren/journal/supervisor/${TODAY}/artifacts"
+fi
+ARTIFACT_FILE="${ARTIFACT_DIR}/compaction-${WINDOW}-${TIMESTAMP}.json"
 
 mkdir -p "$ARTIFACT_DIR"
 
@@ -39,8 +55,7 @@ uncommitted=$(git -C "$GIT_TARGET" diff --name-only 2>/dev/null || echo "")
 staged=$(git -C "$GIT_TARGET" diff --cached --name-only 2>/dev/null || echo "")
 
 # Capture current task from the tasks table (consolidated soren.db)
-# shellcheck source=/dev/null
-source "${PROJECT_ROOT}/tools/lib/db.sh"
+# (db.sh already sourced above for the team-scope lookup)
 current_task=""
 if [[ -f "$SOREN_DB_PATH" ]]; then
     current_task=$(soren_db \

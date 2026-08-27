@@ -7,6 +7,14 @@ description: Write journal entries to maintain persistent memory across sessions
 
 The journal is your **long-term memory**. Entries survive compaction, restarts, and rollbacks. If you don't journal it, it's lost.
 
+## Your Scope
+
+Every command below automatically reads and writes **your own journal**:
+your team's journal if you're on a team, or the supervisor's global journal
+otherwise. This is resolved from your agent identity — you never specify
+it. Your team's journal is private working memory for your team; treat it
+the same way you'd treat your own notes, not something to share around.
+
 ## When to Journal
 
 **Journal instinctively.** If something is worth remembering, write it down immediately. Don't wait.
@@ -48,3 +56,16 @@ The journal is your **long-term memory**. Entries survive compaction, restarts, 
 - **Include the why**: Future you (or another agent) needs context
 - **One line is fine**: `journal log "..."` takes 2 seconds. Do it often.
 - **Don't journal routine**: No need to log "read a file" or "ran tests". Journal the *outcome*.
+
+## Saving Artifacts (plans, research, reports)
+
+Unlike the commands above, artifacts are saved with the `write` file tool
+directly, so you construct the path yourself — into **your own scope**:
+
+```
+.soren/journal/supervisor/YYYY-MM-DD/artifacts/<name>.md      # if you're not on a team
+.soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/<name>.md   # if you're on a team
+```
+
+Use a descriptive filename and reference the artifact in a journal entry
+rather than duplicating its content there.

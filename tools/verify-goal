@@ -279,7 +279,8 @@ FINAL_JSON=$(jq -n \
 [[ "$JSON_OUT" == "true" ]] && echo "$FINAL_JSON"
 
 if [[ "$SAVE" == "true" ]]; then
-    artifact_dir=".soren/journal/$(date +%Y-%m-%d)/artifacts"
+    # Goal verification is supervisor-level governance, not team-scoped.
+    artifact_dir=".soren/journal/supervisor/$(date +%Y-%m-%d)/artifacts"
     mkdir -p "$artifact_dir"
     echo "$FINAL_JSON" > "${artifact_dir}/verify-goal.json"
     echo "(saved to ${artifact_dir}/verify-goal.json)" >&2

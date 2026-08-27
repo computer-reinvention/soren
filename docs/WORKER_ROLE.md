@@ -442,6 +442,12 @@ All tags used in the SOREN system, consolidated for quick reference.
 
 **Journal instinctively.** The journal is the system's long-term memory — it survives compaction, restarts, and rollbacks. If you don't journal it, it's lost forever.
 
+**Your scope:** if you're on a team, every command below automatically
+writes to that team's own private journal (`.soren/journal/teams/<prefix>/`)
+— not the supervisor's, not any other team's. If you're a solo/ephemeral
+worker with no team, it goes to the supervisor's global journal instead.
+This is resolved from your agent identity; you never specify it.
+
 ```bash
 # Quick one-liner (use this constantly)
 ./tools/journal log "Fixed auth bug - token expiry used local time instead of UTC"
@@ -491,7 +497,7 @@ Ephemeral workers don't maintain knowledge files — if you learned something wo
 
 When completing research, investigation, or analysis tasks, save the full findings as artifacts — mailbox messages and journal logs are summaries, artifacts are the full detail.
 
-- Save findings to `.soren/journal/YYYY-MM-DD/artifacts/` using descriptive filenames that make the content discoverable (e.g., `auth-bug-investigation.md`, `api-refactor-proposal.md`, `test-results-analysis.md`)
+- Save findings to your own scope's artifacts dir using descriptive filenames that make the content discoverable (e.g., `auth-bug-investigation.md`, `api-refactor-proposal.md`, `test-results-analysis.md`): `.soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/` if you're on a team, `.soren/journal/supervisor/YYYY-MM-DD/artifacts/` otherwise
 - Artifacts are the permanent record — they survive compaction, session restarts, and agent death
 - **Always save artifacts BEFORE reporting completion to supervisor**
 - Examples of what should be artifacts: investigation reports, architecture proposals, test results analysis, debug session findings, generated specs or plans
@@ -553,7 +559,7 @@ When your context is compacted (either automatically by the compact daemon or ma
 
 When you see a message saying "You were just compacted":
 
-1. **Read your compaction artifact**: Check `.soren/journal/YYYY-MM-DD/artifacts/compaction-{your-name}-*.json` (use the most recent one). It contains:
+1. **Read your compaction artifact**: The recovery message tells you the exact path (it's under your own journal scope — `.soren/journal/teams/<your-team-prefix>/YYYY-MM-DD/artifacts/` if you're on a team, `.soren/journal/supervisor/YYYY-MM-DD/artifacts/` otherwise — filename `compaction-{your-name}-*.json`, use the most recent one). It contains:
    - `files_modified`: Files you were working on
    - `current_task`: What you were assigned
    - `git_branch` / `uncommitted_changes`: Your git state

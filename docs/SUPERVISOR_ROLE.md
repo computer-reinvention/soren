@@ -708,6 +708,16 @@ For complex context, reference files in the journal instead of putting everythin
 
 The journal is your **persistent memory** across sessions and compactions. **Journal instinctively** — don't wait, don't batch, just write it down as things happen.
 
+Journal storage is split into isolated scopes: your own global journal
+(the single supervisor journal, shared across every project you oversee),
+and one private journal per team you spawn. **Your journal is global** —
+it is not nested per-project; entries about different projects are
+disambiguated by the existing `[project-id]` tag, same as always. Teams
+you spawn get their own isolated journal at `.soren/journal/teams/<prefix>/`
+— their day-to-day execution detail lives there, not in yours. Journal
+your own delegation decisions, spawning rationale, and cross-cutting
+observations here; a team's internal work is their own journal's job.
+
 ### Use the journal tool (load the `journal` skill via the opencode skill tool, or run `./tools/journal` directly)
 
 ```bash
@@ -731,10 +741,16 @@ The journal is your **persistent memory** across sessions and compactions. **Jou
 
 ```
 .soren/journal/
-  2026-01-29/
-    journal.md        # Your curated entries
-    rollback-*.md     # Auto-generated rollback records
-    artifacts/        # Generated files, diagrams
+  supervisor/              # your own journal — global, not per-project
+    2026-01-29/
+      journal.md        # Your curated entries
+      rollback-*.md     # Auto-generated rollback records
+      artifacts/        # Generated files, diagrams
+  teams/                   # one isolated journal per team you spawn
+    <team-prefix>/
+      2026-01-29/
+        journal.md
+        artifacts/
 ```
 
 ### What to Journal
@@ -763,7 +779,7 @@ The system also auto-journals agent activity. When agents use enough tools or en
 
 Non-trivial outputs **must** be saved as artifacts — journal narrative entries alone are not enough.
 
-- Save ALL research reports, analysis documents, plans, generated specs, and non-trivial outputs to `.soren/journal/YYYY-MM-DD/artifacts/`
+- Save ALL research reports, analysis documents, plans, generated specs, and non-trivial outputs to `.soren/journal/supervisor/YYYY-MM-DD/artifacts/`
 - Use descriptive filenames: `system-analysis-report.md`, `migration-plan.md`, `debug-findings.md`, etc.
 - Artifacts survive compaction, session restarts, and agent death — they are the permanent record
 - When delegating research or analysis tasks to workers, instruct them to save their findings as artifacts
@@ -803,10 +819,12 @@ curl -X POST http://localhost:8000/api/journal/entry \
 
 ### Journal
 
+All endpoints default to your own (supervisor) scope; pass `scope=team&team=<prefix>` to target a specific team's journal instead.
+
 - `GET /api/journal?date=YYYY-MM-DD` - Get journal for date
 - `POST /api/journal/entry` - Add journal entry
 - `GET /api/journal/dates` - List dates with journals
-- `GET /api/journal/search?q=query` - Search journals
+- `GET /api/journal/search?q=query` - Search journals (add `all=true` to search every team's journal too — oversight only, not for routine use)
 
 ### Health
 
@@ -837,7 +855,7 @@ If you are compacted, you will lose most of your conversation history. The syste
 
 ### Recovery Steps
 
-1. **Read your compaction artifact**: Check `.soren/journal/YYYY-MM-DD/artifacts/compaction-supervisor-*.json` for your pre-compaction state
+1. **Read your compaction artifact**: Check `.soren/journal/supervisor/YYYY-MM-DD/artifacts/compaction-supervisor-*.json` for your pre-compaction state
 2. **Read the journal**: `./tools/journal read` — the journal is your persistent memory and survives compaction
 3. **Check conversation history**: Query `GET /api/agents/supervisor/history?limit=50` to see recent messages
 4. **Review active workers**: `curl -s http://localhost:8000/api/agents | jq '.agents'` to see what workers are running and their statuses

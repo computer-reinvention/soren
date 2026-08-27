@@ -402,7 +402,7 @@ class TestPatternExtractor:
         """Journal 'Key decisions' section yields bullet points as patterns."""
         from src.server.config import settings as cfg
         date = "2026-02-25"
-        journal_dir = tmp_path / ".soren" / "journal" / date
+        journal_dir = tmp_path / ".soren" / "journal" / "supervisor" / date
         journal_dir.mkdir(parents=True)
         (journal_dir / "journal.md").write_text(textwrap.dedent("""\
             # Daily Journal
@@ -429,7 +429,7 @@ class TestPatternExtractor:
         """Sections not matching pattern keywords are not extracted."""
         from src.server.config import settings as cfg
         date = "2026-02-20"
-        journal_dir = tmp_path / ".soren" / "journal" / date
+        journal_dir = tmp_path / ".soren" / "journal" / "supervisor" / date
         journal_dir.mkdir(parents=True)
         (journal_dir / "journal.md").write_text(textwrap.dedent("""\
             # Journal
@@ -459,7 +459,7 @@ class TestPatternExtractor:
         """Lines shorter than 25 characters are not extracted."""
         from src.server.config import settings as cfg
         date = "2026-02-21"
-        journal_dir = tmp_path / ".soren" / "journal" / date
+        journal_dir = tmp_path / ".soren" / "journal" / "supervisor" / date
         journal_dir.mkdir(parents=True)
         (journal_dir / "journal.md").write_text(textwrap.dedent("""\
             # Journal

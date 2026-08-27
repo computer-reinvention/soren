@@ -5,27 +5,45 @@ import { Badge } from '../ui/badge';
 import { Input } from '../ui/input';
 import { ScrollArea } from '../ui/scroll-area';
 import { Separator } from '../ui/separator';
-import { useJournal, useJournalDates, useJournalSearch } from '@/hooks/useJournal';
+import { useJournal, useJournalDates, useJournalSearch, useJournalTeams } from '@/hooks/useJournal';
 import { useProjects } from '@/hooks/useProjects';
 import { useProjectStore } from '@/stores/projectStore';
 import { WeeklySummaryCards } from './WeeklySummaryCards';
 import { RecurringIssuesTable } from './RecurringIssuesTable';
 import { CorrectionCompliancePanel } from './CorrectionCompliancePanel';
+import type { JournalScope } from '@/types/journal';
+
+// Scope value encodes both axes as one string for a single <select>:
+// "supervisor" or "team:<prefix>".
+const SUPERVISOR_SCOPE_VALUE = 'supervisor';
+const teamScopeValue = (team: string) => `team:${team}`;
 
 export function JournalViewer() {
   const [selectedDate, setSelectedDate] = useState<string | undefined>();
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
   const [journalProjectFilter, setJournalProjectFilter] = useState<string | null>(null);
+  const [scopeValue, setScopeValue] = useState<string>(SUPERVISOR_SCOPE_VALUE);
   const { selectedProjectId } = useProjectStore();
   const { data: projectsData } = useProjects();
+  const { data: teamsData } = useJournalTeams();
 
   // Use local filter if set, otherwise fall back to global project selection
   const effectiveProjectId = journalProjectFilter ?? selectedProjectId;
 
-  const { data: dates, isLoading: datesLoading } = useJournalDates();
-  const { data: journal, isLoading: journalLoading } = useJournal(selectedDate, effectiveProjectId);
-  const { data: searchResults } = useJournalSearch(searchQuery, isSearching);
+  const scope: JournalScope = scopeValue.startsWith('team:') ? 'team' : 'supervisor';
+  const team = scope === 'team' ? scopeValue.slice('team:'.length) : undefined;
+
+  const handleScopeChange = (value: string) => {
+    setScopeValue(value);
+    // A date selected in one scope may not exist in another — reset rather
+    // than silently showing a stale/empty view.
+    setSelectedDate(undefined);
+  };
+
+  const { data: dates, isLoading: datesLoading } = useJournalDates(scope, team);
+  const { data: journal, isLoading: journalLoading } = useJournal(selectedDate, effectiveProjectId, scope, team);
+  const { data: searchResults } = useJournalSearch(searchQuery, isSearching, scope, team);
 
   const handleDateSelect = (date: string) => {
     setSelectedDate(date);
@@ -44,8 +62,22 @@ export function JournalViewer() {
     <div className="h-full flex">
       {/* Sidebar with dates */}
       <div className="w-48 border-r flex flex-col">
-        <div className="p-3 border-b">
+        <div className="p-3 border-b space-y-2">
           <h3 className="font-medium text-sm">Journal Dates</h3>
+          {/* Scope selector: the supervisor's global journal, or a
+              specific team's own private journal. Dashboard/oversight
+              only — not exposed to any agent-facing tool. */}
+          <select
+            value={scopeValue}
+            onChange={(e) => handleScopeChange(e.target.value)}
+            className="w-full h-7 text-xs rounded-md border bg-background px-2"
+            aria-label="Select journal scope"
+          >
+            <option value={SUPERVISOR_SCOPE_VALUE}>Supervisor (global)</option>
+            {teamsData?.teams.map((t) => (
+              <option key={t} value={teamScopeValue(t)}>{t} (team)</option>
+            ))}
+          </select>
         </div>
         <ScrollArea className="flex-1">
           {datesLoading ? (
@@ -81,8 +113,10 @@ export function JournalViewer() {
               : 'Select a date'}
           </span>
           <div className="flex items-center gap-1">
-            {/* Project filter dropdown */}
-            {projectsData && projectsData.projects.length > 0 && (
+            {/* Project filter dropdown — only meaningful in the supervisor
+                scope, which spans every project; a team's own journal is
+                already scoped to whatever project that team works on. */}
+            {scope === 'supervisor' && projectsData && projectsData.projects.length > 0 && (
               <select
                 value={journalProjectFilter ?? ''}
                 onChange={(e) => setJournalProjectFilter(e.target.value || null)}
@@ -116,12 +150,12 @@ export function JournalViewer() {
         {/* Insights section */}
         {!isSearching && !selectedDate && (
           <div className="p-3 space-y-4 border-b">
-            <WeeklySummaryCards />
+            <WeeklySummaryCards team={team} />
             <div className="border-t pt-3">
-              <RecurringIssuesTable />
+              <RecurringIssuesTable team={team} />
             </div>
             <div className="border-t pt-3">
-              <CorrectionCompliancePanel />
+              <CorrectionCompliancePanel team={team} />
             </div>
           </div>
         )}

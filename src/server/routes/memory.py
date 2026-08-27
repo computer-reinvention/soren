@@ -86,6 +86,8 @@ class ExtractPatternsRequest(BaseModel):
     commits: int = Field(default=5, ge=1, le=50)
     date: Optional[str] = None  # YYYY-MM-DD; if omitted uses today
     project_id: str = "soren"
+    scope: str = "supervisor"  # "supervisor" (default) or "team"
+    team: Optional[str] = None  # required when scope="team"
 
 
 class ExtractPatternsResponse(BaseModel):
@@ -107,7 +109,7 @@ async def extract_patterns(req: ExtractPatternsRequest):
     total_stored = 0
 
     # Extract from journal
-    journal_patterns = pattern_extractor.extract_patterns_from_journal(date)
+    journal_patterns = pattern_extractor.extract_patterns_from_journal(date, scope=req.scope, team=req.team)
     if journal_patterns:
         stored = pattern_extractor.store_patterns(journal_patterns, project_id=req.project_id)
         total_found += len(journal_patterns)

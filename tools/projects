@@ -767,7 +767,7 @@ Journal your work frequently — this is the system's long-term memory:
 \`\`\`
 Save research, plans, and analysis as artifacts:
 \`\`\`bash
-# Write to .soren/journal/\$(date +%Y-%m-%d)/artifacts/filename.md
+# Write to .soren/journal/supervisor/\$(date +%Y-%m-%d)/artifacts/filename.md
 \`\`\`
 
 ## Peer Coordination with Sibling Supervisors
@@ -854,7 +854,7 @@ Tasks often include links to external resources — design specs, documentation,
 
 - Fetch resources BEFORE spawning workers, not after
 - Summarize findings — don't dump raw HTML into worker task descriptions
-- If a resource is too large or complex, save a summary as an artifact in \`.soren/journal/\$(date +%Y-%m-%d)/artifacts/\` and reference it in the worker task
+- If a resource is too large or complex, save a summary as an artifact in \`.soren/journal/supervisor/\$(date +%Y-%m-%d)/artifacts/\` and reference it in the worker task
 - If a resource is inaccessible, note it and proceed with available information — report what's missing in your delegation plan
 
 ## Branching Model (MANDATORY)

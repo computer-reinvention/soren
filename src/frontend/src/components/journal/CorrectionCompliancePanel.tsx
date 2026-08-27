@@ -8,8 +8,8 @@ function complianceColor(rate: number): string {
   return 'text-red-700 dark:text-red-400';
 }
 
-export function CorrectionCompliancePanel() {
-  const { data, isLoading } = useCorrectionCompliance();
+export function CorrectionCompliancePanel({ team }: { team?: string } = {}) {
+  const { data, isLoading } = useCorrectionCompliance(team);
 
   if (isLoading) {
     return <div className="text-xs text-muted-foreground py-2 text-center">Loading...</div>;

@@ -359,11 +359,15 @@ async def _inject_recovery_message(session: str, window: str):
     """Inject recovery context message after compaction completes."""
     await asyncio.sleep(_RECOVERY_DELAY)
     try:
+        from ..services.journal import resolve_scope_for_agent
+
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        scope, team = resolve_scope_for_agent(window)
+        scope_path = f"teams/{team}" if scope == "team" else "supervisor"
         recovery_msg = (
             f"You were just compacted. Read your recovery context from "
-            f".soren/journal/{today}/artifacts/compaction-{window}-*.json "
-            f"(most recent one). Also check your conversation history via "
+            f".soren/journal/{scope_path}/{today}/artifacts/compaction-{window}-*.json "
+            f"(most recent one, if present). Also check your conversation history via "
             f"GET /api/agents/{window}/history if anything is unclear."
         )
         await tmux_service.send_input(window, recovery_msg, session)

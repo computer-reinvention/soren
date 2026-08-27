@@ -11,9 +11,9 @@ function formatWeekLabel(start: string, end: string): string {
   return `${fmt(s)} – ${fmt(e)}`;
 }
 
-export function WeeklySummaryCards() {
+export function WeeklySummaryCards({ team }: { team?: string } = {}) {
   const [weeksAgo, setWeeksAgo] = useState(0);
-  const { data, isLoading } = useWeeklySummary(weeksAgo);
+  const { data, isLoading } = useWeeklySummary(weeksAgo, team);
 
   if (isLoading) {
     return <div className="text-xs text-muted-foreground py-2 text-center">Loading...</div>;

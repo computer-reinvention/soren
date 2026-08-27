@@ -354,8 +354,9 @@ def main():
     else:
         today = datetime.now().strftime("%Y-%m-%d")
         repo_root = _git(["rev-parse", "--show-toplevel"])
+        # Post-mortems are supervisor-level governance, not team-scoped.
         output_path = os.path.join(
-            repo_root, ".soren", "journal", today, "artifacts",
+            repo_root, ".soren", "journal", "supervisor", today, "artifacts",
             f"postmortem-{short_hash}.pdf",
         )
 

@@ -143,15 +143,22 @@ def extract_patterns_from_commit(commit_sha: str) -> list[dict]:
     return unique
 
 
-def extract_patterns_from_journal(date: str) -> list[dict]:
+def extract_patterns_from_journal(date: str, scope: str = "supervisor", team: Optional[str] = None) -> list[dict]:
     """Extract reusable patterns from a journal entry for the given date (YYYY-MM-DD).
 
     Looks for sections named: Key decisions, Lessons, What worked, Pattern,
     Reflection, Convention, Notes, Tips — and extracts their bullet points.
 
+    scope/team: which journal to read from — "supervisor" (default, the
+    single global journal) or "team" with a team prefix, mirroring
+    JournalService's scope model.
+
     Returns list of {pattern, source_commit, files, confidence}.
     """
-    journal_file = settings.soren_dir / "journal" / date / "journal.md"
+    if scope == "team" and team:
+        journal_file = settings.soren_dir / "journal" / "teams" / team / date / "journal.md"
+    else:
+        journal_file = settings.soren_dir / "journal" / "supervisor" / date / "journal.md"
     if not journal_file.exists():
         return []
 

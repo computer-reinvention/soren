@@ -12,7 +12,7 @@ The monitor daemon (`src/orchestrator/monitor.sh`) polls `/api/webhooks/health` 
 2. **Stage 2 — Targeted revert.** Run root-cause analysis (`tools/root-cause`), then `git revert HEAD --no-edit`, rebuild (uv sync + frontend build), restart, and smoke-test. If the revert doesn't restore health, it is undone.
 3. **Stage 3 — Full rollback.** Journal the failure context, back up `.soren/` runtime data, `git stash push` local changes (work is preserved, not deleted), `git reset --hard` to the last healthy commit (`.soren/.last_healthy_commit`, updated on every passing health check), rebuild, restart, and notify the supervisor via mailbox.
 
-Your tmux session and the journal survive rollbacks. Rollback records are written to `.soren/journal/YYYY-MM-DD/rollback-*.md`.
+Your tmux session and the journal survive rollbacks. Rollback records are written to `.soren/journal/supervisor/YYYY-MM-DD/rollback-*.md`.
 
 ## Rules for Self-Modifying Commits
 
@@ -62,7 +62,7 @@ with `SOREN_PROTECTED_OVERRIDE=1`.
 
 If the system rolled back your changes:
 
-1. **Read the rollback record**: `.soren/journal/YYYY-MM-DD/rollback-*.md` — it contains the error context, git status at failure time, and the commit rolled back to. The supervisor is also notified via mailbox.
+1. **Read the rollback record**: `.soren/journal/supervisor/YYYY-MM-DD/rollback-*.md` — it contains the error context, git status at failure time, and the commit rolled back to. The supervisor is also notified via mailbox.
 2. **Recover your work** — changes were stashed, not deleted:
    ```bash
    git stash list                 # find soren-auto-rollback-<timestamp>

@@ -104,7 +104,7 @@ Test focus: [specific areas]
 Passed: 12 tests
 Failed: 0
 Browser verified: login flow, dashboard
-Evidence: .soren/journal/.../screenshots/
+Evidence: .soren/journal/teams/<prefix>/.../attachments/
 "
 ```
 

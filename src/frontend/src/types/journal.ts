@@ -1,3 +1,14 @@
+// Journal storage is split into isolated scopes: a single global
+// "supervisor" journal, and one private journal per team
+// (.soren/journal/teams/<prefix>/). Every read/write endpoint accepts an
+// optional scope + team pair, defaulting to "supervisor".
+export type JournalScope = 'supervisor' | 'team';
+
+export interface JournalScopeParams {
+  scope?: JournalScope;
+  team?: string;
+}
+
 export interface JournalDayResponse {
   date: string;
   content: string;
@@ -6,6 +17,10 @@ export interface JournalDayResponse {
 
 export interface JournalDatesResponse {
   dates: string[];
+}
+
+export interface JournalTeamsResponse {
+  teams: string[];
 }
 
 export interface JournalSearchResult {
@@ -24,6 +39,10 @@ export interface JournalSearchResponse {
 export interface JournalEntryCreate {
   title: string;
   content: string;
+  project_id?: string;
+  tags?: string[];
+  scope?: JournalScope;
+  team?: string;
 }
 
 // Journal Intelligence types

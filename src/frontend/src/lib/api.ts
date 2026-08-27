@@ -1,7 +1,7 @@
 import type { AgentListResponse, Agent, ArchivedAgentSummary, ArchivedAgent } from '../types/agent';
 import type { MessageListResponse } from '../types/message';
 import type { AgentEventsResponse } from '../types/agent_event';
-import type { JournalDayResponse, JournalDatesResponse, JournalSearchResponse, RecurringIssuesResponse, WeeklySummaryResponse, CorrectionComplianceResponse } from '../types/journal';
+import type { JournalDayResponse, JournalDatesResponse, JournalSearchResponse, JournalTeamsResponse, JournalScopeParams, JournalEntryCreate, RecurringIssuesResponse, WeeklySummaryResponse, CorrectionComplianceResponse } from '../types/journal';
 import type { FilesystemResponse } from '../types/filesystem';
 import type { SessionListResponse, Session, SessionCreateRequest } from '../types/session';
 import type { ProjectList, Project, ProjectCreate, ProjectAgentsResponse } from '../types/project';
@@ -194,21 +194,45 @@ export const api = {
     return data.events_by_message;
   },
 
-  async getJournal(date?: string): Promise<JournalDayResponse> {
-    const params = date ? `?date=${date}` : '';
-    const res = await apiFetch(`${API_BASE}/api/journal${params}`);
+  async getJournal(date?: string, opts?: JournalScopeParams & { project?: string }): Promise<JournalDayResponse> {
+    const params = new URLSearchParams();
+    if (date) params.set('date', date);
+    if (opts?.project) params.set('project', opts.project);
+    if (opts?.scope) params.set('scope', opts.scope);
+    if (opts?.team) params.set('team', opts.team);
+    const qs = params.toString();
+    const res = await apiFetch(`${API_BASE}/api/journal${qs ? `?${qs}` : ''}`);
     if (!res.ok) throw new Error('Failed to fetch journal');
     return res.json();
   },
 
-  async getJournalDates(): Promise<JournalDatesResponse> {
-    const res = await apiFetch(`${API_BASE}/api/journal/dates`);
+  async getJournalDates(opts?: JournalScopeParams): Promise<JournalDatesResponse> {
+    const params = new URLSearchParams();
+    if (opts?.scope) params.set('scope', opts.scope);
+    if (opts?.team) params.set('team', opts.team);
+    const qs = params.toString();
+    const res = await apiFetch(`${API_BASE}/api/journal/dates${qs ? `?${qs}` : ''}`);
     if (!res.ok) throw new Error('Failed to fetch journal dates');
     return res.json();
   },
 
-  async searchJournal(query: string, limit = 20): Promise<JournalSearchResponse> {
+  // Team prefixes that have their own journal — populates the scope
+  // selector. Dashboard/oversight only; not used by any agent-facing tool.
+  async getJournalTeams(): Promise<JournalTeamsResponse> {
+    const res = await apiFetch(`${API_BASE}/api/journal/teams`);
+    if (!res.ok) throw new Error('Failed to fetch journal teams');
+    return res.json();
+  },
+
+  async searchJournal(
+    query: string,
+    limit = 20,
+    opts?: JournalScopeParams & { all?: boolean }
+  ): Promise<JournalSearchResponse> {
     const params = new URLSearchParams({ q: query, limit: String(limit) });
+    if (opts?.scope) params.set('scope', opts.scope);
+    if (opts?.team) params.set('team', opts.team);
+    if (opts?.all) params.set('all', 'true');
     const res = await apiFetch(`${API_BASE}/api/journal/search?${params}`);
     if (!res.ok) throw new Error('Failed to search journal');
     return res.json();
@@ -233,25 +257,31 @@ export const api = {
     return res.json();
   },
 
-  async getRecurringIssues(): Promise<RecurringIssuesResponse> {
-    const res = await apiFetch(`${API_BASE}/api/journal/recurring-issues`);
+  // team: narrow a supervisor/dashboard-level aggregate view to one team,
+  // rather than every team + the supervisor journal combined (the default).
+  async getRecurringIssues(team?: string): Promise<RecurringIssuesResponse> {
+    const params = team ? `?team=${encodeURIComponent(team)}` : '';
+    const res = await apiFetch(`${API_BASE}/api/journal/recurring-issues${params}`);
     if (!res.ok) throw new Error('Failed to fetch recurring issues');
     return res.json();
   },
 
-  async getCorrectionCompliance(): Promise<CorrectionComplianceResponse> {
-    const res = await apiFetch(`${API_BASE}/api/journal/correction-compliance`);
+  async getCorrectionCompliance(team?: string): Promise<CorrectionComplianceResponse> {
+    const params = team ? `?team=${encodeURIComponent(team)}` : '';
+    const res = await apiFetch(`${API_BASE}/api/journal/correction-compliance${params}`);
     if (!res.ok) throw new Error('Failed to fetch correction compliance');
     return res.json();
   },
 
-  async getWeeklySummary(weeksAgo = 0): Promise<WeeklySummaryResponse> {
-    const res = await apiFetch(`${API_BASE}/api/journal/weekly-summary?weeks_ago=${weeksAgo}`);
+  async getWeeklySummary(weeksAgo = 0, team?: string): Promise<WeeklySummaryResponse> {
+    const params = new URLSearchParams({ weeks_ago: String(weeksAgo) });
+    if (team) params.set('team', team);
+    const res = await apiFetch(`${API_BASE}/api/journal/weekly-summary?${params}`);
     if (!res.ok) throw new Error('Failed to fetch weekly summary');
     return res.json();
   },
 
-  async addJournalEntry(entry: { title: string; content: string }): Promise<{ success: boolean }> {
+  async addJournalEntry(entry: JournalEntryCreate): Promise<{ success: boolean }> {
     const res = await apiFetch(`${API_BASE}/api/journal/entry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -400,16 +430,6 @@ export const api = {
       method: 'POST',
     });
     if (!res.ok) throw new Error('Failed to activate project');
-    return res.json();
-  },
-
-  async getJournalForProject(date?: string, projectId?: string): Promise<JournalDayResponse> {
-    const params = new URLSearchParams();
-    if (date) params.set('date', date);
-    if (projectId) params.set('project', projectId);
-    const qs = params.toString();
-    const res = await apiFetch(`${API_BASE}/api/journal${qs ? `?${qs}` : ''}`);
-    if (!res.ok) throw new Error('Failed to fetch journal');
     return res.json();
   },
 

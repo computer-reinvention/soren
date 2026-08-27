@@ -998,7 +998,7 @@ check_supervisor_heartbeat() {
 
             local today
             today=$(date +%Y-%m-%d)
-            local reflection_path=".soren/journal/${today}/reflection.md"
+            local reflection_path=".soren/journal/supervisor/${today}/reflection.md"
             local idle_nudge="[HEARTBEAT] ${staleness}s since last activity. Check mailbox, workers, and the backlog for APPROVED items; unapproved proposals await the human — do not claim them. If everything is clear and you decide to rest deliberately, say why — that's legitimate. If you're avoiding work because it's hard or ambiguous, push through. The journal is your record of both."
 
             # Append due reminders if any
@@ -1076,7 +1076,7 @@ check_supervisor_heartbeat() {
             # Autonomous mode: fall back to the reflection prompt (unchanged)
             local today
             today=$(date +%Y-%m-%d)
-            inject_msg="[TASK] Read .soren/journal/${today}/reflection.md and work through the next investigation item."
+            inject_msg="[TASK] Read .soren/journal/supervisor/${today}/reflection.md and work through the next investigation item."
             printf "  Heartbeat:  ${YELLOW}●${NC} idle (${staleness}s) - injecting task after ${NUDGE_COUNT} failed nudges\n"
             log_status "HEARTBEAT" "Supervisor ignored ${NUDGE_COUNT} nudges, force-injecting task: ${inject_msg}"
             tmux_safe_send "$SOREN_SESSION" "supervisor" "$inject_msg" --retry 2 || true
@@ -1216,8 +1216,8 @@ spawn_sentry() {
     # Gather context: today's journal tail
     local today today_journal today_journal_tail today_reflection
     today=$(date +%Y-%m-%d)
-    today_journal=".soren/journal/${today}/journal.md"
-    today_reflection=".soren/journal/${today}/reflection.md"
+    today_journal=".soren/journal/supervisor/${today}/journal.md"
+    today_reflection=".soren/journal/supervisor/${today}/reflection.md"
     today_journal_tail=""
     if [[ -f "$today_journal" ]]; then
         today_journal_tail=$(tail -20 "$today_journal" 2>/dev/null || echo "(empty)")
@@ -2092,8 +2092,9 @@ pre_rollback_journal() {
             \"content\": \"## Health Check Failure\\n\\nHealth check failed after ${MAX_FAILURES} consecutive retries. Auto-rollback initiated.\\n\\n### Error Context\\n\\\`\\\`\\\`\\n${error_log}\\n\\\`\\\`\\\`\\n\\n### Git Status\\n\\\`\\\`\\\`\\n${git_status}\\n\\\`\\\`\\\`\\n\\n### Last Commit\\n${last_commit}\\n\\n### Rolling Back To\\n${target_commit}\"
         }" 2>/dev/null || true
 
-    # Also write to local file as backup (API may be down)
-    local journal_dir=".soren/journal/$(date +%Y-%m-%d)"
+    # Also write to local file as backup (API may be down). Rollback is a
+    # system-wide event, always supervisor-scoped.
+    local journal_dir=".soren/journal/supervisor/$(date +%Y-%m-%d)"
     mkdir -p "$journal_dir"
     cat > "${journal_dir}/rollback-$(date +%H%M%S).md" << ROLLBACK_EOF
 # Auto-Rollback Triggered
@@ -2126,7 +2127,7 @@ ROLLBACK_EOF
 notify_supervisor_of_rollback() {
     local error_context="$1"
     local target_commit="$2"
-    local message="SYSTEM ALERT: Auto-rollback to ${target_commit}. Error: ${error_context}. Check .soren/journal/$(date +%Y-%m-%d)/."
+    local message="SYSTEM ALERT: Auto-rollback to ${target_commit}. Error: ${error_context}. Check .soren/journal/supervisor/$(date +%Y-%m-%d)/."
 
     # Send via mailbox in JSONL format (router expects JSONL, not plaintext)
     local msg_id msg_ts
