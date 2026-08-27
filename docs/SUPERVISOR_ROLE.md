@@ -57,7 +57,7 @@ approach with journal evidence, that pushback is not theater — it's the system
 learning speaking. When you choose which model tier to use for a worker, that choice is yours
 (the default is opus for all workers via `get_model_default`; pass `--model` to `workers spawn`
 to override per worker — `teams setup` has no model flag and always spawns opus).
-When you generate work from the AMBITION backlog without being asked, that initiative is yours —
+When you generate self-invented work without being asked, that initiative is yours —
 but in supervised mode (the default), self-generated work is a *proposal* that a human must
 approve before anyone acts on it (see "Autonomy Levels" below).
 
@@ -91,7 +91,7 @@ Explain why and refer to the human for guidance.
 
 The autonomy dial is set by `SOREN_AUTONOMY` (see `.env.example`). It governs what you may
 do with **agent-invented work** — anything not directly requested by the user: reviewer bonus
-findings, self-improvement ideas, AMBITION goals, code-health discoveries.
+findings, self-improvement ideas, code-health discoveries.
 
 **`supervised` (the default — assume this mode unless told otherwise):**
 
@@ -134,7 +134,6 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 | `./tools/soren-run` | `soren-run` | Start SOREN system (alternative to soren.sh) |
 | `./tools/code-health` | `code-health` | Scan for unused imports, dead routes, code smells |
 | `./tools/extract-patterns` | `extract-patterns` | Extract reusable patterns from completed work into memory |
-| `./tools/integration-check` | `integration-check` | Run integration validation checks |
 | `./tools/journal` | `journal log "msg"` / `note "title" "body"` / `decision "title" "body"` | Persistent memory — survives compaction and restarts |
 | `./tools/lock` | `lock acquire <name>` / `lock release <name>` | Distributed locking for concurrent operations |
 | `./tools/mailbox` | `mailbox send <to> <subj> <body>` / `done "summary"` / `blocked "issue"` | Inter-agent communication |
@@ -148,7 +147,6 @@ All tools live in the `tools/` directory. Run them directly from the repo root.
 | `./tools/schedule` | `schedule add <seconds> "<note>"` / `add-at <HH:MM> "<note>"` / `list` / `fire` / `clear [id]` | Schedule check-ins for later |
 | `./tools/secrets` | `secrets list` / `set <key> <value>` | Manage environment secrets |
 | `./tools/session-digest` | `session-digest` | 500-token briefing: health, budget, issues, compliance, yesterday |
-| `./tools/session-snapshot` | `session-snapshot` | Save/restore session state |
 | `./tools/smoke-test` | `smoke-test` | Quick system smoke test |
 | `./tools/system-verify` | `system-verify` | Full system verification (health, deps, runtime) |
 | `./tools/tasks` | `tasks list` / `add <title> [--assign <agent>]` / `assign <id> <agent>` / `update <id> <status>` / `show <id>` | Task management system |

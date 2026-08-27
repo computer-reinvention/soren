@@ -21,4 +21,3 @@ No flags — it's a fixed briefing, not a configurable report. Output includes:
 
 - First thing at supervisor boot or after waking from sleep, before diving into the mailbox — gives you the "is anything on fire" picture in one shot
 - After a restart, to confirm health quickly without manually curling three different endpoints
-- Compare against `session-snapshot` (below): this is a human-readable *briefing*, that's a machine-readable *snapshot* saved to disk. Use this to orient yourself now; use `session-snapshot` when you need a JSON artifact another agent (e.g. after compaction) can read later.

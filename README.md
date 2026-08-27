@@ -166,7 +166,7 @@ Copy `.env.example` to `.env` and adjust as needed. Key settings:
 - `SOREN_SESSION` — tmux session name (default `soren`)
 - `SOREN_MAILBOX` — mailbox path (default `.soren/mailbox`)
 
-The supervisor reads its growth agenda from `.soren/AMBITION.md`, style conventions from `.soren/conventions.md` (templates for both live in `.soren/` — copy and customize), and behavioral preferences via `./tools/prefs` (stored in the `prefs` table of `.soren/soren.db`).
+The supervisor reads style conventions from `.soren/conventions.md` (a template lives in `.soren/` — copy and customize) and behavioral preferences via `./tools/prefs` (stored in the `prefs` table of `.soren/soren.db`).
 
 ## License
 

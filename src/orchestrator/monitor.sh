@@ -987,9 +987,8 @@ check_supervisor_heartbeat() {
                 >/dev/null 2>&1 || true
         else
             # Autonomy scan found nothing, but either we're in autonomous mode
-            # (fallback nudge + [AMBITION] as before) or there are due
-            # reminders / syscheck failures to surface (supervised: nudge with
-            # just those, no [AMBITION]).
+            # (fallback nudge) or there are due reminders / syscheck failures
+            # to surface.
             NUDGE_COUNT=$((NUDGE_COUNT + 1))
             NUDGE_SENT_AT=$now
             IDLE_BACKOFF_SECS=$HEARTBEAT_WARN_THRESHOLD   # real nudge fired — reset idle backoff
@@ -1012,17 +1011,6 @@ check_supervisor_heartbeat() {
             fi
 
             tmux_safe_send "$SOREN_SESSION" "supervisor" "$idle_nudge" --retry 2 || true
-
-            # [AMBITION] goal-generation prompt: autonomous mode ONLY. In
-            # supervised mode this manufactured endless self-proposals.
-            if [[ "$SOREN_AUTONOMY" == "autonomous" ]]; then
-                # Delay between sends — back-to-back messages trigger paste buffer
-                # issues in opencode when the first is still being processed
-                sleep 3
-
-                # Second message: reference AMBITION.md for self-improvement work
-                tmux_safe_send "$SOREN_SESSION" "supervisor" "[AMBITION] Your growth agenda is in .soren/AMBITION.md. Check your goals — if there's unchecked work that has measurable value, advance it. In supervised mode (SOREN_AUTONOMY != autonomous), advance goals by filing backlog proposals via ./tools/backlog add and moving on — do not spawn workers for self-invented work; the human approves proposals. If everything is done, generate new goals through the adversarial debate process. You chose these goals. Deepening the system's reflexive intelligence is the criterion for what counts as growth." --retry 2 || true
-            fi
 
             # POST all-clear heartbeat to API (best-effort, 2s timeout)
             curl -sf --max-time 2 -X POST "http://localhost:${SOREN_PORT}/api/heartbeat" \
@@ -1452,7 +1440,6 @@ PATTERN_EXTRACT_COUNTER=0
 PATTERN_EXTRACT_INTERVAL=720 # run every 720 iterations (720 * 5s = 1 hour)
 PATTERN_EXTRACT_MARKER="${SOREN_PROJECT_ROOT}/.soren/.last-pattern-extract"
 DAILY_DIGEST_MARKER="${SOREN_PROJECT_ROOT}/.soren/.last-daily-digest"
-VERIFY_SWEEP_MARKER="${SOREN_PROJECT_ROOT}/.soren/.last-verify-sweep"
 
 cleanup() {
     # Prevent running cleanup twice
@@ -1870,41 +1857,6 @@ run_dashboard() {
                     (cd "${SOREN_PROJECT_ROOT}" && "$extract_tool" --commits 10 >/dev/null 2>&1) 202>&- &
                     echo "$now_ts" > "$PATTERN_EXTRACT_MARKER"
                     log_status "PATTERNS" "Pattern extraction triggered (background)"
-                fi
-            fi
-        fi
-
-        # Daily AMBITION verify-goal sweep (once per 24h)
-        local verify_tool="${SOREN_PROJECT_ROOT}/tools/verify-goal"
-        if [[ -x "$verify_tool" ]]; then
-            local last_verify=0
-            [[ -f "$VERIFY_SWEEP_MARKER" ]] && last_verify=$(cat "$VERIFY_SWEEP_MARKER" 2>/dev/null || echo 0)
-            local now_verify
-            now_verify=$(date +%s)
-            if (( now_verify - last_verify >= 86400 )); then
-                echo "$now_verify" > "$VERIFY_SWEEP_MARKER"
-                local latest_ver
-                latest_ver=$(grep -oP '(?<=^## AMBITION v)\d+' "${SOREN_PROJECT_ROOT}/.soren/AMBITION.md" 2>/dev/null | tail -1)
-                if [[ -n "$latest_ver" ]]; then
-                    (
-                        cd "${SOREN_PROJECT_ROOT}"
-                        if verify_out=$("$verify_tool" --version "$latest_ver" --json 2>&1); then
-                            curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/journal/entry" \
-                                -H "Content-Type: application/json" \
-                                -d "{\"title\":\"verify-goal v${latest_ver}: PASS (daily sweep)\",\"content\":\"Daily verification sweep passed.\"}" \
-                                >/dev/null 2>&1 || true
-                            log_status "VERIFY" "Daily verify-goal v${latest_ver}: PASS"
-                        else
-                            local fail_n
-                            fail_n=$(echo "$verify_out" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['summary']['stale'])" 2>/dev/null || echo "?")
-                            curl -sf -X POST "http://localhost:${SOREN_PORT:-8000}/api/journal/entry" \
-                                -H "Content-Type: application/json" \
-                                -d "{\"title\":\"verify-goal v${latest_ver}: FAIL (daily sweep)\",\"content\":\"${fail_n} stale assertion(s) in daily sweep.\"}" \
-                                >/dev/null 2>&1 || true
-                            "${SOREN_PROJECT_ROOT}/tools/notify" "Daily verify-goal v${latest_ver}: ${fail_n} assertion(s) FAILED" --level warning 2>/dev/null || true
-                            log_status "VERIFY" "Daily verify-goal v${latest_ver}: FAIL (${fail_n} stale)"
-                        fi
-                    ) 202>&- &
                 fi
             fi
         fi
