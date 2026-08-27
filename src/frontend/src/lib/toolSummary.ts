@@ -59,6 +59,12 @@ export function getToolSummary(toolName: string, toolInput?: unknown): string {
       const path = input.notebook_path as string;
       return path ? `Notebook ${shortenPath(path)}` : 'NotebookEdit';
     }
+    case 'question': {
+      // opencode's built-in question tool: { questions: [{ question, header, options }] }
+      const questions = input.questions as Array<{ question?: string }> | undefined;
+      const first = questions?.[0]?.question;
+      return first ? `Question: ${truncate(first, 60)}` : 'Question';
+    }
     default:
       return toolName;
   }
@@ -79,6 +85,11 @@ export function getToolLabel(toolName: string): string {
     WebFetch: 'Fetching web',
     WebSearch: 'Searching web',
     AskUserQuestion: 'Waiting for input',
+    // opencode's actual built-in tool name is lowercase "question" (the
+    // capitalized "AskUserQuestion" above doesn't match anything real,
+    // confirmed against live agent_events rows) — kept both rather than
+    // replacing, in case something else really does use that name.
+    question: 'Waiting for input',
     NotebookEdit: 'Editing notebook',
   };
   return labels[toolName] || toolName;

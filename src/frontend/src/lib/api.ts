@@ -32,6 +32,31 @@ export interface BudgetResponse {
   agents: BudgetAgentUsage[];
 }
 
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface PendingQuestionItem {
+  question: string;
+  header?: string;
+  /** True if this question accepts multiple selected options at once. */
+  multiple?: boolean;
+  options: QuestionOption[];
+}
+
+export interface PendingQuestion {
+  call_id: string;
+  /** opencode's `question` tool accepts an array of questions per call,
+   * though in practice every real example observed so far has exactly one. */
+  questions: PendingQuestionItem[];
+}
+
+export interface PendingQuestionResponse {
+  agent_id: string;
+  pending_question: PendingQuestion | null;
+}
+
 export interface HealthResponse {
   status: 'healthy' | 'degraded';
   api: string;
@@ -108,6 +133,12 @@ export const api = {
       method: 'POST',
     });
     if (!res.ok) throw new Error('Failed to compact agent');
+  },
+
+  async getPendingQuestion(agentId: string): Promise<PendingQuestionResponse> {
+    const res = await apiFetch(`${API_BASE}/api/agents/${agentId}/pending-question`);
+    if (!res.ok) throw new Error('Failed to fetch pending question');
+    return res.json();
   },
 
   async getAgentTerminal(agentId: string, lines = 50): Promise<{ agent_id: string; output: string; lines: number }> {

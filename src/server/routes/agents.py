@@ -10,7 +10,7 @@ import re
 import uuid
 
 from ..config import settings
-from ..models.agent import Agent, AgentList, AgentMessage
+from ..models.agent import Agent, AgentList, AgentMessage, AgentStatus
 from ..services.auth import decode_token
 from ..services.ws_auth import authenticate_ws
 from ..models.message import Message, MessageType
@@ -18,6 +18,7 @@ from ..services.agent_manager import agent_manager
 from ..services.tmux_service import tmux_service, TmuxDeliveryError
 from ..services.mailbox import mailbox_service
 from ..services.agent_registry import agent_registry
+from ..services import opencode_questions
 from ..services.conversation_store import (
     conversation_store,
     ArchivedAgent,
@@ -338,6 +339,43 @@ async def send_message_to_agent(agent_id: str, message: AgentMessage, request: R
         "mention_routed_to": routed_to,
         "mention_errors": mention_errors,
     }
+
+
+@router.get("/{agent_id}/pending-question")
+async def get_pending_question(agent_id: str):
+    """A pending opencode `question` tool call for this agent, if any.
+
+    opencode's built-in `question` tool blocks synchronously in the
+    agent's own TUI until answered — SOREN's own event pipeline never
+    sees it while pending (the bridge plugin only fires an event once a
+    tool *completes*), so an autonomous agent with nobody at the terminal
+    would otherwise have this just sit there invisibly. This reads the
+    live state directly from opencode's own session transcript instead
+    (services/opencode_questions.py) rather than adding a new event.
+
+    A sleeping agent has no live opencode process, so it can't have a
+    question genuinely blocking on an answer right now — skip the lookup
+    entirely rather than reading stale transcript data from before it
+    slept.
+
+    Answering: send the chosen option's label as a normal message via
+    the existing POST /{agent_id}/message endpoint above — opencode
+    accepts that as the answer while the question is pending, so no
+    separate answer-delivery endpoint is needed.
+    """
+    agent = await agent_manager.get_agent(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    if agent.status == AgentStatus.SLEEPING:
+        return {"agent_id": agent_id, "pending_question": None}
+
+    session_id = agent_registry.latest_session_id(agent_id)
+    if not session_id:
+        return {"agent_id": agent_id, "pending_question": None}
+
+    pending = opencode_questions.get_pending_question(session_id)
+    return {"agent_id": agent_id, "pending_question": pending}
 
 
 @router.post("/{agent_id}/interrupt")

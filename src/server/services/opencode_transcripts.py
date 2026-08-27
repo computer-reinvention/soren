@@ -53,7 +53,13 @@ def _db_path() -> Path:
     return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
 
 
-def _connect() -> sqlite3.Connection | None:
+def connect() -> sqlite3.Connection | None:
+    """Read-only connection to opencode's own session database, or None if
+    it's missing/unreadable. Public — other modules reading different
+    tables from the same database (e.g. opencode_questions.py, reading
+    `part` instead of `session`/`message`) share this rather than each
+    re-implementing the same open/error-handling logic.
+    """
     path = _db_path()
     if not path.exists():
         return None
@@ -83,7 +89,7 @@ def get_session_costs(session_ids: list[str]) -> dict[str, dict]:
     """
     if not session_ids:
         return {}
-    conn = _connect()
+    conn = connect()
     if conn is None:
         return {}
     try:
@@ -142,7 +148,7 @@ def get_daily_real_cost(directory: str) -> dict[str, float]:
 
 
 def _query_daily_real_cost(directory: str) -> dict[str, float]:
-    conn = _connect()
+    conn = connect()
     if conn is None:
         return {}
     try:

@@ -3,6 +3,7 @@ import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { useAgentEventStore } from '@/stores/agentEventStore';
 import { api } from '@/lib/api';
 import { useMessages } from '@/hooks/useMessages';
+import { usePendingQuestion } from '@/hooks/usePendingQuestion';
 import { useAuthStore } from '@/stores/authStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useAgents } from '@/hooks/useAgents';
@@ -16,6 +17,7 @@ import { ChatHeader } from './ChatHeader';
 import { InboxView } from './InboxView';
 import { AgentActivityIndicator } from './AgentActivityIndicator';
 import { WorkerConfirmModal } from './WorkerConfirmModal';
+import { QuestionCard } from './QuestionCard';
 import { AgentLog } from '@/components/agents/AgentLog';
 
 interface ChatPanelProps {
@@ -143,6 +145,23 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
     },
   });
 
+  // Pending opencode `question` tool call (multi-choice prompt the agent
+  // is blocked waiting on) — see hooks/usePendingQuestion.ts and
+  // services/opencode_questions.py for why this needs its own poll
+  // rather than piggybacking on the WebSocket event stream.
+  const { data: pendingQuestionData } = usePendingQuestion(targetAgent);
+  const answerQuestionMutation = useMutation({
+    // Answering is just sending a normal chat message with the chosen
+    // option's label as the content — opencode accepts that as the
+    // answer while the question is pending, so this reuses the exact
+    // same delivery path as any other message instead of a dedicated
+    // answer-delivery endpoint.
+    mutationFn: (answer: string) => api.sendMessageToAgent(targetAgent, answer),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['pending-question', targetAgent] });
+    },
+  });
+
   const [interruptedAt, setInterruptedAt] = useState<number | null>(null);
   const [interruptError, setInterruptError] = useState<string | null>(null);
   const interruptMutation = useMutation({
@@ -256,6 +275,17 @@ export function ChatPanel({ agentId: selectedAgentId }: ChatPanelProps) {
 
       {/* Activity Indicator - shows when agent is working */}
       <AgentActivityIndicator agentId={targetAgent} />
+
+      {/* Pending question — opencode's question tool blocks the agent
+          until answered, and was previously invisible in the dashboard
+          entirely (plaintext-only rendering never showed the options). */}
+      {pendingQuestionData?.pending_question && (
+        <QuestionCard
+          question={pendingQuestionData.pending_question}
+          onAnswer={(answer) => answerQuestionMutation.mutate(answer)}
+          isSubmitting={answerQuestionMutation.isPending}
+        />
+      )}
 
       {/* Input */}
       <ChatInput

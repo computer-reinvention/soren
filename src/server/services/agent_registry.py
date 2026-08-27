@@ -401,10 +401,15 @@ class AgentRegistry:
             self._write_json_cache()
         return stale
 
-    def _latest_session_id(self, agent_id: str) -> Optional[str]:
+    def latest_session_id(self, agent_id: str) -> Optional[str]:
         """Most recent opencode session_id recorded for this agent in
         agent_events, or None if it's never posted one (e.g. it slept
-        before its first PostToolUse/Stop event landed)."""
+        before its first PostToolUse/Stop event landed).
+
+        Public: used by mark_sleeping() below, and by routes/agents.py's
+        pending-question endpoint to know which opencode session to read
+        the agent's live transcript from (services/opencode_questions.py).
+        """
         try:
             row = self._conn.execute(
                 "SELECT session_id FROM agent_events WHERE agent_id = ? "
@@ -449,7 +454,7 @@ class AgentRegistry:
         # must never route HTTP messages to a different agent later.
         entry.pop("oc_port", None)
 
-        session_id = self._latest_session_id(key)
+        session_id = self.latest_session_id(key)
         if session_id:
             entry["session_id"] = session_id
         elif not entry.get("session_id"):
