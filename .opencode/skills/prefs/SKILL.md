@@ -43,16 +43,9 @@ Ten seconds, no excuse to skip it:
 - `journal_detail` directly controls journaling frequency — see the `journal` skill; at 1-3 only log major events, at 7-10 log everything including routine steps
 - `humor` shapes tone in user-facing messages, not code comments or commit messages
 
-## Emitting Alerts (`alertness`)
+## `alertness` Controls Notification Frequency
 
-`alertness` governs how often you should surface something via
-`./tools/notify` (appends to `.soren/notifications.log` by default — swap
-in a real delivery channel if one's configured):
-```bash
-./tools/notify "Deploy finished successfully"
-./tools/notify "Production error rate spiking" --level alert
-```
-Low `alertness`: only notify on genuinely important events. High `alertness`: notify liberally on progress too.
+`alertness` governs how often you should surface something via `./tools/notify` — see the `notify` skill for the actual command and delivery details.
 
 ## When the Human Asks for a Behavior Change
 
