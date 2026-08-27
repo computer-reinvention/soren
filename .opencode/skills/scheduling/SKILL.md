@@ -15,24 +15,7 @@ Two tools, both **one-shot** (neither recurs — SOREN has no cron):
 | After firing | stays a task (sent-once logging via `.soren/.reminder-sent-ids`) | row deleted from the `schedule` table |
 | Good for | "check the cert renewal on the 1st" | "check if worker-X finished in 30 min" |
 
-## remind — date-based reminder tasks
-
-```bash
-./tools/remind "Rotate webhook secret" "2026-09-01"
-./tools/remind "Follow up on flaky test" "2026-08-25" "tests/test_agents.py::test_spawn intermittent"
-```
-
-Creates a task with `tags: ["reminder"]` and `due_date`. Requires the server running (posts to `http://localhost:${SOREN_PORT}/api/tasks`).
-
-## schedule — timed check-ins
-
-```bash
-./tools/schedule add 1800 "Review sup-todo-backend's test results"   # in N seconds
-./tools/schedule add-at 14:00 "Run full test suite before EOD"       # HH:MM today (past → tomorrow)
-./tools/schedule list                                                 # pending, with countdowns
-./tools/schedule clear s_abc123                                       # one item (or all with no id)
-./tools/schedule fire                                                 # used by autonomy-check — don't call manually
-```
+Each tool has its own skill with the full command reference — load the `remind` skill or the `schedule` skill for the exact syntax. This skill covers the concepts shared between them: when to reach for one vs. the other, and the delivery mechanics both share.
 
 ## Delivery Mechanics — when they actually reach an agent
 

@@ -98,20 +98,9 @@ empty commits and false no-op claims are REVISE/BLOCK material.
 
 ## CLI reference — tools/verifications
 
-```bash
-./tools/verifications recent [N]              # last N verification events
-                                              # (default 20): time, agent,
-                                              # outcome, detail
-./tools/verifications pending                 # agents with active retry
-                                              # counters (unresolved FIX-REQUESTs)
-./tools/verifications latches                 # escalation latches: agent,
-                                              # task key, age
-./tools/verifications clear-latch <agent> [key]  # supervisor unblock path
-```
-
-Read-only except `clear-latch`. Env: `SOREN_HOME` (soren root), `SOREN_DB`
-(consolidated-DB path override — the same sandboxing override
-verify-done.sh honors).
+The `verifications` skill covers the full command reference (`recent`,
+`pending`, `latches`, `clear-latch`) for inspecting and clearing this
+pipeline's state — load that skill for exact syntax.
 
 ## Lifecycle context
 

@@ -33,43 +33,13 @@ curl -sf -X POST http://localhost:8000/api/memory/search \
 - `GET /api/memory/stats` — totals by source_type and project
 - Results include `source_path` — read the original journal/artifact when a hit looks relevant
 
-## CLI Reference
+## The Three Tools
 
-### memory-index
+Each has its own skill with the full command reference — load whichever is relevant:
 
-```bash
-./tools/memory-index                       # index SOREN journal, today + yesterday (default)
-./tools/memory-index --date 2026-08-19    # one specific date
-./tools/memory-index --all                 # all journal dates
-./tools/memory-index --project <id>        # one project (journal, or docs fallback)
-./tools/memory-index --all-projects        # every active project in projects.json
-./tools/memory-index --with-patterns       # also run extract-patterns after (self mode only)
-```
-
-Runs automatically from the monitor loop (`src/orchestrator/monitor.sh:1691`), so manual runs are only needed for backfills (`--all`) and new projects.
-
-### extract-patterns
-
-```bash
-./tools/extract-patterns                   # today's journal + last 5 commits
-./tools/extract-patterns --commits 20      # last N commits
-./tools/extract-patterns --date 2026-08-19 # one journal date only
-./tools/extract-patterns --all             # all journal dates + last 20 commits
-```
-
-Runs hourly from the monitor loop (`monitor.sh:1729`, guarded by a 50-minute marker). Also exposed as `POST /api/memory/extract-patterns`.
-
-### prune-lessons
-
-Prunes stale dated lessons from the **`## Accumulated Knowledge` sections of spawned role files** (`.soren/worker-contexts/*-role.md` — the entries verify-done auto-appends). It does not touch the memory DB or `templates/team/knowledge/`.
-
-```bash
-./tools/prune-lessons            # dry run: shows what would be pruned
-./tools/prune-lessons --apply    # remove stale entries
-./tools/prune-lessons --json     # machine-readable summary
-```
-
-**Pruning policy** (from the code): a lesson is pruned when it is **>7 days old AND has fewer than 2 confirmations**. A lesson containing `confirmed Nx` with N≥2 is kept regardless of age — so re-confirm lessons that keep proving true. `tools/system-verify` flags stale lessons as a failing check.
+- **`memory-index`** skill — chunks journal.md/artifacts into the memories table. Runs automatically ~every 50s; manual runs are for backfills and new projects.
+- **`extract-patterns`** skill — mines commits + journal sections for pattern-type memories. Runs hourly automatically.
+- **`prune-lessons`** skill — removes stale role-file lessons (a *different* store from the memories table — don't confuse the two).
 
 ## Memory vs Knowledge — Which One?
 
